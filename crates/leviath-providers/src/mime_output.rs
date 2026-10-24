@@ -124,6 +124,58 @@ pub fn message_audio_blob(
     Some(Blob::new(mime_type, bytes).named(format!("audio-{sha12}")))
 }
 
+/// Assemble base64 audio pieces from an OpenAI-shaped audio stream into one
+/// stored part. Providers may emit each piece as its own padded base64 value,
+/// or split one base64 value across several deltas; accept either framing.
+pub fn streamed_audio_blob(
+    chunks: &[String],
+    requested_mime: Option<&str>,
+    returned_mime: Option<&str>,
+    format: Option<&str>,
+) -> Option<Blob> {
+    if chunks.is_empty() {
+        return None;
+    }
+
+    let returned_mime =
+        returned_mime.filter(|mime| mime.starts_with("audio/") && !mime.ends_with("/*"));
+    let declared_mime =
+        requested_mime.filter(|mime| mime.starts_with("audio/") && !mime.ends_with("/*"));
+    let format_mime = format
+        .filter(|format| !format.trim().is_empty())
+        .map(|format| {
+            let format = format.trim();
+            if format.contains('/') {
+                format.to_string()
+            } else {
+                format!("audio/{format}")
+            }
+        });
+    let mime = returned_mime
+        .or(declared_mime)
+        .map(str::to_string)
+        .or(format_mime)?;
+    let mime_type = MimeType::parse(&mime).ok()?;
+
+    let individually_decoded = chunks
+        .iter()
+        .map(|chunk| base64::engine::general_purpose::STANDARD.decode(chunk.trim()))
+        .collect::<Result<Vec<_>, _>>()
+        .ok();
+    let bytes = individually_decoded
+        .map(|decoded| decoded.into_iter().flatten().collect())
+        .or_else(|| {
+            base64::engine::general_purpose::STANDARD
+                .decode(chunks.concat().trim())
+                .ok()
+        })?;
+    if bytes.is_empty() {
+        return None;
+    }
+    let sha12: String = sha256_hex(&bytes).chars().take(12).collect();
+    Some(Blob::new(mime_type, bytes).named(format!("audio-{sha12}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,6 +303,52 @@ mod tests {
         )
         .unwrap();
         assert_eq!(generic.mime_type.as_str(), "audio/x-future-codec");
+    }
+
+    #[test]
+    fn streamed_audio_joins_independent_or_split_base64_chunks() {
+        let independent = streamed_audio_blob(
+            &["UklG".to_string(), "Rg==".to_string()],
+            Some("audio/wav"),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(independent.bytes, b"RIFF");
+        assert_eq!(independent.mime_type.as_str(), "audio/wav");
+
+        let split = streamed_audio_blob(
+            &["Ukl".to_string(), "GRg==".to_string()],
+            None,
+            None,
+            Some("wav"),
+        )
+        .unwrap();
+        assert_eq!(split.bytes, b"RIFF");
+        assert_eq!(split.mime_type.as_str(), "audio/wav");
+
+        let direct_mime =
+            streamed_audio_blob(&["AQID".to_string()], None, None, Some("audio/x-direct")).unwrap();
+        assert_eq!(direct_mime.mime_type.as_str(), "audio/x-direct");
+
+        let returned = streamed_audio_blob(
+            &["AQID".to_string()],
+            Some("audio/x-requested"),
+            Some("audio/x-returned"),
+            Some("wav"),
+        )
+        .unwrap();
+        assert_eq!(returned.mime_type.as_str(), "audio/x-returned");
+    }
+
+    #[test]
+    fn streamed_audio_rejects_empty_untyped_and_malformed_chunks() {
+        assert!(streamed_audio_blob(&[], Some("audio/wav"), None, None).is_none());
+        assert!(streamed_audio_blob(&["AQID".to_string()], None, None, None).is_none());
+        assert!(streamed_audio_blob(&["!!".to_string()], Some("audio/wav"), None, None).is_none());
+        assert!(streamed_audio_blob(&["".to_string()], Some("audio/wav"), None, None).is_none());
+        assert!(streamed_audio_blob(&["AQID".to_string()], None, None, Some(" ")).is_none());
+        assert!(streamed_audio_blob(&["AQID".to_string()], None, Some("audio/"), None).is_none());
     }
 
     #[test]

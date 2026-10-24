@@ -320,6 +320,9 @@ impl OpenRouterProvider {
             });
         if wants_audio {
             body["modalities"] = serde_json::json!(["text", "audio"]);
+            body["audio"] = serde_json::json!({
+                "format": request_audio_format(request),
+            });
         }
 
         // Ask the gateway to report what the call cost. Without this it returns
@@ -755,6 +758,14 @@ impl OpenRouterProvider {
 #[cfg(feature = "openrouter")]
 impl Provider for OpenRouterProvider {
     async fn infer(&self, request: &InferenceRequest) -> Result<InferenceResponse> {
+        // OpenRouter requires `stream: true` for audio modalities. Reuse the
+        // streaming transport here too so callers of the buffered trait method
+        // receive the same assembled audio part instead of a gateway 400.
+        if request_wants_audio(request) {
+            let stream = self.infer_stream(request).await?;
+            return crate::provider::stream::collect_stream(stream).await;
+        }
+
         tracing::debug!(model = %request.model, "Calling OpenRouter API");
 
         if let Some(limiter) = &self.rate_limiter {
@@ -791,33 +802,6 @@ impl Provider for OpenRouterProvider {
         &self,
         request: &InferenceRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>> {
-        // Audio outputs arrive as one base64 payload on the completed message,
-        // not as playable per-token fragments. Parse audio requests through the
-        // buffered endpoint and expose the finished reply as one stream item.
-        if request_wants_audio(request) {
-            let response = self.infer(request).await?;
-            let chunk = StreamChunk {
-                delta: response.content,
-                tool_calls: response
-                    .tool_calls
-                    .iter()
-                    .enumerate()
-                    .map(|(index, call)| crate::provider::ToolCallDelta {
-                        index,
-                        id: Some(call.id.clone()),
-                        name: Some(call.name.clone()),
-                        arguments_delta: call.arguments.to_string(),
-                        thought_signature: call.thought_signature.clone(),
-                    })
-                    .collect(),
-                tokens: Some(response.tokens_used),
-                finish_reason: Some(response.finish_reason),
-                reasoning: response.reasoning,
-                parts: response.parts,
-            };
-            return Ok(Box::pin(tokio_stream::once(Ok(chunk))));
-        }
-
         tracing::debug!(model = %request.model, "Calling OpenRouter API (streaming)");
 
         if let Some(limiter) = &self.rate_limiter {
@@ -839,7 +823,20 @@ impl Provider for OpenRouterProvider {
         // Reuse OpenAI SSE parser since the format is identical
         let peer = leviath_net::read_caps::peer_of(&response);
         let byte_stream = response.bytes_stream();
-        let stream = openai_sse_stream(byte_stream).sent_by(peer);
+        let stream = if request_wants_audio(request) {
+            let mut audio = AudioStreamAccumulator::new(
+                request_audio_mime(request),
+                &request_audio_format(request),
+            );
+            crate::provider::stream::FramedStream::new(
+                byte_stream,
+                Box::new(move |buffer| openrouter_audio_sse_event(buffer, &mut audio)),
+                None,
+            )
+            .sent_by(peer)
+        } else {
+            openai_sse_stream(byte_stream).sent_by(peer)
+        };
 
         Ok(crate::rate_limit::meter_stream(
             self.rate_limiter.as_ref(),
@@ -1074,6 +1071,114 @@ fn request_audio_mime(request: &InferenceRequest) -> Option<&str> {
         .iter()
         .filter_map(serde_json::Value::as_str)
         .find(|mime| mime.starts_with("audio/") && !mime.ends_with("/*"))
+}
+
+#[cfg(feature = "openrouter")]
+fn request_audio_format(request: &InferenceRequest) -> String {
+    let Some(mime) = request_audio_mime(request) else {
+        // OpenRouter's audio-output API needs a format. A wildcard stage has
+        // no preferred container, so ask for WAV and use the returned type if
+        // the gateway reports something more specific.
+        return "wav".to_string();
+    };
+
+    let extension = leviath_core::mime::MimeType::parse(mime)
+        .ok()
+        .and_then(|mime_type| {
+            leviath_core::mime::MimeRegistry::builtin()
+                .info(&mime_type)
+                .extensions
+                .first()
+                .cloned()
+        });
+    extension.unwrap_or_else(|| mime.strip_prefix("audio/").unwrap_or("wav").to_string())
+}
+
+#[cfg(feature = "openrouter")]
+#[derive(Default)]
+struct AudioStreamAccumulator {
+    requested_mime: Option<String>,
+    returned_mime: Option<String>,
+    format: Option<String>,
+    chunks: Vec<String>,
+    emitted: bool,
+}
+
+#[cfg(feature = "openrouter")]
+impl AudioStreamAccumulator {
+    fn new(requested_mime: Option<&str>, format: &str) -> Self {
+        Self {
+            requested_mime: requested_mime.map(str::to_string),
+            format: Some(format.to_string()),
+            ..Self::default()
+        }
+    }
+
+    fn observe(&mut self, event: &serde_json::Value) {
+        let Some(audio) = event.pointer("/choices/0/delta/audio") else {
+            return;
+        };
+        if let Some(data) = audio.get("data").and_then(serde_json::Value::as_str) {
+            self.chunks.push(data.to_string());
+        }
+        if let Some(mime) = audio
+            .get("mime_type")
+            .or_else(|| audio.get("content_type"))
+            .and_then(serde_json::Value::as_str)
+        {
+            self.returned_mime = Some(mime.to_string());
+        }
+        if let Some(format) = audio.get("format").and_then(serde_json::Value::as_str) {
+            self.format = Some(format.to_string());
+        }
+    }
+
+    fn take_blob(&mut self) -> Option<leviath_core::mime::Blob> {
+        if self.emitted {
+            return None;
+        }
+        let blob = crate::mime_output::streamed_audio_blob(
+            &self.chunks,
+            self.requested_mime.as_deref(),
+            self.returned_mime.as_deref(),
+            self.format.as_deref(),
+        );
+        self.emitted = blob.is_some();
+        blob
+    }
+}
+
+#[cfg(feature = "openrouter")]
+fn openrouter_audio_sse_event(
+    buffer: &mut String,
+    audio: &mut AudioStreamAccumulator,
+) -> Option<Option<Result<StreamChunk>>> {
+    let event = leviath_net::sse::next_event(buffer)?;
+    let data = event.data.trim();
+    if data == "[DONE]" {
+        return Some(audio.take_blob().map(|blob| {
+            Ok(StreamChunk {
+                delta: String::new(),
+                tool_calls: Vec::new(),
+                tokens: None,
+                finish_reason: None,
+                reasoning: None,
+                parts: vec![blob],
+            })
+        }));
+    }
+
+    let json = serde_json::from_str::<serde_json::Value>(data).ok()?;
+    let mut framed = format!("data: {data}\n\n");
+    let mut parsed = crate::openai_compat::parse_openai_sse_event(&mut framed)?;
+    audio.observe(&json);
+    if let Some(Ok(chunk)) = &mut parsed
+        && chunk.finish_reason.is_some()
+        && let Some(blob) = audio.take_blob()
+    {
+        chunk.parts.push(blob);
+    }
+    Some(parsed)
 }
 
 #[cfg(feature = "openrouter")]
@@ -2270,6 +2375,69 @@ mod tests {
         assert_eq!(provider.base_url, "https://custom.example.com");
     }
 
+    #[test]
+    fn streamed_audio_is_emitted_on_done_when_no_finish_event_carries_it() {
+        let mut audio = AudioStreamAccumulator::new(None, "wav");
+        let mut event = "data: {\"choices\":[{\"delta\":{\"audio\":{\"data\":\"AQID\",\"mime_type\":\"audio/x-future-model\"}}}]}\n\n".to_string();
+        let first = openrouter_audio_sse_event(&mut event, &mut audio)
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(first.parts.is_empty());
+
+        let mut done = "data: [DONE]\n\n".to_string();
+        let final_chunk = openrouter_audio_sse_event(&mut done, &mut audio)
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(final_chunk.parts.len(), 1);
+        assert_eq!(
+            final_chunk.parts[0].mime_type.as_str(),
+            "audio/x-future-model"
+        );
+        assert_eq!(final_chunk.parts[0].bytes, [1, 2, 3]);
+        assert!(openrouter_audio_sse_event(&mut done, &mut audio).is_none());
+    }
+
+    #[test]
+    fn streamed_audio_done_without_a_payload_ends_cleanly() {
+        let mut audio = AudioStreamAccumulator::new(Some("audio/wav"), "wav");
+        let mut done = "data: [DONE]\n\n".to_string();
+        assert!(
+            openrouter_audio_sse_event(&mut done, &mut audio)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn streamed_audio_delta_without_data_and_malformed_events_are_skipped() {
+        let mut audio = AudioStreamAccumulator::new(None, "wav");
+        let mut no_data =
+            "data: {\"choices\":[{\"delta\":{\"audio\":{\"mime_type\":\"audio/wav\"}}}]}\n\n"
+                .to_string();
+        assert!(
+            openrouter_audio_sse_event(&mut no_data, &mut audio)
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .parts
+                .is_empty()
+        );
+        let mut done = "data: [DONE]\n\n".to_string();
+        assert!(
+            openrouter_audio_sse_event(&mut done, &mut audio)
+                .unwrap()
+                .is_none()
+        );
+
+        let mut malformed = "data: not-json\n\n".to_string();
+        assert!(openrouter_audio_sse_event(&mut malformed, &mut audio).is_none());
+
+        let mut unsupported = "data: {}\n\n".to_string();
+        assert!(openrouter_audio_sse_event(&mut unsupported, &mut audio).is_none());
+    }
+
     fn simple_request() -> InferenceRequest {
         InferenceRequest {
             system: vec![],
@@ -2428,21 +2596,31 @@ mod tests {
 
     #[tokio::test]
     async fn audio_stage_requests_audio_and_returns_the_completed_audio_part() {
-        let body = br#"{"choices":[{"message":{"content":"instrumental","audio":{"data":"UklGRg==","format":"wav"},"tool_calls":[{"id":"call_1","type":"function","function":{"name":"submit_output","arguments":"{}"}}]},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#;
+        let body = b"data: {\"choices\":[{\"delta\":{\"content\":\"instrumental\",\"audio\":{\"data\":\"UklG\",\"format\":\"wav\"}}}]}\n\ndata: {\"choices\":[{\"delta\":{\"audio\":{\"data\":\"Rg==\"},\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"submit_output\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n";
         let (url, seen) = leviath_testkit::spawn_mock_recorder(200, "OK", body.to_vec()).await;
         let provider = provider_with_url(url);
         let mut request = simple_request();
         request.extra = serde_json::json!({ "output_mimes": ["audio/wav"] });
         let mut stream = provider.infer_stream(&request).await.unwrap();
         use tokio_stream::StreamExt;
-        let chunk = stream.next().await.unwrap().unwrap();
-        assert_eq!(chunk.parts.len(), 1);
-        assert_eq!(chunk.parts[0].mime_type.as_str(), "audio/wav");
-        assert_eq!(chunk.parts[0].bytes, b"RIFF");
-        assert_eq!(chunk.tool_calls.len(), 1);
-        assert_eq!(chunk.tool_calls[0].id.as_deref(), Some("call_1"));
-        assert_eq!(chunk.tool_calls[0].name.as_deref(), Some("submit_output"));
-        assert_eq!(chunk.tool_calls[0].arguments_delta, "{}");
+        let mut chunks = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            chunks.push(chunk.unwrap());
+        }
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].delta, "instrumental");
+        assert!(chunks[0].parts.is_empty());
+        let final_chunk = &chunks[1];
+        assert_eq!(final_chunk.parts.len(), 1);
+        assert_eq!(final_chunk.parts[0].mime_type.as_str(), "audio/wav");
+        assert_eq!(final_chunk.parts[0].bytes, b"RIFF");
+        assert_eq!(final_chunk.tool_calls.len(), 1);
+        assert_eq!(final_chunk.tool_calls[0].id.as_deref(), Some("call_1"));
+        assert_eq!(
+            final_chunk.tool_calls[0].name.as_deref(),
+            Some("submit_output")
+        );
+        assert_eq!(final_chunk.tool_calls[0].arguments_delta, "{}");
         let sent = leviath_core::sync::lock(&seen)[0].clone();
         let request_json: serde_json::Value = serde_json::from_str(
             sent.split("\r\n\r\n")
@@ -2454,6 +2632,48 @@ mod tests {
             request_json["modalities"],
             serde_json::json!(["text", "audio"])
         );
+        assert_eq!(request_json["audio"]["format"], "wav");
+        assert_eq!(request_json["stream"], true);
+    }
+
+    #[tokio::test]
+    async fn buffered_audio_inference_also_uses_the_streaming_transport() {
+        let body = b"data: {\"choices\":[{\"delta\":{\"audio\":{\"data\":\"UklGRg==\",\"format\":\"wav\"}}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+        let (url, seen) = leviath_testkit::spawn_mock_recorder(200, "OK", body.to_vec()).await;
+        let provider = provider_with_url(url);
+        let mut request = simple_request();
+        request.extra = serde_json::json!({ "output_mimes": ["audio/*"] });
+
+        let response = provider.infer(&request).await.unwrap();
+        assert_eq!(response.parts.len(), 1);
+        assert_eq!(response.parts[0].mime_type.as_str(), "audio/wav");
+        assert_eq!(response.parts[0].bytes, b"RIFF");
+
+        let sent = leviath_core::sync::lock(&seen)[0].clone();
+        let request_json: serde_json::Value = serde_json::from_str(
+            sent.split("\r\n\r\n")
+                .nth(1)
+                .expect("recorded request body"),
+        )
+        .expect("valid JSON request body");
+        assert_eq!(request_json["stream"], true);
+        assert_eq!(
+            request_json["modalities"],
+            serde_json::json!(["text", "audio"])
+        );
+    }
+
+    #[test]
+    fn audio_format_comes_from_the_requested_mime_or_its_registered_extension() {
+        let mut request = simple_request();
+        request.extra = serde_json::json!({ "output_mimes": ["audio/mpeg"] });
+        assert_eq!(request_audio_format(&request), "mp3");
+
+        request.extra = serde_json::json!({ "output_mimes": ["audio/x-future-model"] });
+        assert_eq!(request_audio_format(&request), "x-future-model");
+
+        request.extra = serde_json::json!({ "output_mimes": ["audio/*"] });
+        assert_eq!(request_audio_format(&request), "wav");
     }
 
     // ─── HTTP error paths (connection refused) ─────────────────────────────
