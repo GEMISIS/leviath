@@ -50,8 +50,9 @@ jobs:
   # hung `cargo test` (this suite spawns daemons, opens sockets, drives
   # websockets) holds a runner for six hours, and the coverage matrix can hang
   # dozens of them at once. The numbers are roughly double the longest run
-  # seen, except this job's: 45 minutes, where its macOS leg takes about 30 to
-  # compile and run.
+  # seen. A cold cache on the newly rolled macOS runner took 42m54s just to
+  # compile, so this job gets 60 minutes for that first build plus test
+  # execution without falling back to GitHub's six-hour default.
   #
   # Four legs, not three. `ubuntu-24.04-arm` is here because the release builds
   # ship `aarch64-unknown-linux-{gnu,musl}`, and nothing else runs them on an
@@ -69,7 +70,7 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -86,7 +87,8 @@ jobs:
       # compile leviath-cli and its unit tests a second time. On the macOS
       # runner (7 GB) that compile takes over twenty minutes: the library and
       # its unit-test crate build side by side at about 6 GB and 9 GB of rustc
-      # memory each.
+      # memory each. A cold cache on a newly rolled macOS runner took 42m54s;
+      # the 60-minute job timeout leaves room for the subsequent test run.
       - name: Build
         run: cargo test --no-run
       - name: Test
