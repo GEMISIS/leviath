@@ -774,7 +774,8 @@ impl Provider for OpenRouterProvider {
 
         let mut result = parse_openai_response(&response_body)?;
         if let Some(message) = response_body.pointer("/choices/0/message")
-            && let Some(audio) = crate::mime_output::message_audio_blob(message)
+            && let Some(audio) =
+                crate::mime_output::message_audio_blob(message, request_audio_mime(request))
         {
             result.parts.push(audio);
         }
@@ -1062,6 +1063,17 @@ fn request_wants_audio(request: &InferenceRequest) -> bool {
                 .filter_map(serde_json::Value::as_str)
                 .any(|mime| mime.starts_with("audio/"))
         })
+}
+
+#[cfg(feature = "openrouter")]
+fn request_audio_mime(request: &InferenceRequest) -> Option<&str> {
+    request
+        .extra
+        .get(crate::provider::OUTPUT_MIMES_KEY)
+        .and_then(serde_json::Value::as_array)?
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .find(|mime| mime.starts_with("audio/") && !mime.ends_with("/*"))
 }
 
 #[cfg(feature = "openrouter")]
@@ -2416,7 +2428,7 @@ mod tests {
 
     #[tokio::test]
     async fn audio_stage_requests_audio_and_returns_the_completed_audio_part() {
-        let body = br#"{"choices":[{"message":{"content":"instrumental","audio":{"data":"UklGRg==","format":"wav"}},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#;
+        let body = br#"{"choices":[{"message":{"content":"instrumental","audio":{"data":"UklGRg==","format":"wav"},"tool_calls":[{"id":"call_1","type":"function","function":{"name":"submit_output","arguments":"{}"}}]},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#;
         let (url, seen) = leviath_testkit::spawn_mock_recorder(200, "OK", body.to_vec()).await;
         let provider = provider_with_url(url);
         let mut request = simple_request();
@@ -2427,6 +2439,10 @@ mod tests {
         assert_eq!(chunk.parts.len(), 1);
         assert_eq!(chunk.parts[0].mime_type.as_str(), "audio/wav");
         assert_eq!(chunk.parts[0].bytes, b"RIFF");
+        assert_eq!(chunk.tool_calls.len(), 1);
+        assert_eq!(chunk.tool_calls[0].id.as_deref(), Some("call_1"));
+        assert_eq!(chunk.tool_calls[0].name.as_deref(), Some("submit_output"));
+        assert_eq!(chunk.tool_calls[0].arguments_delta, "{}");
         let sent = leviath_core::sync::lock(&seen)[0].clone();
         let request_json: serde_json::Value = serde_json::from_str(
             sent.split("\r\n\r\n")

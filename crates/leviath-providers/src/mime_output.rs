@@ -80,33 +80,48 @@ pub fn message_blobs(message: &serde_json::Value) -> Vec<Blob> {
 }
 
 /// Decode an OpenRouter `message.audio.data` payload, naming the result by
-/// its content hash so multiple generated parts do not collide in a run.
-pub fn message_audio_blob(message: &serde_json::Value) -> Option<Blob> {
+/// its content hash so multiple generated parts do not collide in a run. The
+/// stage's declared audio MIME takes precedence, allowing custom and future
+/// output types without adding them to this provider crate.
+pub fn message_audio_blob(
+    message: &serde_json::Value,
+    requested_mime: Option<&str>,
+) -> Option<Blob> {
     let audio = message.get("audio")?;
     let data = audio.get("data")?.as_str()?;
-    let mime = match audio.get("format").and_then(serde_json::Value::as_str) {
-        Some("wav") => "audio/wav",
-        Some("flac") => "audio/flac",
-        Some("opus") => "audio/ogg",
-        Some("pcm16") => "audio/l16",
-        _ => "audio/mpeg",
-    };
+    let returned_mime = audio
+        .get("mime_type")
+        .or_else(|| audio.get("content_type"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|mime| mime.starts_with("audio/") && !mime.ends_with("/*"));
+    let declared_mime =
+        requested_mime.filter(|mime| mime.starts_with("audio/") && !mime.ends_with("/*"));
+    let format_mime = audio
+        .get("format")
+        .and_then(serde_json::Value::as_str)
+        .filter(|format| !format.trim().is_empty())
+        .map(|format| {
+            let format = format.trim();
+            if format.contains('/') {
+                format.to_string()
+            } else {
+                format!("audio/{format}")
+            }
+        });
+    let mime = returned_mime
+        .or(declared_mime)
+        .map(str::to_string)
+        .or(format_mime)?;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(data.trim())
         .ok()?;
     if bytes.is_empty() {
         return None;
     }
-    let mime_type = MimeType::parse(mime).ok()?;
-    let registry = MimeRegistry::builtin();
+    // The MIME may be user supplied or introduced by a future model.
+    let mime_type = MimeType::parse(&mime).ok()?;
     let sha12: String = sha256_hex(&bytes).chars().take(12).collect();
-    let ext = registry
-        .info(&mime_type)
-        .extensions
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "bin".to_string());
-    Some(Blob::new(mime_type, bytes).named(format!("audio-{sha12}.{ext}")))
+    Some(Blob::new(mime_type, bytes).named(format!("audio-{sha12}")))
 }
 
 #[cfg(test)]
@@ -186,9 +201,10 @@ mod tests {
 
     #[test]
     fn a_message_yields_its_generated_audio_as_a_typed_part() {
-        let blob = message_audio_blob(&serde_json::json!({
-            "audio": { "data": "UklGRg==", "format": "wav" }
-        }))
+        let blob = message_audio_blob(
+            &serde_json::json!({ "audio": { "data": "UklGRg==" } }),
+            Some("audio/wav"),
+        )
         .unwrap();
         assert_eq!(blob.mime_type.as_str(), "audio/wav");
         assert_eq!(blob.bytes, b"RIFF");
@@ -196,27 +212,59 @@ mod tests {
     }
 
     #[test]
-    fn generated_audio_formats_are_typed_and_unusable_payloads_are_ignored() {
-        for (format, mime) in [
-            ("mp3", "audio/mpeg"),
-            ("flac", "audio/flac"),
-            ("opus", "audio/ogg"),
-            ("pcm16", "audio/l16"),
-        ] {
-            let blob = message_audio_blob(&serde_json::json!({
-                "audio": { "data": "AQID", "format": format }
-            }))
-            .unwrap();
-            assert_eq!(blob.mime_type.as_str(), mime);
-        }
+    fn custom_audio_mimes_are_taken_from_the_stage_or_response() {
+        let requested = message_audio_blob(
+            &serde_json::json!({ "audio": { "data": "AQID", "format": "vendor-codec" } }),
+            Some("audio/x-future-model"),
+        )
+        .unwrap();
+        assert_eq!(requested.mime_type.as_str(), "audio/x-future-model");
+
+        let returned = message_audio_blob(
+            &serde_json::json!({
+                "audio": { "data": "AQID", "mime_type": "audio/vnd.vendor.codec" }
+            }),
+            None,
+        )
+        .unwrap();
+        assert_eq!(returned.mime_type.as_str(), "audio/vnd.vendor.codec");
+
+        let content_type = message_audio_blob(
+            &serde_json::json!({
+                "audio": { "data": "AQID", "content_type": "audio/vnd.other.codec" }
+            }),
+            None,
+        )
+        .unwrap();
+        assert_eq!(content_type.mime_type.as_str(), "audio/vnd.other.codec");
+
+        let format_mime = message_audio_blob(
+            &serde_json::json!({ "audio": { "data": "AQID", "format": "audio/x-direct" } }),
+            None,
+        )
+        .unwrap();
+        assert_eq!(format_mime.mime_type.as_str(), "audio/x-direct");
+
+        let generic = message_audio_blob(
+            &serde_json::json!({ "audio": { "data": "AQID", "format": "x-future-codec" } }),
+            Some("audio/*"),
+        )
+        .unwrap();
+        assert_eq!(generic.mime_type.as_str(), "audio/x-future-codec");
+    }
+
+    #[test]
+    fn unusable_or_untyped_audio_payloads_are_ignored() {
         for message in [
             serde_json::json!({}),
             serde_json::json!({ "audio": {} }),
             serde_json::json!({ "audio": { "data": 1 } }),
-            serde_json::json!({ "audio": { "data": "!!" } }),
-            serde_json::json!({ "audio": { "data": "" } }),
+            serde_json::json!({ "audio": { "data": "!!", "format": "x-test" } }),
+            serde_json::json!({ "audio": { "data": "", "format": "x-test" } }),
+            serde_json::json!({ "audio": { "data": "AQID" } }),
+            serde_json::json!({ "audio": { "data": "AQID", "mime_type": "audio/" } }),
         ] {
-            assert!(message_audio_blob(&message).is_none(), "{message}");
+            assert!(message_audio_blob(&message, None).is_none(), "{message}");
         }
     }
 }
