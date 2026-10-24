@@ -79,6 +79,36 @@ pub fn message_blobs(message: &serde_json::Value) -> Vec<Blob> {
     blobs
 }
 
+/// Decode an OpenRouter `message.audio.data` payload, naming the result by
+/// its content hash so multiple generated parts do not collide in a run.
+pub fn message_audio_blob(message: &serde_json::Value) -> Option<Blob> {
+    let audio = message.get("audio")?;
+    let data = audio.get("data")?.as_str()?;
+    let mime = match audio.get("format").and_then(serde_json::Value::as_str) {
+        Some("wav") => "audio/wav",
+        Some("flac") => "audio/flac",
+        Some("opus") => "audio/ogg",
+        Some("pcm16") => "audio/l16",
+        _ => "audio/mpeg",
+    };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data.trim())
+        .ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    let mime_type = MimeType::parse(mime).ok()?;
+    let registry = MimeRegistry::builtin();
+    let sha12: String = sha256_hex(&bytes).chars().take(12).collect();
+    let ext = registry
+        .info(&mime_type)
+        .extensions
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "bin".to_string());
+    Some(Blob::new(mime_type, bytes).named(format!("audio-{sha12}.{ext}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,5 +182,16 @@ mod tests {
         });
         let blobs = message_blobs(&differ);
         assert_ne!(blobs[0].name, blobs[1].name);
+    }
+
+    #[test]
+    fn a_message_yields_its_generated_audio_as_a_typed_part() {
+        let blob = message_audio_blob(&serde_json::json!({
+            "audio": { "data": "UklGRg==", "format": "wav" }
+        }))
+        .unwrap();
+        assert_eq!(blob.mime_type.as_str(), "audio/wav");
+        assert_eq!(blob.bytes, b"RIFF");
+        assert!(blob.name.as_deref().unwrap().starts_with("audio-"));
     }
 }

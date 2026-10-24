@@ -303,6 +303,25 @@ impl OpenRouterProvider {
             })
         };
 
+        // OpenRouter only returns generated audio when the request explicitly
+        // opts into audio output. The runtime's output_mimes is the contract
+        // that tells us this stage expects an audio part; it must be translated
+        // into the gateway's modality flag rather than passed through as an
+        // unknown model parameter.
+        let wants_audio = request
+            .extra
+            .get(crate::provider::OUTPUT_MIMES_KEY)
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|mimes| {
+                mimes
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .any(|mime| mime.starts_with("audio/"))
+            });
+        if wants_audio {
+            body["modalities"] = serde_json::json!(["text", "audio"]);
+        }
+
         // Ask the gateway to report what the call cost. Without this it returns
         // token counts only and the cost has to be reconstructed from a rate
         // card, which is an estimate: it cannot see this account's actual
@@ -753,7 +772,12 @@ impl Provider for OpenRouterProvider {
 
         let response_body: serde_json::Value = crate::provider::decode_json(response).await?;
 
-        let result = parse_openai_response(&response_body)?;
+        let mut result = parse_openai_response(&response_body)?;
+        if let Some(message) = response_body.pointer("/choices/0/message")
+            && let Some(audio) = crate::mime_output::message_audio_blob(message)
+        {
+            result.parts.push(audio);
+        }
 
         if let Some(limiter) = &self.rate_limiter {
             limiter.record_tokens(result.tokens_used.total_tokens);
@@ -766,6 +790,33 @@ impl Provider for OpenRouterProvider {
         &self,
         request: &InferenceRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>> {
+        // Audio outputs arrive as one base64 payload on the completed message,
+        // not as playable per-token fragments. Parse audio requests through the
+        // buffered endpoint and expose the finished reply as one stream item.
+        if request_wants_audio(request) {
+            let response = self.infer(request).await?;
+            let chunk = StreamChunk {
+                delta: response.content,
+                tool_calls: response
+                    .tool_calls
+                    .iter()
+                    .enumerate()
+                    .map(|(index, call)| crate::provider::ToolCallDelta {
+                        index,
+                        id: Some(call.id.clone()),
+                        name: Some(call.name.clone()),
+                        arguments_delta: call.arguments.to_string(),
+                        thought_signature: call.thought_signature.clone(),
+                    })
+                    .collect(),
+                tokens: Some(response.tokens_used),
+                finish_reason: Some(response.finish_reason),
+                reasoning: response.reasoning,
+                parts: response.parts,
+            };
+            return Ok(Box::pin(tokio_stream::once(Ok(chunk))));
+        }
+
         tracing::debug!(model = %request.model, "Calling OpenRouter API (streaming)");
 
         if let Some(limiter) = &self.rate_limiter {
@@ -999,6 +1050,19 @@ impl Provider for OpenRouterProvider {
     }
 }
 
+fn request_wants_audio(request: &InferenceRequest) -> bool {
+    request
+        .extra
+        .get(crate::provider::OUTPUT_MIMES_KEY)
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|mimes| {
+            mimes
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .any(|mime| mime.starts_with("audio/"))
+        })
+}
+
 #[cfg(feature = "openrouter")]
 #[cfg(test)]
 mod mime_tests;
@@ -1227,6 +1291,7 @@ mod tests {
         assert_eq!(body["top_p"], serde_json::json!(0.5));
         assert!(body.get("prompt_regions").is_none());
         assert!(body.get("output_mimes").is_none());
+        assert_eq!(body["modalities"], serde_json::json!(["text", "audio"]));
     }
 
     #[test]
@@ -2346,6 +2411,32 @@ mod tests {
         let provider = provider_with_url(url);
         let resp = provider.infer(&simple_request()).await.unwrap();
         assert_eq!(resp.content, "hi there");
+    }
+
+    #[tokio::test]
+    async fn audio_stage_requests_audio_and_returns_the_completed_audio_part() {
+        let body = br#"{"choices":[{"message":{"content":"instrumental","audio":{"data":"UklGRg==","format":"wav"}},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#;
+        let (url, seen) = leviath_testkit::spawn_mock_recorder(200, "OK", body.to_vec()).await;
+        let provider = provider_with_url(url);
+        let mut request = simple_request();
+        request.extra = serde_json::json!({ "output_mimes": ["audio/wav"] });
+        let mut stream = provider.infer_stream(&request).await.unwrap();
+        use tokio_stream::StreamExt;
+        let chunk = stream.next().await.unwrap().unwrap();
+        assert_eq!(chunk.parts.len(), 1);
+        assert_eq!(chunk.parts[0].mime_type.as_str(), "audio/wav");
+        assert_eq!(chunk.parts[0].bytes, b"RIFF");
+        let sent = leviath_core::sync::lock(&seen)[0].clone();
+        let request_json: serde_json::Value = serde_json::from_str(
+            sent.split("\r\n\r\n")
+                .nth(1)
+                .expect("recorded request body"),
+        )
+        .expect("valid JSON request body");
+        assert_eq!(
+            request_json["modalities"],
+            serde_json::json!(["text", "audio"])
+        );
     }
 
     // ─── HTTP error paths (connection refused) ─────────────────────────────
