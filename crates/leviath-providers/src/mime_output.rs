@@ -194,4 +194,29 @@ mod tests {
         assert_eq!(blob.bytes, b"RIFF");
         assert!(blob.name.as_deref().unwrap().starts_with("audio-"));
     }
+
+    #[test]
+    fn generated_audio_formats_are_typed_and_unusable_payloads_are_ignored() {
+        for (format, mime) in [
+            ("mp3", "audio/mpeg"),
+            ("flac", "audio/flac"),
+            ("opus", "audio/ogg"),
+            ("pcm16", "audio/l16"),
+        ] {
+            let blob = message_audio_blob(&serde_json::json!({
+                "audio": { "data": "AQID", "format": format }
+            }))
+            .unwrap();
+            assert_eq!(blob.mime_type.as_str(), mime);
+        }
+        for message in [
+            serde_json::json!({}),
+            serde_json::json!({ "audio": {} }),
+            serde_json::json!({ "audio": { "data": 1 } }),
+            serde_json::json!({ "audio": { "data": "!!" } }),
+            serde_json::json!({ "audio": { "data": "" } }),
+        ] {
+            assert!(message_audio_blob(&message).is_none(), "{message}");
+        }
+    }
 }
