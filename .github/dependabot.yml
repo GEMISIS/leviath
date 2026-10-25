@@ -41,6 +41,10 @@ updates:
       day: thursday
       time: "13:00"
       timezone: America/Los_Angeles
+    groups:
+      codeql-action:
+        patterns:
+          - "github/codeql-action/*"
     labels:
       - dependencies
       - ci
