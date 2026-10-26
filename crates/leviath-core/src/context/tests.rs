@@ -775,3 +775,13 @@ fn a_system_block_from_before_its_newer_fields_still_deserializes() {
     assert_eq!(block.region, "");
     assert_eq!(block.volatility, Volatility::default());
 }
+
+#[test]
+fn only_an_always_cached_block_with_no_region_is_a_hint() {
+    assert!(block(CacheHint::Always).is_hint());
+    // The note about tools the stage does not offer: no region, but it moves.
+    assert!(!block(CacheHint::UntilChanged).is_hint());
+    let mut region = block(CacheHint::Always);
+    region.region = "task".to_string();
+    assert!(!region.is_hint());
+}
