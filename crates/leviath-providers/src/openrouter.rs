@@ -20,7 +20,7 @@ use {
     },
     crate::rate_limit::RateLimiter,
     async_trait::async_trait,
-    catalog::parse_entry,
+    catalog::{gateway_id, parse_entry, retirement},
     futures_core::Stream,
     std::collections::HashMap,
     std::pin::Pin,
@@ -364,25 +364,6 @@ impl OpenRouterProvider {
 /// instead of replacing it wholesale.
 fn builtin_capabilities(model: &str) -> ModelCapabilities {
     crate::capabilities::lookup(MODELS, model, FALLBACK_CAPABILITIES)
-}
-
-/// The gateway ids of models it lists without the version Meta's API puts in
-/// the name: Meta's `muse-wonder-1.0` is `meta/muse-wonder` here, and the bare
-/// `muse-wonder` is the same model. Everything else the gateway lists under
-/// the vendor's own id (`meta/muse-spark-1.3`).
-#[cfg(feature = "openrouter")]
-const GATEWAY_IDS: &[(&str, &str)] = &[
-    ("muse-wonder-1.0", "meta/muse-wonder"),
-    ("muse-wonder", "meta/muse-wonder"),
-];
-
-/// `model` as the gateway spells it, when that differs from the bare name.
-#[cfg(feature = "openrouter")]
-fn gateway_id(model: &str) -> &str {
-    GATEWAY_IDS
-        .iter()
-        .find(|(bare, _)| *bare == model)
-        .map_or(model, |(_, id)| id)
 }
 
 /// [`builtin_capabilities`], for the crate-level catalogue.
@@ -983,7 +964,13 @@ impl Provider for OpenRouterProvider {
         })
     }
 
-    /// The gateway's own listing, once priming has read it.
+    /// [`Self::serves_model`], unless the model is past its `expiration_date`.
+    fn lists_model(&self, model_key: &str) -> Option<String> {
+        retirement(&self.learned, model_key).map_or_else(|| self.serves_model(model_key), |_| None)
+    }
+
+    /// The gateway's own listing, once priming has read it, without the
+    /// models whose `expiration_date` has passed.
     ///
     /// Only the primed catalogue counts. The compiled-in table that
     /// [`Self::serves_model`] falls back to lists a few dozen of the hundreds
@@ -992,7 +979,11 @@ impl Provider for OpenRouterProvider {
     /// opposite of true. An empty catalogue is "not asked yet", not "serves
     /// nothing".
     fn served_catalog(&self) -> Option<Vec<String>> {
-        self.learned.catalog()
+        self.learned.catalog_in_service()
+    }
+
+    fn refusal_reason(&self, model_key: &str) -> Option<String> {
+        retirement(&self.learned, model_key)
     }
 
     /// The gateway's listing is never empty once read, so an empty one is a
@@ -1012,8 +1003,9 @@ impl Provider for OpenRouterProvider {
     /// What `GET /models` fills, measured against the live endpoint: both
     /// limits (`context_length`, `top_provider.max_completion_tokens`), the
     /// temperature and tools flags (`supported_parameters`), the cache-write
-    /// signal and rates (`pricing`), the display name and release date. It
-    /// carries no retirement date. See `catalog::parse_entry`.
+    /// signal and rates (`pricing`), the display name and release date, and
+    /// the retirement date of a model being withdrawn (`expiration_date`).
+    /// See `catalog::parse_entry`.
     async fn prime_capabilities(&self) -> Result<()> {
         let body = self.fetch_models_json().await?;
         let data = body
@@ -1046,14 +1038,15 @@ impl Provider for OpenRouterProvider {
     /// with what an inference is told about the same model.
     ///
     /// Primes first when nothing has been learned yet, which is the one fetch
-    /// this makes; a caller that already primed pays nothing.
+    /// this makes; a caller that already primed pays nothing. A model past its
+    /// `expiration_date` is left out, as [`Self::served_catalog`] leaves it.
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
         if self.learned.is_empty() {
             self.prime_capabilities().await?;
         }
         Ok(self
             .learned
-            .to_model_infos("openrouter", |id| self.capabilities(id)))
+            .to_model_infos_in_service("openrouter", |id| self.capabilities(id)))
     }
 }
 
@@ -3037,6 +3030,43 @@ mod tests {
         let provider = provider_with_url(up);
         provider.prime_capabilities().await.expect("primes");
         assert!(!provider.catalog_unread());
+    }
+
+    /// A model past its `expiration_date` leaves the listing and the
+    /// catalogue and is not claimed as listed; one whose date is still ahead
+    /// stays. Routing by shape still finds it, so the refusal can say why.
+    #[tokio::test]
+    async fn a_model_past_its_expiration_date_is_no_longer_offered() {
+        let body = br#"{"data":[
+            {"id":"openai/sora-2","expiration_date":"2000-01-01"},
+            {"id":"openai/gpt-5.5","expiration_date":"2999-01-01"},
+            {"id":"x-ai/grok-4.6","expiration_date":null}
+        ]}"#;
+        let provider = provider_with_url(spawn_mock_server(200, "OK", body).await);
+        provider.prime_capabilities().await.expect("primes");
+        let mut catalog = provider.served_catalog().expect("primed");
+        catalog.sort();
+        assert_eq!(catalog, ["openai/gpt-5.5", "x-ai/grok-4.6"]);
+        let ids: Vec<String> = provider
+            .list_models()
+            .await
+            .expect("from the store")
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(ids, ["openai/gpt-5.5", "x-ai/grok-4.6"]);
+        assert_eq!(provider.lists_model("sora-2"), None);
+        assert_eq!(
+            provider.serves_model("sora-2").as_deref(),
+            Some("openai/sora-2")
+        );
+        assert_eq!(
+            provider.lists_model("gpt-5.5").as_deref(),
+            Some("openai/gpt-5.5")
+        );
+        let why = provider.refusal_reason("sora-2").expect("retired");
+        assert!(why.contains("retired it on 2000-01-01"), "{why}");
+        assert_eq!(provider.refusal_reason("gpt-5.5"), None);
     }
 
     /// The gateway answers a blueprint's bare model name from its live

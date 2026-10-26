@@ -96,9 +96,12 @@ pub(crate) fn setup_park(
         //
         // An upstream outage behind a gateway with nowhere left to move ends
         // the stage the way a 5xx that outlived its retries does: the machine
-        // is fine, and only that one model's route is down.
+        // is fine, and only that one model's route is down. A retired model
+        // with nowhere left to move ends it too: waiting fixes nothing, and
+        // the error names the date and asks for another model.
         UnavailableReason::AuthFailed
         | UnavailableReason::Forbidden
-        | UnavailableReason::ModelUnavailable => None,
+        | UnavailableReason::ModelUnavailable
+        | UnavailableReason::ModelRetired => None,
     }
 }

@@ -333,6 +333,22 @@ impl OpenAIProvider {
         table_capabilities(model)
     }
 
+    /// The refusal for a call to `model` once the listing says OpenAI retired
+    /// it, made before anything is sent.
+    ///
+    /// OpenAI keeps listing a model after its `shutdown_date` and answers a
+    /// call to it with a 404 (`sora-2`: `GET /v1/videos` 404s with an empty
+    /// body), which a listed model's 404 would read as an outage and retry.
+    /// The listing's own date says otherwise, so the call ends here, and moves
+    /// to the next route without a retry.
+    fn retired_refusal(&self, model: &str) -> Option<ProviderError> {
+        let date = self.learned.retired(model)?;
+        Some(ProviderError::Unavailable {
+            reason: crate::provider::UnavailableReason::ModelRetired,
+            detail: format!("{}/{model} was retired by OpenAI on {date}", self.name),
+        })
+    }
+
     /// The Responses body for `request`, with the Chat Completions names a
     /// stage may still use translated and a refused temperature left out.
     fn body(&self, request: &InferenceRequest) -> serde_json::Value {
@@ -441,6 +457,9 @@ fn text_format(format: serde_json::Value) -> serde_json::Value {
 #[cfg(feature = "openai")]
 impl Provider for OpenAIProvider {
     async fn infer(&self, request: &InferenceRequest) -> Result<InferenceResponse> {
+        if let Some(refusal) = self.retired_refusal(&request.model) {
+            return Err(refusal);
+        }
         if let Some(kind) = media::kind(&request.model) {
             return self.run_media(kind, request).await;
         }
@@ -456,6 +475,9 @@ impl Provider for OpenAIProvider {
         &self,
         request: &InferenceRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>> {
+        if let Some(refusal) = self.retired_refusal(&request.model) {
+            return Err(refusal);
+        }
         if let Some(kind) = media::kind(&request.model) {
             return Ok(crate::media::one_chunk(
                 self.run_media(kind, request).await?,
@@ -520,8 +542,15 @@ impl Provider for OpenAIProvider {
     }
 
     /// The listing once read, this build's chat and media catalogues, and
-    /// the operator's config.
+    /// the operator's config, unless the listing says OpenAI has retired the
+    /// model: a retired model's 404 is not an outage, and a compiled row for
+    /// it must not keep offering it. `serves_model` still answers by shape,
+    /// so a stage that names it is refused with the date
+    /// ([`Provider::refusal_reason`]) rather than told it is unknown.
     fn lists_model(&self, model_key: &str) -> Option<String> {
+        if self.learned.retired(model_key).is_some() {
+            return None;
+        }
         (self.learned.contains(model_key)
             || CATALOG
                 .iter()
@@ -544,6 +573,17 @@ impl Provider for OpenAIProvider {
 
     fn learned_models(&self) -> Option<&crate::learned::LearnedModels> {
         Some(&self.learned)
+    }
+
+    /// The date OpenAI retired the model, when its listing says it has.
+    fn refusal_reason(&self, model_key: &str) -> Option<String> {
+        let date = self.learned.retired(model_key)?;
+        Some(format!(
+            "OpenAI retired it on {date} (the shutdown_date its model listing \
+             publishes), so no call to it can succeed. Name a current model; \
+             `lev models list --provider {}` shows them.",
+            self.name
+        ))
     }
 
     /// `reasoning.effort` for a model that reasons. A chat model refuses the
@@ -621,8 +661,11 @@ impl Provider for OpenAIProvider {
     /// `text-embedding-3-large` would let a blueprint route a stage to it.
     /// The same rule routes a bare name, so nothing routing accepts is
     /// refused here, and a named host's own deployments follow.
+    ///
+    /// A model whose `shutdown_date` has passed is left out: OpenAI lists it
+    /// still and serves it no more.
     fn served_catalog(&self) -> Option<Vec<String>> {
-        self.learned.catalog().map(|ids| {
+        self.learned.catalog_in_service().map(|ids| {
             ids.into_iter()
                 .filter(|id| serves_id(id))
                 .chain(self.serves.iter().cloned())
@@ -672,14 +715,15 @@ impl Provider for OpenAIProvider {
     ///
     /// Primes first when nothing has been learned yet, so this is the one
     /// fetch. Filtered the way [`Self::served_catalog`] is, for the same
-    /// reason: a picker offering `whisper-1` as a chat model is a trap.
+    /// reasons: a picker offering `whisper-1` as a chat model is a trap, and
+    /// so is one offering a model OpenAI has retired.
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
         if self.learned.is_empty() {
             self.prime_capabilities().await?;
         }
         Ok(self
             .learned
-            .to_model_infos(&self.name, |id| self.capabilities(id))
+            .to_model_infos_in_service(&self.name, |id| self.capabilities(id))
             .into_iter()
             .filter(|m| serves_id(&m.id))
             .collect())

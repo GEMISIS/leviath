@@ -45,6 +45,18 @@ same list.
 
 ### Fixed
 
+- A model its provider has retired is no longer offered or retried. OpenAI still
+  lists `sora-2` and `sora-2-pro` with a `shutdown_date` of 2026-09-24 and answers
+  every call with a 404, which read as "usually a short outage": each call spent its
+  retries and pickers kept choosing them. A model whose `shutdown_date` (OpenAI) or
+  `expiration_date` (OpenRouter) has passed now leaves `lev models list`, the API
+  and GraphQL catalogue and the served catalogue, a stage naming it is refused with
+  the date, and a call to it fails at once with `model-retired` ("openai/sora-2 was
+  retired by OpenAI on 2026-09-24") and moves to the next route without a retry.
+  The compiled media table no longer names the two Sora models. A listed model that
+  answers eight 404s in a row (two calls' worth of retries) is given up on until the daemon
+  restarts: not retried, not offered an open route, and refused by name.
+
 - The note about tools a stage's history calls and the stage does not offer went in
   Meta's Responses `instructions`, the first bytes of the request, and it differs from
   run to run, so requests sharing a ~10.8K-token stable head never shared a cached

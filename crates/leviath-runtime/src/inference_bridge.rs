@@ -527,6 +527,10 @@ fn millis(d: Duration) -> u64 {
 /// fetched on the way to deciding. With no listing that names the model, the
 /// body's own reading stands: a gateway's relayed upstream failure is an
 /// outage, and any other 404 is a model the provider does not have.
+///
+/// Each such 404 is counted, and a model that answers nothing else for
+/// [`crate::listed_404s::GIVE_UP_AFTER`] of them in a row is given up on
+/// rather than read as an outage once more (see [`crate::listed_404s`]).
 pub(crate) fn listed_outage(
     provider: &dyn Provider,
     model: &str,
@@ -536,7 +540,7 @@ pub(crate) fn listed_outage(
         return None;
     }
     provider.lists_model(crate::pipeline::model_key(model))?;
-    error.listed_model_unavailable()
+    crate::listed_404s::missed(provider.name(), model).or_else(|| error.listed_model_unavailable())
 }
 
 /// A stable label for what a failed call was, or empty when the error carried no

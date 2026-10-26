@@ -403,6 +403,72 @@ async fn a_not_found_is_retried_only_for_a_listed_model() {
     assert_eq!(unlisted.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
+/// Lists model `m` and answers every call to it with a 404, the way OpenAI
+/// answered `sora-2` after shutting it down.
+struct GoneMissing {
+    calls: std::sync::atomic::AtomicU32,
+}
+
+#[async_trait::async_trait]
+impl Provider for GoneMissing {
+    async fn infer(&self, _r: &InferenceRequest) -> leviath_providers::Result<InferenceResponse> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(ProviderError::ApiError(
+            "[not-found] HTTP 404 Not Found: ".into(),
+        ))
+    }
+    async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
+        1
+    }
+    fn max_context_tokens(&self, _m: &str) -> usize {
+        100_000
+    }
+    fn name(&self) -> &str {
+        "gone-missing"
+    }
+    fn capabilities(&self, _m: &str) -> leviath_providers::ModelCapabilities {
+        leviath_providers::ModelCapabilities::default()
+    }
+    fn lists_model(&self, model_key: &str) -> Option<String> {
+        (model_key == "m").then(|| model_key.to_string())
+    }
+}
+
+/// A listed model that answers nothing but 404s is retried as an outage until
+/// the run of them is long enough to give it up on; the call then ends with
+/// an error that is not retried and still moves to the next route.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_listed_model_that_only_404s_is_given_up_on() {
+    let gone = crate::listed_404s::GIVE_UP_AFTER;
+    let mut lane = lane_world(crate::components::AgentStatus::Active);
+    let provider = Arc::new(GoneMissing {
+        calls: Default::default(),
+    });
+    assert_eq!(provider.count_tokens("t", "m").await, 1);
+    assert_eq!(provider.max_context_tokens("m"), 100_000);
+    let _ = provider.capabilities("m");
+    lane.start(provider.clone(), quick(gone + 2), CallLane::Stage);
+    let outcome = loop {
+        let (outcome, next) = lane.next(CallLane::Stage).await;
+        if next == Next::Done {
+            break outcome;
+        }
+        lane.fire().await;
+    };
+    assert_eq!(
+        provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+        gone,
+        "retried as an outage until given up on, and no further"
+    );
+    let err = outcome.result.expect_err("given up");
+    assert!(!err.is_transient());
+    assert_eq!(
+        err.unavailable_reason(),
+        Some(leviath_providers::UnavailableReason::ModelUnavailable)
+    );
+    assert!(crate::listed_404s::given_up("gone-missing", "m"));
+}
+
 /// The routing lane retries the same way, and reports on its own channel.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_routing_call_is_retried_on_its_own_lane() {

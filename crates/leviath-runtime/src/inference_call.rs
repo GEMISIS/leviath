@@ -383,6 +383,7 @@ impl InferenceCall {
             // None of those is anything a retry would change.
             (None, _) => Next::Done,
             (Some(report), Ok(response)) => {
+                crate::listed_404s::answered(self.provider.name(), &self.request.model);
                 self.record(&report, Ending::Answered(&response.finish_reason));
                 Next::Done
             }
