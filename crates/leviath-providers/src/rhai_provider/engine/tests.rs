@@ -311,3 +311,12 @@ fn fetch_bytes_errors_when_broker_gone() {
     let err = fetch_bytes(&tx, request).unwrap_err();
     assert!(err.to_string().contains("channel closed"));
 }
+
+/// The engine holds a blob as large as the host reads a body.
+#[test]
+fn the_engine_holds_a_blob_as_large_as_a_body_the_host_reads() {
+    assert_eq!(
+        crate::rhai_provider::host::BYTES_BODY_CAP,
+        leviath_scripting::MAX_BLOB_BYTES
+    );
+}
