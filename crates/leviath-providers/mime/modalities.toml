@@ -8,7 +8,7 @@
 # overwrites. A model no row matches falls to the name heuristic in
 # `mime_tables`, which is the floor these rows lift.
 
-read_on = "2026-10-19"
+read_on = "2026-10-26"
 
 [[modality]]
 provider = "anthropic"
@@ -762,6 +762,13 @@ source = "openrouter"
 [[modality]]
 provider = "openai"
 prefix = "gpt-6.1-sol-pro"
+input = ["text/*", "image/*", "application/pdf"]
+output = ["text/*"]
+source = "openrouter"
+
+[[modality]]
+provider = "openai"
+prefix = "gpt-6.1-terra"
 input = ["text/*", "image/*", "application/pdf"]
 output = ["text/*"]
 source = "openrouter"
