@@ -157,10 +157,12 @@ pub fn build(request: &InferenceRequest, dialect: &Dialect, settings: &Settings<
 /// Split the system side into the preamble and the region blocks.
 ///
 /// `SystemBlock::region` is empty for a block that is not a region: the
-/// batch-tool hint, the shell hint, a tool preamble. Those are the stable
-/// framework text and belong in `instructions`, where they form the head of the
-/// cached prefix. Everything with a region name is context and becomes its own
-/// `developer` item.
+/// batch-tool hint, the shell hint, a tool preamble. The always-cached ones are
+/// the stable framework text and belong in `instructions`, where they form the
+/// head of the cached prefix. Everything else becomes its own `developer` item,
+/// in order: a region is context, and a block with no region that varies (the
+/// note about tools the history calls and the stage does not offer) must not
+/// sit in `instructions`, which comes first, or no two runs share a prefix.
 fn split_system(request: &InferenceRequest) -> (String, Vec<String>) {
     let mut preamble: Vec<&str> = Vec::new();
     let mut regions: Vec<String> = Vec::new();
@@ -170,7 +172,7 @@ fn split_system(request: &InferenceRequest) -> (String, Vec<String>) {
         if text.is_empty() {
             continue;
         }
-        if block.region.is_empty() {
+        if block.is_hint() {
             preamble.push(text);
         } else {
             regions.push(text.to_string());

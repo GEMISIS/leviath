@@ -45,6 +45,14 @@ same list.
 
 ### Fixed
 
+- The note about tools a stage's history calls and the stage does not offer went in
+  Meta's Responses `instructions`, the first bytes of the request, and it differs from
+  run to run, so requests sharing a ~10.8K-token stable head never shared a cached
+  prefix (the agent creator's plan, review and design stages lost almost all
+  cross-run caching). Only the always-cached hints stay in `instructions`; the note
+  is now a developer item after the region blocks. OpenRouter's stable head and
+  `prompt_cache_key` leave it out too.
+
 - A model OpenRouter's upstream caches by prefix on its own (Meta's Muse models)
   read almost nothing from cache: under 1% of 270K-750K prompt tokens in an agent
   run. Such a model's request now carries a `prompt_cache_key` (the hash of the

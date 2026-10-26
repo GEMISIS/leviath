@@ -75,6 +75,18 @@ pub struct SystemBlock {
     pub volatility: Volatility,
 }
 
+impl SystemBlock {
+    /// Whether this is a framework hint: no region, and cached always.
+    ///
+    /// A hint is the same on every request, so it belongs at the head of a
+    /// prompt a provider caches by prefix. A block with no region that is not
+    /// cached always (the note about tools the history calls and the stage
+    /// does not offer) moves with the stage, and is not one.
+    pub fn is_hint(&self) -> bool {
+        self.region.is_empty() && self.cache_hint == CacheHint::Always
+    }
+}
+
 /// One piece of a message as assembly lays it out, before any provider shape.
 ///
 /// A stored part is always preceded by a `Text` piece carrying its stand-in or

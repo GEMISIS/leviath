@@ -23,10 +23,16 @@ use leviath_core::mime::sha256_hex;
 use crate::provider::SystemBlock;
 
 /// Whether `block` belongs to the stable head: a region declared stable, or
-/// a block that is not a region at all (a hint or a tool preamble, the same
-/// on every call).
+/// a hint or a tool preamble, the same on every call. A block with no region
+/// that is not a hint (the note about tools the history calls and the stage
+/// does not offer) varies from run to run, so it stays out of the head and
+/// out of the key.
 fn steady(block: &SystemBlock) -> bool {
-    block.region.is_empty() || block.volatility == Volatility::Stable
+    if block.region.is_empty() {
+        block.is_hint()
+    } else {
+        block.volatility == Volatility::Stable
+    }
 }
 
 /// The texts of `blocks`, trimmed, the empty ones dropped, as one message.
@@ -136,6 +142,29 @@ mod tests {
         let moving = [block("a", "a", Volatility::Grows)];
         assert_eq!(system_messages(&moving)[0]["content"], "a");
         assert_eq!(system_messages(&[]), Vec::<serde_json::Value>::new());
+    }
+
+    #[test]
+    fn the_unoffered_tools_note_is_not_part_of_the_head_or_the_key() {
+        // All stable, so the note, last and with no region, would otherwise
+        // join the head and move the key with every set of tools.
+        let stable = vec![
+            block("Batch your reads.", "", Volatility::Stable),
+            block("## task\nDesign it.", "task", Volatility::Stable),
+        ];
+        let mut noted = stable.clone();
+        let mut note = block("Earlier turns called: web_fetch.", "", Volatility::Stable);
+        note.cache_hint = CacheHint::UntilChanged;
+        noted.push(note);
+
+        assert_eq!(
+            cache_key("meta/muse-spark-1.3", &noted),
+            cache_key("meta/muse-spark-1.3", &stable)
+        );
+        let messages = system_messages(&noted);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0], system_messages(&stable)[0]);
+        assert_eq!(messages[1]["content"], "Earlier turns called: web_fetch.");
     }
 
     #[test]
