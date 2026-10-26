@@ -770,3 +770,79 @@ fn host_request_debug_never_prints_a_credential_header() {
     assert!(out.contains("x-goog-api-key"), "{out}");
     assert!(out.contains("application/json"), "{out}");
 }
+
+// ── Bytes bodies ─────────────────────────────────────────────────────────────
+
+fn executor() -> ReqwestExecutor {
+    ReqwestExecutor::new(crate::provider::build_http_client(None).expect("a test client builds"))
+}
+
+/// A body read as bytes keeps what the server sent, typed as the essence of
+/// what it declared, whatever the bytes are.
+#[tokio::test]
+async fn execute_bytes_reads_the_body_and_its_declared_type() {
+    let url = mock_server(
+        "200 OK",
+        &[("Content-Type", "Audio/MPEG; bitrate=128")],
+        "ID3\u{1}\u{2}",
+    )
+    .await;
+    let out = executor()
+        .execute_bytes(req(HttpMethod::Post, url, Some("{}")))
+        .await
+        .unwrap();
+    assert_eq!(out.mime_type, "audio/mpeg");
+    assert_eq!(out.bytes, b"ID3\x01\x02".to_vec());
+    let url = mock_server("200 OK", &[], "raw").await;
+    let out = executor()
+        .execute_bytes(req(HttpMethod::Get, url, None))
+        .await
+        .unwrap();
+    assert_eq!(out.mime_type, "application/octet-stream");
+}
+
+#[tokio::test]
+async fn execute_bytes_classifies_a_failed_reply() {
+    let url = mock_server("429 Too Many Requests", &[("Retry-After", "3")], "slow").await;
+    let err = executor()
+        .execute_bytes(req(HttpMethod::Get, url, None))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        HostHttpError::RateLimited {
+            retry_after: Some(3)
+        }
+    ));
+    let err = executor()
+        .execute_bytes(req(
+            HttpMethod::Get,
+            "http://127.0.0.1:19998".to_string(),
+            None,
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, HostHttpError::Transport(_)));
+}
+
+/// A body past the cap fails the call rather than filling memory.
+#[tokio::test]
+async fn execute_bytes_refuses_a_body_past_its_cap() {
+    let url = mock_server("200 OK", &[("Content-Type", "audio/wav")], "0123456789").await;
+    let err = executor()
+        .with_body_cap(4)
+        .execute_bytes(req(HttpMethod::Get, url, None))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, HostHttpError::Api(m) if m.contains("4 bytes")));
+}
+
+#[test]
+fn a_blank_content_type_declares_octet_stream() {
+    assert_eq!(
+        declared_type(Some(" ; charset=x")),
+        "application/octet-stream"
+    );
+    assert_eq!(declared_type(None), "application/octet-stream");
+    assert_eq!(declared_type(Some("image/PNG")), "image/png");
+}

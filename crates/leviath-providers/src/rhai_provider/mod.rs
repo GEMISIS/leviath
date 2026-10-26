@@ -453,24 +453,36 @@ async fn serve_job(
     match job {
         BrokerJob::Unary(j) => {
             let result = executor.execute(j.request).await;
-            match &result {
-                Ok(_) => {
-                    if let Some(rl) = rate_limiter {
-                        rl.reset_backoff().await;
-                    }
-                }
-                Err(HostHttpError::RateLimited { retry_after }) => {
-                    if let Some(rl) = rate_limiter {
-                        rl.handle_rate_limit(*retry_after).await;
-                    }
-                }
-                Err(_) => {}
-            }
+            account(rate_limiter, &result).await;
+            let _ = j.reply.send(result);
+        }
+        BrokerJob::Bytes(j) => {
+            let result = executor.execute_bytes(j.request).await;
+            account(rate_limiter, &result).await;
             let _ = j.reply.send(result);
         }
         BrokerJob::Stream(j) => {
             executor.execute_stream(j.request, j.events).await;
         }
+    }
+}
+
+/// Tell the rate limiter how a unary request went: a success clears its
+/// backoff, a 429 backs off for as long as the server asked.
+#[cfg(feature = "rhai")]
+async fn account<T>(
+    rate_limiter: &Option<RateLimiter>,
+    result: &std::result::Result<T, HostHttpError>,
+) {
+    let Some(rl) = rate_limiter else {
+        return;
+    };
+    match result {
+        Ok(_) => rl.reset_backoff().await,
+        Err(HostHttpError::RateLimited { retry_after }) => {
+            rl.handle_rate_limit(*retry_after).await;
+        }
+        Err(_) => {}
     }
 }
 

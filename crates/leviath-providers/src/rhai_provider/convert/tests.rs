@@ -365,3 +365,44 @@ fn a_script_that_names_no_call_gets_an_id_rather_than_an_empty_one() {
     assert_ne!(r.tool_calls[0].id, r.tool_calls[1].id);
     assert_eq!(r.tool_calls[2].id, "mine", "a named call keeps its name");
 }
+
+/// A part whose `bytes` is a Rhai blob (what `http_post_bytes` returns) is
+/// read as those bytes, in an inference result and in a stream chunk alike;
+/// a blob has no JSON form, so it used to fail the whole result.
+#[test]
+fn a_blob_part_is_its_bytes() {
+    let with_blob = || {
+        let mut part = Map::new();
+        part.insert("bytes".into(), Dynamic::from_blob(vec![7, 8, 9]));
+        part.insert("mime_type".into(), "audio/wav".into());
+        let mut map = Map::new();
+        map.insert("content".into(), "".into());
+        map.insert(
+            "parts".into(),
+            Dynamic::from_array(vec![part.into(), 5_i64.into()]),
+        );
+        Dynamic::from_map(map)
+    };
+    let response = parse_inference_dynamic(with_blob()).unwrap();
+    assert_eq!(response.parts.len(), 1);
+    assert_eq!(response.parts[0].bytes, vec![7, 8, 9]);
+    assert_eq!(response.parts[0].mime_type.as_str(), "audio/wav");
+    let chunk = chunk_from_dynamic(with_blob()).unwrap();
+    assert_eq!(chunk.parts[0].bytes, vec![7, 8, 9]);
+}
+
+/// What holds no blob is converted as it always was: no map, no `parts`,
+/// `parts` that is no list, and `bytes` given as a list of numbers.
+#[test]
+fn a_result_without_blobs_converts_as_before() {
+    assert!(parse_inference_dynamic(Dynamic::UNIT).is_err());
+    let plain = parse_inference_dynamic(dyn_from_json(r#"{"content":"hi"}"#)).unwrap();
+    assert!(plain.parts.is_empty());
+    let odd = parse_inference_dynamic(dyn_from_json(r#"{"parts":"none"}"#)).unwrap();
+    assert!(odd.parts.is_empty());
+    let listed = parse_inference_dynamic(dyn_from_json(
+        r#"{"parts":[{"bytes":[1,2],"mime_type":"image/png"}]}"#,
+    ))
+    .unwrap();
+    assert_eq!(listed.parts[0].bytes, vec![1, 2]);
+}

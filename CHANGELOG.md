@@ -15,6 +15,13 @@ same list.
 
 ### Added
 
+- A provider script can call an API that answers with raw audio or image bytes:
+  `http_get_bytes(url [, headers])` and `http_post_bytes(url, body [, headers])` return
+  `#{ mime_type, bytes }` with the body as a blob, and a `parts` entry whose `bytes` is a
+  blob becomes the output part. A blob there used to fail the whole result, and the
+  script engine's 50 000-element array ceiling, which Rhai applies to blobs, refused any
+  real file; it now matches the tool-script engine's 32 MiB.
+
 - Meta's Muse Wonder (`muse-wonder-1.0`) has its own window, price and input types:
   1 048 576 tokens, $4 in and $20 out per million, text, images, video, audio and
   PDFs. It reported 128K and no price, so calls over 128K were refused. `muse-wonder-1.0`

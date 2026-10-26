@@ -236,6 +236,22 @@ These are the only calls that reach outside the sandbox:
 - HTTP: `http_get(url [, headers])`, `http_post(url, body [, headers])`, and
   `stream_request(url, body, headers, callback)` for SSE streaming. The callback is a Rhai closure
   invoked with each SSE `data:` payload.
+- Raw bodies: `http_get_bytes(url [, headers])` and `http_post_bytes(url, body [, headers])` send
+  the same requests and hand the body back as `#{ mime_type, bytes }`: `bytes` a Rhai blob,
+  `mime_type` what the server's `Content-Type` declared (`application/octet-stream` when it
+  declared none). They are for an API that answers with the sound or picture itself rather than
+  JSON; the blob goes straight into a `parts` entry. A body is read up to 32 MiB.
+
+```rhai
+fn inference(state, request) {
+    let reply = http_post_bytes(
+        `${state.base_url}/v1/sound-generation`,
+        to_json(#{ text: prompt_text(request) }), // your own helper: the prompt as text
+        #{ "xi-api-key": state.api_key, "Content-Type": "application/json" },
+    );
+    #{ content: "", parts: [#{ bytes: reply.bytes, mime_type: reply.mime_type, name: "sound.mp3" }] }
+}
+```
 - Data: `parse_json(str)`, `to_json(value)`, `parse_sse(chunk)`.
 
 Build the request body as an object map and hand the whole map to `to_json`, the way the example

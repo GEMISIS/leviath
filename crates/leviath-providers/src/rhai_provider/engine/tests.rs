@@ -289,3 +289,25 @@ fn encode_uri_passes_unreserved_and_encodes_rest() {
     // Unreserved chars pass through; space/slash/question are percent-encoded.
     assert_eq!(out, "Aa0-_.~%20%2F%3F");
 }
+
+#[tokio::test]
+async fn fetch_bytes_errors_when_reply_is_dropped() {
+    let (tx, mut rx) = mpsc::unbounded_channel::<BrokerJob>();
+    let handle = tokio::task::spawn_blocking(move || {
+        let request = host_request(HttpMethod::Get, "http://x", None, BTreeMap::new(), None);
+        fetch_bytes(&tx, request)
+    });
+    let job = rx.recv().await.unwrap();
+    assert!(matches!(job, BrokerJob::Bytes(_)));
+    drop(job);
+    assert!(handle.await.unwrap().is_err());
+}
+
+#[test]
+fn fetch_bytes_errors_when_broker_gone() {
+    let (tx, rx) = mpsc::unbounded_channel::<BrokerJob>();
+    drop(rx);
+    let request = host_request(HttpMethod::Post, "http://x", None, BTreeMap::new(), None);
+    let err = fetch_bytes(&tx, request).unwrap_err();
+    assert!(err.to_string().contains("channel closed"));
+}

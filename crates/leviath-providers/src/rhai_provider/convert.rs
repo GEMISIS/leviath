@@ -70,7 +70,8 @@ fn parse_usage(obj: Option<&Value>) -> TokenUsage {
 /// Convert the map returned by a script's `inference` function into an
 /// [`InferenceResponse`]. Lenient: missing fields default, and Rhai type quirks
 /// (unit, i64 vs f64) are absorbed by going through `serde_json::Value`.
-pub fn parse_inference_dynamic(value: Dynamic) -> Result<InferenceResponse> {
+pub fn parse_inference_dynamic(mut value: Dynamic) -> Result<InferenceResponse> {
+    blobs_as_base64(&mut value);
     let json: Value = rhai::serde::from_dynamic(&value).map_err(|e| {
         ProviderError::InvalidResponse(format!(
             "provider script returned an unconvertible value: {e}"
@@ -94,6 +95,36 @@ pub fn parse_inference_dynamic(value: Dynamic) -> Result<InferenceResponse> {
         parts: parse_parts(&json),
         content_is_reasoning: false,
     })
+}
+
+/// Turn each `parts` entry of `value` whose `bytes` is a Rhai blob (what
+/// `http_get_bytes` and `http_post_bytes` return) into the same entry with
+/// its bytes as base64 under `data`. A blob has no JSON form, so without
+/// this the whole result fails to convert; anything else is left as it is.
+fn blobs_as_base64(value: &mut Dynamic) {
+    use base64::Engine;
+    let Some(mut map) = value.write_lock::<Map>() else {
+        return;
+    };
+    let Some(mut parts) = map
+        .get_mut("parts")
+        .and_then(|parts| parts.write_lock::<rhai::Array>())
+    else {
+        return;
+    };
+    for part in parts.iter_mut() {
+        let Some(mut entry) = part.write_lock::<Map>() else {
+            continue;
+        };
+        let blob = entry
+            .get("bytes")
+            .and_then(|bytes| bytes.read_lock::<rhai::Blob>().map(|blob| blob.clone()));
+        if let Some(blob) = blob {
+            let data = base64::engine::general_purpose::STANDARD.encode(blob);
+            entry.remove("bytes");
+            entry.insert("data".into(), data.into());
+        }
+    }
 }
 
 /// The `parts` array of an `inference` result or a stream chunk: each a
@@ -174,7 +205,8 @@ fn parse_tool_calls(json: &Value) -> Result<Vec<ToolCall>> {
 /// Convert a map the script passed to `on_chunk` into a [`StreamChunk`]. `tokens`
 /// and `finish_reason` are only populated when present (so mid-stream deltas
 /// don't carry a spurious zeroed usage or a Complete reason).
-pub fn chunk_from_dynamic(value: Dynamic) -> Result<StreamChunk> {
+pub fn chunk_from_dynamic(mut value: Dynamic) -> Result<StreamChunk> {
+    blobs_as_base64(&mut value);
     let json: Value = rhai::serde::from_dynamic(&value).map_err(|e| {
         ProviderError::InvalidResponse(format!("on_chunk received an unconvertible value: {e}"))
     })?;
