@@ -15,7 +15,7 @@ use tokio_stream::StreamExt;
 
 use super::*;
 use crate::provider::{FinishReason, InferenceRequest, RateLimitConfig};
-use host::{EventResult, HostHttpError, HostRequest, HttpExecutor};
+use host::{EventResult, HostBytes, HostHttpError, HostRequest, HttpExecutor};
 
 // ── Fake executor ────────────────────────────────────────────────────────────
 
@@ -25,6 +25,8 @@ struct FakeExecutor {
     responses: Mutex<VecDeque<EventResult>>,
     /// Queued SSE events for the next `execute_stream` call.
     stream_events: Mutex<VecDeque<EventResult>>,
+    /// Queued byte responses, consumed in order.
+    byte_responses: Mutex<VecDeque<std::result::Result<HostBytes, HostHttpError>>>,
     /// Every request the broker performed, for assertions.
     calls: Mutex<Vec<HostRequest>>,
 }
@@ -36,6 +38,12 @@ impl FakeExecutor {
     fn with_responses(responses: Vec<EventResult>) -> Arc<Self> {
         Arc::new(Self {
             responses: Mutex::new(responses.into()),
+            ..Default::default()
+        })
+    }
+    fn with_bytes(responses: Vec<std::result::Result<HostBytes, HostHttpError>>) -> Arc<Self> {
+        Arc::new(Self {
+            byte_responses: Mutex::new(responses.into()),
             ..Default::default()
         })
     }
@@ -59,6 +67,17 @@ impl HttpExecutor for FakeExecutor {
             .unwrap()
             .pop_front()
             .unwrap_or_else(|| Ok("{}".to_string()))
+    }
+    async fn execute_bytes(
+        &self,
+        req: HostRequest,
+    ) -> std::result::Result<HostBytes, HostHttpError> {
+        self.calls.lock().unwrap().push(req);
+        self.byte_responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| Err(HostHttpError::Api("no bytes queued".to_string())))
     }
     async fn execute_stream(&self, req: HostRequest, events: mpsc::Sender<EventResult>) {
         self.calls.lock().unwrap().push(req);
@@ -1319,4 +1338,100 @@ fn a_script_declares_what_its_models_take_and_the_operator_corrects_it() {
     )
     .expect("it compiles");
     assert!(!plain.mime("any").takes_mime());
+}
+
+// ── Raw-bytes replies ────────────────────────────────────────────────────────
+
+fn sound(len: usize) -> HostBytes {
+    HostBytes {
+        mime_type: "audio/mpeg".to_string(),
+        bytes: (0..len).map(|n| (n % 251) as u8).collect(),
+    }
+}
+
+/// An API that answers with the sound itself, not JSON: `http_post_bytes`
+/// hands the body back as a blob, and the blob is the run's audio part.
+#[tokio::test]
+async fn a_script_hands_back_the_audio_an_api_answered_with() {
+    let src = format!(
+        "{NOOP_INIT}fn inference(state, request) {{ \
+         let reply = http_post_bytes(\"http://api/sfx\", to_json(#{{ text: \"frost\" }}), \
+            #{{ \"xi-api-key\": \"k\" }}); \
+         #{{ content: \"\", parts: [#{{ bytes: reply.bytes, mime_type: reply.mime_type, \
+            name: \"sfx.mp3\" }}] }} }}"
+    );
+    // Larger than the old 50 000-element array ceiling, which a blob counts against.
+    let exec = FakeExecutor::with_bytes(vec![Ok(sound(120_000))]);
+    let p = build(&src, exec.clone()).unwrap();
+    let r = p.infer(&request("eleven_text_to_sound_v2")).await.unwrap();
+    assert_eq!(r.parts.len(), 1);
+    assert_eq!(r.parts[0].mime_type.as_str(), "audio/mpeg");
+    assert_eq!(r.parts[0].name.as_deref(), Some("sfx.mp3"));
+    assert_eq!(r.parts[0].bytes, sound(120_000).bytes);
+    let calls = exec.calls.lock().unwrap();
+    assert_eq!(calls[0].method, host::HttpMethod::Post);
+    assert_eq!(calls[0].url, "http://api/sfx");
+    assert_eq!(calls[0].headers.get("xi-api-key").unwrap(), "k");
+    assert!(calls[0].body.as_ref().unwrap().contains("frost"));
+}
+
+/// The shorter overloads: `http_get_bytes(url [, headers])` and
+/// `http_post_bytes(url, body)`.
+#[tokio::test]
+async fn every_bytes_overload_reaches_the_broker() {
+    let src = format!(
+        "{NOOP_INIT}fn inference(state, request) {{ \
+         let a = http_get_bytes(\"http://a\"); \
+         let b = http_get_bytes(\"http://b\", #{{ \"H\": \"v\" }}); \
+         let c = http_post_bytes(\"http://c\", \"{{}}\"); \
+         #{{ content: a.mime_type + \" \" + b.bytes.len() + \" \" + c.bytes.len() }} }}"
+    );
+    let exec = FakeExecutor::with_bytes(vec![Ok(sound(1)), Ok(sound(2)), Ok(sound(3))]);
+    let p = build(&src, exec.clone()).unwrap();
+    let r = p.infer(&request("m")).await.unwrap();
+    assert_eq!(r.content, "audio/mpeg 2 3");
+    let calls = exec.calls.lock().unwrap();
+    assert_eq!(calls[0].method, host::HttpMethod::Get);
+    assert!(calls[0].body.is_none());
+    assert_eq!(calls[1].headers.get("H").unwrap(), "v");
+    assert_eq!(calls[2].method, host::HttpMethod::Post);
+    assert_eq!(calls[2].body.as_deref(), Some("{}"));
+}
+
+/// A bytes request is metered like any other: a 429 backs the limiter off and
+/// reaches the script as a rate-limit error, and a success resets it.
+#[tokio::test]
+async fn a_bytes_request_is_rate_limited_like_any_other() {
+    let src = format!(
+        "{NOOP_INIT}fn inference(s, r) {{ let x = http_get_bytes(\"http://api/x\"); \
+         #{{ content: x.mime_type }} }}"
+    );
+    let limits = || {
+        Some(RateLimitConfig {
+            requests_per_minute: 100,
+            tokens_per_minute: 100_000,
+        })
+    };
+    let limited = FakeExecutor::with_bytes(vec![Err(HostHttpError::RateLimited {
+        retry_after: Some(1),
+    })]);
+    let err = build_rl(&src, limited, limits())
+        .infer(&request("m"))
+        .await
+        .err()
+        .unwrap();
+    assert!(matches!(err, ProviderError::RateLimitExceeded { .. }));
+    let refused = FakeExecutor::with_bytes(vec![Err(HostHttpError::Api("HTTP 400: no".into()))]);
+    let err = build_rl(&src, refused, limits())
+        .infer(&request("m"))
+        .await
+        .err()
+        .unwrap();
+    assert!(matches!(err, ProviderError::ApiError(_)));
+    let served = FakeExecutor::with_bytes(vec![Ok(sound(4))]);
+    let r = build_rl(&src, served, limits())
+        .infer(&request("m"))
+        .await
+        .unwrap();
+    assert_eq!(r.content, "audio/mpeg");
 }

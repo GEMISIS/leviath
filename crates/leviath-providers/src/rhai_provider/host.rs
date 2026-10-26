@@ -2,13 +2,15 @@
 //!
 //! Rhai scripts are synchronous and run on a `spawn_blocking` thread; their
 //! `http_get`/`http_post`/`stream_request` host functions send an [`HttpJob`] /
-//! [`StreamHttpJob`] over a channel to an async **broker** that performs the
+//! [`StreamHttpJob`] (and `http_get_bytes`/`http_post_bytes` a [`BytesJob`])
+//! over a channel to an async **broker** that performs the
 //! real request through an [`HttpExecutor`]. Production uses [`ReqwestExecutor`];
 //! tests inject a fake so no socket is ever bound. Rate limiting lives in the
 //! provider (around the executor), not here - the executor is pure transport.
 
 use leviath_net::read_caps::{
-    BodyReadError, JSON_BODY_CAP, STREAM_FRAME_CAP, frame_within_cap, peer_of, read_text_capped,
+    BodyReadError, JSON_BODY_CAP, STREAM_FRAME_CAP, frame_within_cap, peer_of, read_body_capped,
+    read_text_capped,
 };
 use leviath_net::sse::Utf8Carry;
 use std::collections::BTreeMap;
@@ -97,6 +99,26 @@ pub struct HttpJob {
     pub reply: oneshot::Sender<Result<String, HostHttpError>>,
 }
 
+/// A response body read as bytes: what `http_get_bytes` and `http_post_bytes`
+/// hand a script, for an API that answers with a sound or a picture rather
+/// than JSON.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostBytes {
+    /// The `Content-Type` the server declared, as its essence (lowercased,
+    /// parameters dropped); `application/octet-stream` when it declared none.
+    pub mime_type: String,
+    /// The body, as it arrived.
+    pub bytes: Vec<u8>,
+}
+
+/// A unary HTTP job whose body is read as bytes, not decoded as text.
+pub struct BytesJob {
+    /// The request to perform.
+    pub request: HostRequest,
+    /// Where the broker sends the result back to the blocking host fn.
+    pub reply: oneshot::Sender<Result<HostBytes, HostHttpError>>,
+}
+
 /// A streaming HTTP job: a request plus a channel the broker feeds SSE `data:`
 /// payloads into (one `Ok(String)` per event; a single `Err` on failure).
 pub struct StreamHttpJob {
@@ -110,6 +132,8 @@ pub struct StreamHttpJob {
 pub enum BrokerJob {
     /// A unary request/response.
     Unary(HttpJob),
+    /// A unary request whose response body is bytes.
+    Bytes(BytesJob),
     /// A streaming request.
     Stream(StreamHttpJob),
 }
@@ -120,6 +144,10 @@ pub enum BrokerJob {
 pub trait HttpExecutor: Send + Sync {
     /// Perform a unary request, returning the response body or a classified error.
     async fn execute(&self, req: HostRequest) -> Result<String, HostHttpError>;
+
+    /// Perform a unary request, returning the response body as bytes with
+    /// the type the server declared for it, or a classified error.
+    async fn execute_bytes(&self, req: HostRequest) -> Result<HostBytes, HostHttpError>;
 
     /// Perform a streaming request, sending each SSE `data:` payload into
     /// `events` (dropping the sender on stream end). The default parses standard
@@ -343,6 +371,29 @@ pub fn is_h2_protocol_error(chain: &str) -> bool {
     lower.contains("http2 error") || lower.contains("h2 error")
 }
 
+/// A body read that stopped short, as the error the script sees: a dropped
+/// connection is transport, a body over the cap is the API's doing.
+fn body_error(e: BodyReadError) -> HostHttpError {
+    match e {
+        BodyReadError::Transport(e) => HostHttpError::Transport(e.to_string()),
+        too_large @ BodyReadError::TooLarge { .. } => HostHttpError::Api(too_large.to_string()),
+    }
+}
+
+/// The type a `Content-Type` header declares, as its essence: lowercased,
+/// parameters dropped, and `application/octet-stream` for a missing or
+/// blank header.
+pub(crate) fn declared_type(content_type: Option<&str>) -> String {
+    let essence = content_type
+        .and_then(|ct| ct.split(';').next())
+        .map(|ct| ct.trim().to_lowercase())
+        .unwrap_or_default();
+    match essence.is_empty() {
+        true => "application/octet-stream".to_string(),
+        false => essence,
+    }
+}
+
 /// Content types that are not text a model can read.
 ///
 /// Checked before the body is decoded, so a PDF or an image is named rather
@@ -401,12 +452,7 @@ impl HttpExecutor for ReqwestExecutor {
         }
         let body = read_text_capped(resp, self.body_cap)
             .await
-            .map_err(|e| match e {
-                BodyReadError::Transport(e) => HostHttpError::Transport(e.to_string()),
-                too_large @ BodyReadError::TooLarge { .. } => {
-                    HostHttpError::Api(too_large.to_string())
-                }
-            })?;
+            .map_err(body_error)?;
         // Named rather than returned. A caller cannot tell mojibake from a page
         // that genuinely says very little, and a model handed either will cite
         // whatever it remembers being at that URL.
@@ -419,6 +465,21 @@ impl HttpExecutor for ReqwestExecutor {
             )));
         }
         Ok(body)
+    }
+
+    async fn execute_bytes(&self, req: HostRequest) -> Result<HostBytes, HostHttpError> {
+        let resp = self.send_with_retry(&req).await?;
+        let resp = classify(resp).await?;
+        let mime_type = declared_type(
+            resp.headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+        );
+        // A script holds the body as a Rhai blob, which the engine caps at
+        // `MAX_BLOB_BYTES`: reading past it would only fail inside the call.
+        let cap = self.body_cap.min(leviath_scripting::MAX_BLOB_BYTES);
+        let bytes = read_body_capped(resp, cap).await.map_err(body_error)?;
+        Ok(HostBytes { mime_type, bytes })
     }
 
     async fn execute_stream(

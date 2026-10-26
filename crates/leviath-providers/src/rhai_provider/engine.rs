@@ -10,7 +10,9 @@ use tokio::sync::{mpsc, oneshot};
 use crate::provider::StreamChunk;
 
 use super::convert::{chunk_from_dynamic, host_err_to_rhai, runtime_error};
-use super::host::{BrokerJob, HostRequest, HttpJob, HttpMethod, StreamHttpJob};
+use super::host::{
+    BrokerJob, BytesJob, HostBytes, HostHttpError, HostRequest, HttpJob, HttpMethod, StreamHttpJob,
+};
 
 /// Max Rhai operations per script call - the only wall-clock bound on a pure
 /// (non-I/O) runaway loop; HTTP is bounded separately by the request timeout.
@@ -32,7 +34,12 @@ pub fn build_init_engine(env_allowlist: Arc<Vec<String>>) -> Engine {
     // Provider scripts assemble whole request/response bodies in memory, so they
     // get more headroom than the shared defaults allow.
     engine.set_max_string_size(2_000_000);
-    engine.set_max_array_size(50_000);
+    // Rhai applies the array ceiling to blobs too, and a blob is what
+    // `http_get_bytes`/`http_post_bytes` hand a script: a sound or a picture
+    // a media API answered with. The ceiling therefore matches the largest
+    // body those read, as the tool-script engine's does. Arrays of values are
+    // still bounded by the operation budget, built one element at a time.
+    engine.set_max_array_size(leviath_scripting::MAX_BLOB_BYTES);
     engine.set_max_map_size(50_000);
     register_pure_fns(&mut engine, env_allowlist);
     engine
@@ -51,7 +58,8 @@ pub struct ExecConfig {
 }
 
 /// Build the per-call execution engine: the hardened base plus `http_get`,
-/// `http_post`, `stream_request`, and (when streaming) `leviath_emit_chunk`.
+/// `http_post`, `http_get_bytes`, `http_post_bytes`, `stream_request`, and
+/// (when streaming) `leviath_emit_chunk`.
 pub fn build_exec_engine(cfg: ExecConfig) -> Engine {
     let mut engine = build_init_engine(cfg.env_allowlist.clone());
     register_http_fns(&mut engine, cfg.jobs.clone(), cfg.timeout_secs);
@@ -213,7 +221,7 @@ fn register_http_fns(
             timeout_secs,
         )
     });
-    let j = jobs;
+    let j = jobs.clone();
     engine.register_fn("http_post", move |url: &str, body: &str, headers: Map| {
         unary(
             &j,
@@ -224,6 +232,63 @@ fn register_http_fns(
             timeout_secs,
         )
     });
+    register_bytes_fns(engine, jobs, timeout_secs);
+}
+
+/// `http_get_bytes(url [, headers])` and `http_post_bytes(url, body [,
+/// headers])`: the same requests, with the body handed back as
+/// `#{ mime_type, bytes }`, `bytes` a Rhai blob, for an API that answers with
+/// a sound or a picture instead of JSON. The blob goes straight into a
+/// `parts` entry's `bytes`.
+fn register_bytes_fns(
+    engine: &mut Engine,
+    jobs: mpsc::UnboundedSender<BrokerJob>,
+    timeout_secs: Option<u64>,
+) {
+    let j = jobs.clone();
+    engine.register_fn("http_get_bytes", move |url: &str| {
+        let request = host_request(HttpMethod::Get, url, None, BTreeMap::new(), timeout_secs);
+        fetch_bytes(&j, request)
+    });
+    let j = jobs.clone();
+    engine.register_fn("http_get_bytes", move |url: &str, headers: Map| {
+        let headers = headers_from_map(headers);
+        let request = host_request(HttpMethod::Get, url, None, headers, timeout_secs);
+        fetch_bytes(&j, request)
+    });
+    let j = jobs.clone();
+    engine.register_fn("http_post_bytes", move |url: &str, body: &str| {
+        let body = Some(body.to_string());
+        let request = host_request(HttpMethod::Post, url, body, BTreeMap::new(), timeout_secs);
+        fetch_bytes(&j, request)
+    });
+    let j = jobs;
+    engine.register_fn(
+        "http_post_bytes",
+        move |url: &str, body: &str, headers: Map| {
+            let body = Some(body.to_string());
+            let headers = headers_from_map(headers);
+            let request = host_request(HttpMethod::Post, url, body, headers, timeout_secs);
+            fetch_bytes(&j, request)
+        },
+    );
+}
+
+/// The request a host function asks the broker to perform.
+fn host_request(
+    method: HttpMethod,
+    url: &str,
+    body: Option<String>,
+    headers: BTreeMap<String, String>,
+    timeout_secs: Option<u64>,
+) -> HostRequest {
+    HostRequest {
+        method,
+        url: url.to_string(),
+        body,
+        headers,
+        timeout_secs,
+    }
 }
 
 /// Perform one unary HTTP job: hand it to the broker and block this
@@ -236,21 +301,35 @@ fn unary(
     headers: BTreeMap<String, String>,
     timeout_secs: Option<u64>,
 ) -> Result<String, Box<EvalAltResult>> {
+    let request = host_request(method, url, body, headers, timeout_secs);
+    ask(jobs, |reply| BrokerJob::Unary(HttpJob { request, reply }))
+}
+
+/// Perform one request whose body is bytes, as the map a script reads:
+/// `#{ mime_type, bytes }`.
+fn fetch_bytes(
+    jobs: &mpsc::UnboundedSender<BrokerJob>,
+    request: HostRequest,
+) -> Result<Dynamic, Box<EvalAltResult>> {
+    let HostBytes { mime_type, bytes } =
+        ask(jobs, |reply| BrokerJob::Bytes(BytesJob { request, reply }))?;
+    let mut map = Map::new();
+    map.insert("mime_type".into(), mime_type.into());
+    map.insert("bytes".into(), Dynamic::from_blob(bytes));
+    Ok(map.into())
+}
+
+/// Hand the job `job` builds around a reply channel to the broker, and block
+/// this (blocking-pool) thread on the reply.
+fn ask<T>(
+    jobs: &mpsc::UnboundedSender<BrokerJob>,
+    job: impl FnOnce(oneshot::Sender<Result<T, HostHttpError>>) -> BrokerJob,
+) -> Result<T, Box<EvalAltResult>> {
     let (reply, rx) = oneshot::channel();
-    let job = HttpJob {
-        request: HostRequest {
-            method,
-            url: url.to_string(),
-            body,
-            headers,
-            timeout_secs,
-        },
-        reply,
-    };
-    jobs.send(BrokerJob::Unary(job))
+    jobs.send(job(reply))
         .map_err(|_| runtime_error("provider host channel closed"))?;
     match rx.blocking_recv() {
-        Ok(Ok(text)) => Ok(text),
+        Ok(Ok(body)) => Ok(body),
         Ok(Err(e)) => Err(host_err_to_rhai(e)),
         Err(_) => Err(runtime_error("provider host dropped the reply")),
     }
@@ -271,13 +350,13 @@ fn register_stream_request(
               -> Result<(), Box<EvalAltResult>> {
             let (ev_tx, mut ev_rx) = mpsc::channel::<crate::rhai_provider::host::EventResult>(64);
             let job = StreamHttpJob {
-                request: HostRequest {
-                    method: HttpMethod::Post,
-                    url: url.to_string(),
-                    body: Some(body.to_string()),
-                    headers: headers_from_map(headers),
+                request: host_request(
+                    HttpMethod::Post,
+                    url,
+                    Some(body.to_string()),
+                    headers_from_map(headers),
                     timeout_secs,
-                },
+                ),
                 events: ev_tx,
             };
             jobs.send(BrokerJob::Stream(job))
