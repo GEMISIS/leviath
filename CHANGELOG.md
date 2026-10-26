@@ -38,6 +38,11 @@ same list.
 
 ### Fixed
 
+- A stage whose every `submit_output` was refused by its validator, then ran out
+  of turns, said it "never called submit_output". It now says it submitted N times,
+  every submission was refused, with the last refusal; a fan-out worker's failure
+  says the same. A stage that never submitted keeps the old wording.
+
 - The `conversation` region is sent as the dialogue whatever kind it is
   declared. Declared `compacting` (or `clearable`, `temporary`, ...) it was
   rendered into the system prompt as text, where a turn that called a tool is

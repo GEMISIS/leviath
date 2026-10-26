@@ -318,6 +318,7 @@ type ResolveTransitionQuery = (
     Option<&'static crate::persistence::RunMetadata>,
     Option<&'static crate::persistence::FinalOutput>,
     Option<&'static mut StageLedger>,
+    Option<&'static super::submission::SubmissionRefusals>,
 );
 
 /// How a stage that ended in failure leaves: down its first escape edge of
@@ -376,6 +377,7 @@ pub(crate) fn resolve_transition(
         metadata,
         submitted,
         mut ledger,
+        refusals,
     ) in agents.iter_mut()
     {
         crate::tick_scope::enter(entity);
@@ -515,10 +517,17 @@ pub(crate) fn resolve_transition(
                 let owed_output = graph.stages.iter().any(|s| s.require_output);
                 state.status = match owed_output && submitted.is_none() {
                     true => AgentStatus::Error {
-                        message: "the run finished without the final output it \
-                                  requires; the stage that owes one never called \
-                                  submit_output"
-                            .to_string(),
+                        message: format!(
+                            "the run finished without the final output it requires; {}",
+                            super::submission::SubmissionRefusals::reason(
+                                refusals,
+                                graph
+                                    .stages
+                                    .iter()
+                                    .filter(|s| s.require_output)
+                                    .map(|s| s.name.as_str()),
+                            )
+                        ),
                     },
                     false => AgentStatus::Complete,
                 };

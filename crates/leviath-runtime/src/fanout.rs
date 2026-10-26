@@ -1061,9 +1061,13 @@ fn worker_terminal_result(world: &World, worker: Entity) -> Option<Result<String
                 .map(|o| o.0.content.clone())
             {
                 Some(content) => Some(Ok(content)),
-                None if worker_requires_output(world, worker) => Some(Err(
-                    "worker finished without the final output its stage requires".to_string(),
-                )),
+                None if worker_requires_output(world, worker) => Some(Err(format!(
+                    "worker finished without the final output its stage requires; {}",
+                    crate::pipeline::SubmissionRefusals::reason(
+                        world.get::<crate::pipeline::SubmissionRefusals>(worker),
+                        worker_stage(world, worker).map(|s| s.name.as_str()),
+                    )
+                ))),
                 None => Some(Ok(world
                     .get::<InferenceResult>(worker)
                     .map(|r| r.response.clone())
@@ -1078,17 +1082,14 @@ fn worker_terminal_result(world: &World, worker: Entity) -> Option<Result<String
 
 /// Whether the stage this worker is sitting in demands a final output.
 fn worker_requires_output(world: &World, worker: Entity) -> bool {
-    let Some(spec) = world.get::<RunSpecC>(worker) else {
-        return false;
-    };
-    let Some(cursor) = world.get::<StageCursor>(worker) else {
-        return false;
-    };
-    spec.0
-        .graph
-        .stages
-        .get(cursor.index)
-        .is_some_and(|s| s.require_output)
+    worker_stage(world, worker).is_some_and(|s| s.require_output)
+}
+
+/// The stage this worker is sitting in.
+fn worker_stage(world: &World, worker: Entity) -> Option<&crate::spec::graph::StageDef> {
+    let spec = world.get::<RunSpecC>(worker)?;
+    let cursor = world.get::<StageCursor>(worker)?;
+    spec.0.graph.stages.get(cursor.index)
 }
 
 #[cfg(test)]
@@ -2851,9 +2852,41 @@ mod tests {
         assert_eq!(
             worker_terminal_result(&world, worker),
             Some(Err(
-                "worker finished without the final output its stage requires".to_string()
+                "worker finished without the final output its stage requires; \
+                 the stage that owes one never called submit_output"
+                    .to_string()
             )),
             "the merge has to be told a worker failed, and why"
+        );
+    }
+
+    /// A worker whose every submission was refused says that, not that it
+    /// never submitted.
+    #[test]
+    fn a_worker_whose_submissions_were_all_refused_reports_the_refusals() {
+        let mut world = World::new();
+        let worker = spawn_required_output_worker(&mut world);
+        world
+            .entity_mut(worker)
+            .insert(crate::pipeline::SubmissionRefusals(
+                [(
+                    "w".to_string(),
+                    crate::pipeline::StageRefusals {
+                        visit: "v".to_string(),
+                        count: 3,
+                        last: "[error] no good".to_string(),
+                    },
+                )]
+                .into(),
+            ));
+
+        assert_eq!(
+            worker_terminal_result(&world, worker),
+            Some(Err(
+                "worker finished without the final output its stage requires; stage 'w' \
+                 submitted 3 times, every submission was refused; last refusal: [error] no good"
+                    .to_string()
+            ))
         );
     }
 

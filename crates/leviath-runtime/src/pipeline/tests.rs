@@ -10325,6 +10325,47 @@ fn a_run_that_never_produced_its_required_output_errors() {
         panic!("a run with no answer must not read as success, got {status:?}");
     };
     assert!(message.contains("final output"), "{message}");
+    assert!(message.contains("never called submit_output"), "{message}");
+}
+
+/// A stage that submitted and was refused every time says so, with the count
+/// and the last refusal, rather than claiming it never submitted.
+#[test]
+fn a_run_whose_every_submission_was_refused_says_so() {
+    let mut world = World::new();
+    let e = spawn_transition_agent(
+        &mut world,
+        owing_output(true),
+        vec![si("m0")],
+        VisitCounts::default(),
+    );
+    world
+        .entity_mut(e)
+        .insert(crate::pipeline::SubmissionRefusals(
+            [(
+                "only".to_string(),
+                crate::pipeline::StageRefusals {
+                    visit: "v".to_string(),
+                    count: 3,
+                    last: "[error] rows must be sorted".to_string(),
+                },
+            )]
+            .into(),
+        ));
+
+    run_transition(&mut world);
+
+    let AgentStatus::Error { message } = world.get::<AgentState>(e).unwrap().status.clone() else {
+        panic!("a run with no answer must not read as success");
+    };
+    assert!(
+        message.contains(
+            "submitted 3 times, every submission was refused; last refusal: \
+             [error] rows must be sorted"
+        ),
+        "{message}"
+    );
+    assert!(!message.contains("never called"), "{message}");
 }
 
 #[test]

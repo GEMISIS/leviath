@@ -452,6 +452,8 @@ type DispatchToolsQuery = (
         Option<&'static mut StageLedger>,
         // What the stage's validator tool said about this batch's answers.
         Option<&'static super::validator_tool::ValidatorVerdicts>,
+        // What this run's stages have had refused, for the failure message.
+        Option<&'static super::submission::SubmissionRefusals>,
     ),
     Option<&'static crate::components::OutputValidators>,
     // For the submit_output guard: a submission that is exactly the name of a
@@ -534,7 +536,7 @@ pub(crate) fn dispatch_tools(
         resolved,
         auto_gate,
         cursor,
-        (metadata, stage_progress, mut io_buffer, recorded, kept, mut ledger, judged),
+        (metadata, stage_progress, mut io_buffer, recorded, kept, mut ledger, judged, refusals),
         validators,
         blueprint,
     ) in agents.iter_mut()
@@ -997,6 +999,7 @@ pub(crate) fn dispatch_tools(
         // Settled here for the same reason: the batch held above is judged
         // again once its prompts resolve, against what came before it.
         // A call that failed here keeps the stage going, so the model sees why.
+        submissions.note_refusals(&mut commands.entity(entity), state, refusals);
         let stage_ends = submissions.settle(
             &mut commands.entity(entity),
             state,
