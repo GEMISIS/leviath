@@ -258,6 +258,89 @@ fn settling_keeps_the_visit_and_says_when_the_stage_ends() {
     assert_eq!(world.get::<VisitSubmissions>(agent).unwrap().repeats, 0);
 }
 
+/// Three submissions a validator turned away are counted, with the last
+/// refusal, across batches of one visit; a new visit starts again, an
+/// accepted answer clears them, and a batch with neither leaves them be.
+#[test]
+fn refused_submissions_are_counted_per_visit_and_cleared_by_an_answer() {
+    let mut world = World::new();
+    let agent = world.spawn_empty().id();
+    let mut w = window();
+    let stage = g::stage("s");
+    let refuse = |world: &mut World, state: &AgentState| {
+        let prior = world.get::<SubmissionRefusals>(agent).cloned();
+        let mut queue = bevy_ecs::world::CommandQueue::default();
+        let mut commands = Commands::new(&mut queue, world);
+        let mut batch = BatchSubmissions::new(Some(&stage), state, None, None, None, None);
+        batch.apply(&submit("c", " "), None, &ctx(), &mut window());
+        batch.note_refusals(&mut commands.entity(agent), state, prior.as_ref());
+        queue.apply(world);
+    };
+    for _ in 0..3 {
+        refuse(&mut world, &state());
+    }
+    let held = world.get::<SubmissionRefusals>(agent).unwrap().clone();
+    let record = &held.0["s"];
+    assert_eq!(record.count, 3);
+    assert!(record.last.starts_with("[error] final output is empty"));
+    assert_eq!(
+        SubmissionRefusals::reason(Some(&held), ["s"]),
+        format!(
+            "stage 's' submitted 3 times, every submission was refused; last refusal: {}",
+            record.last
+        )
+    );
+
+    // One refusal reads in the singular, and a new visit counts afresh.
+    refuse(&mut world, &at("v2"));
+    let held = world.get::<SubmissionRefusals>(agent).unwrap().clone();
+    assert_eq!(held.0["s"].count, 1);
+    assert!(SubmissionRefusals::reason(Some(&held), ["s"]).contains("submitted 1 time,"));
+
+    // A batch that submitted nothing leaves the record alone.
+    let mut queue = bevy_ecs::world::CommandQueue::default();
+    let mut commands = Commands::new(&mut queue, &world);
+    let idle = BatchSubmissions::new(Some(&stage), &at("v2"), None, None, None, None);
+    idle.note_refusals(&mut commands.entity(agent), &at("v2"), Some(&held));
+    queue.apply(&mut world);
+    assert_eq!(world.get::<SubmissionRefusals>(agent), Some(&held));
+
+    // An accepted answer clears the stage.
+    let mut queue = bevy_ecs::world::CommandQueue::default();
+    let mut commands = Commands::new(&mut queue, &world);
+    let mut good = BatchSubmissions::new(Some(&stage), &at("v2"), None, None, None, None);
+    good.apply(&submit("c", "an answer"), None, &ctx(), &mut w);
+    good.note_refusals(&mut commands.entity(agent), &at("v2"), Some(&held));
+    queue.apply(&mut world);
+    assert!(world.get::<SubmissionRefusals>(agent).unwrap().0.is_empty());
+}
+
+/// A long refusal is cut, and a run with no record says the stage never
+/// called `submit_output`.
+#[test]
+fn the_last_refusal_is_cut_and_no_record_means_never_called() {
+    let mut world = World::new();
+    let agent = world.spawn_empty().id();
+    let stage = g::stage("s");
+    let mut queue = bevy_ecs::world::CommandQueue::default();
+    let mut commands = Commands::new(&mut queue, &world);
+    let mut batch = BatchSubmissions::new(Some(&stage), &state(), None, None, None, None);
+    batch.refused.push("y".repeat(900));
+    batch.note_refusals(&mut commands.entity(agent), &state(), None);
+    queue.apply(&mut world);
+    let held = world.get::<SubmissionRefusals>(agent).unwrap();
+    assert_eq!(held.0["s"].last.chars().count(), REFUSAL_CHARS + 1);
+
+    for none in [None, Some(&SubmissionRefusals::default())] {
+        assert_eq!(
+            SubmissionRefusals::reason(none, ["s"]),
+            "the stage that owes one never called submit_output"
+        );
+    }
+    // Refusals in another stage are not this stage's.
+    assert!(SubmissionRefusals::reason(Some(held), ["other"]).contains("never called"));
+}
+
 /// With nothing kept, as after a daemon restart, the answer is the visit's
 /// when this stage recorded it since the visit began. A batch run again after
 /// a gate prompt starts from what its hold kept, and a hold keeps where the

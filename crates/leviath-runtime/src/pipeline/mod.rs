@@ -137,9 +137,9 @@ pub use tool_verdicts::{DecideCtx, DecidedCall, Decision, ToolGrants, ToolVerdic
 mod batch_record;
 mod submission;
 pub(crate) mod validator_tool;
+pub(crate) use submission::{EndAfterBatch, HeldSubmission, SubmissionRefusals};
 #[cfg(test)]
-pub(crate) use submission::VisitSubmissions;
-pub(crate) use submission::{EndAfterBatch, HeldSubmission};
+pub(crate) use submission::{StageRefusals, VisitSubmissions};
 mod tools;
 pub(crate) use tools::{
     AwaitingTools, ContextToolResults, LandedResults, RecoveredResults, ResumedExecutions,

@@ -57,6 +57,51 @@ pub(crate) struct VisitSubmissions {
     pub repeats: u32,
 }
 
+/// How many characters of the last refusal a failure message carries.
+const REFUSAL_CHARS: usize = 500;
+
+/// What a stage's visit has had refused: how many `submit_output` calls its
+/// validators turned away, and what the last refusal said.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StageRefusals {
+    /// The visit the refusals belong to; a new visit starts the count again.
+    pub visit: String,
+    /// Submissions refused.
+    pub count: u32,
+    /// The last refusal, cut to a sensible length.
+    pub last: String,
+}
+
+/// The refusals each stage of a run has had, kept so that a stage that ends
+/// without an answer can say it was refused rather than that it never tried.
+/// Lost with the world on a restart, which then falls back to the plainer
+/// wording.
+#[derive(Component, Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SubmissionRefusals(pub std::collections::BTreeMap<String, StageRefusals>);
+
+impl SubmissionRefusals {
+    /// Why a run (or a worker) that owed an answer has none: the refusals of
+    /// the first of `stages` that has any, else that no stage ever called
+    /// `submit_output`.
+    pub(crate) fn reason<'a>(
+        refusals: Option<&Self>,
+        stages: impl IntoIterator<Item = &'a str>,
+    ) -> String {
+        let refused =
+            refusals.and_then(|r| stages.into_iter().find_map(|s| r.0.get(s).map(|x| (s, x))));
+        match refused {
+            Some((stage, r)) => format!(
+                "stage '{stage}' submitted {} time{}, every submission was refused; \
+                 last refusal: {}",
+                r.count,
+                if r.count == 1 { "" } else { "s" },
+                r.last
+            ),
+            None => "the stage that owes one never called submit_output".to_string(),
+        }
+    }
+}
+
 /// The answer a batch started from, kept on its gate hold so that the batch,
 /// run again once the prompts resolve, is judged as it was the first time:
 /// by then its own submission has been committed.
@@ -145,6 +190,8 @@ pub(super) struct BatchSubmissions<'a> {
     /// Whether a call in this batch handed back an answer: one recorded, or
     /// the one already held, again.
     answered: bool,
+    /// What each refused `submit_output` call in this batch was told.
+    refused: Vec<String>,
 }
 
 impl<'a> BatchSubmissions<'a> {
@@ -186,6 +233,7 @@ impl<'a> BatchSubmissions<'a> {
             repeats,
             start_repeats: repeats,
             answered: false,
+            refused: Vec::new(),
         }
     }
 
@@ -253,8 +301,41 @@ impl<'a> BatchSubmissions<'a> {
             self.submitted = Some(output);
             self.repeats = 0;
             self.answered = true;
+        } else {
+            self.refused.push(text.clone());
         }
         text
+    }
+
+    /// Keep the batch's refusals against the stage's visit, or forget the
+    /// stage's once it has an answer. `prior` is what the agent held.
+    pub(super) fn note_refusals(
+        &self,
+        agent: &mut EntityCommands,
+        state: &AgentState,
+        prior: Option<&SubmissionRefusals>,
+    ) {
+        let mut next = prior.cloned().unwrap_or_default();
+        if self.submitted.is_some() {
+            next.0.remove(&state.current_stage);
+        } else if let Some(last) = self.refused.last() {
+            let before = next
+                .0
+                .get(&state.current_stage)
+                .filter(|r| r.visit == state.current_visit)
+                .map_or(0, |r| r.count);
+            next.0.insert(
+                state.current_stage.clone(),
+                StageRefusals {
+                    visit: state.current_visit.clone(),
+                    count: before + self.refused.len() as u32,
+                    last: super::one_line(last, REFUSAL_CHARS),
+                },
+            );
+        } else {
+            return;
+        }
+        agent.insert(next);
     }
 
     /// Keep what the batch came to, for the visit's next batch and for the
