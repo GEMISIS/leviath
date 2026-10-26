@@ -1452,7 +1452,8 @@ Your rows in the mime registry, which says what each [mime type](/docs/mime) is,
 `mime_types.toml` beside `config.toml` (so under the data root, and wherever
 `LEVIATH_CONFIG_PATH` points when that is set). A key is a `type/subtype` or a `type/*`
 pattern; name only what you change, and every other field resolves from the built-in table (the
-exact type, then `type/*`, then `*/*`). `lev mime init` writes this example to start from, and the
+exact type, then a `+json`, `+xml` or `+yaml` suffix, then `type/*`, then `*/*`, which is text, so a type with no
+row anywhere is treated as text). `lev mime init` writes this example to start from, and the
 [live copy](/schema/mime_types.example.toml) is the one the tests check. `lev mime add` and
 `lev mime remove` edit rows in place, and `lev mime list` prints the table the file makes with
 each row's source. An edit reaches the next run at once and every run already under way within

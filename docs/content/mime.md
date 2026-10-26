@@ -44,7 +44,12 @@ size, dimensions, a token estimate. Deleting a run deletes its blobs.
 Leviath does not know what an image is. A **mime registry** says what each type is, and you can
 extend it. Every type resolves to a row with a family, a text flag, a token rule, extensions,
 and optionally a magic prefix and a stand-in template. A row for `image/*` supplies defaults
-for every image subtype; `*/*` is the last resort.
+for every image subtype; `*/*` is the last resort, and it is **text**: a type nobody described
+is assumed to be readable text, not an opaque blob. A structured-syntax suffix (`+json`, `+xml`,
+`+yaml`) lends its settings to a subtype with no row of its own. Formats that really are binary
+(images, audio, video, fonts, archives, `application/octet-stream`, WebAssembly, SQLite) have
+explicit rows saying so, and bytes that are not UTF-8 with no name to go on still resolve to
+`application/octet-stream`.
 
 ```toml
 # ~/.leviath/mime_types.toml (lev mime init writes an example)
