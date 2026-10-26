@@ -44,6 +44,12 @@ pub enum UnavailableReason {
     /// moved to the next route, and the provider is not taken out of service
     /// for it (see [`Self::is_provider_wide`]).
     ModelUnavailable,
+    /// The provider has retired the model: its own listing names a shutdown
+    /// date that has passed. Unlike [`Self::ModelUnavailable`] this is not an
+    /// outage, so nothing retries it; the call moves to the next route at
+    /// once, and like that one it says nothing about the provider's other
+    /// models.
+    ModelRetired,
 }
 
 impl UnavailableReason {
@@ -55,6 +61,7 @@ impl UnavailableReason {
             UnavailableReason::Forbidden => "forbidden",
             UnavailableReason::Unreachable => "unreachable",
             UnavailableReason::ModelUnavailable => "model-unavailable",
+            UnavailableReason::ModelRetired => "model-retired",
         }
     }
 
@@ -65,7 +72,10 @@ impl UnavailableReason {
     /// that model's route; counting it against the provider would stop every
     /// run on every other model it serves.
     pub fn is_provider_wide(self) -> bool {
-        !matches!(self, UnavailableReason::ModelUnavailable)
+        !matches!(
+            self,
+            UnavailableReason::ModelUnavailable | UnavailableReason::ModelRetired
+        )
     }
 
     /// What the operator should actually do about it.
@@ -90,6 +100,10 @@ impl UnavailableReason {
             UnavailableReason::ModelUnavailable => {
                 "the provider could not serve this model just now: usually a short \
                  outage; list another provider or model to move to"
+            }
+            UnavailableReason::ModelRetired => {
+                "the provider has retired this model and will not serve it again: \
+                 name a current one (`lev models list` shows what it serves)"
             }
         }
     }
@@ -1826,6 +1840,7 @@ mod tests {
             UnavailableReason::Forbidden,
             UnavailableReason::Unreachable,
             UnavailableReason::ModelUnavailable,
+            UnavailableReason::ModelRetired,
         ] {
             assert!(!reason.label().is_empty());
             assert!(!reason.remedy().is_empty());
@@ -1833,12 +1848,35 @@ mod tests {
             // stay a single lowercase token.
             assert_eq!(reason.label(), reason.label().to_ascii_lowercase());
             assert!(!reason.label().contains(' '));
-            // Only one model's outage leaves the provider in service.
+            // Only one model's outage or retirement leaves the provider in
+            // service.
             assert_eq!(
                 reason.is_provider_wide(),
-                reason != UnavailableReason::ModelUnavailable
+                !matches!(
+                    reason,
+                    UnavailableReason::ModelUnavailable | UnavailableReason::ModelRetired
+                )
             );
         }
+    }
+
+    /// A retired model is not an outage: it is neither retried nor held
+    /// against the provider, and it still moves the call to the next route.
+    #[test]
+    fn a_retired_model_moves_on_at_once() {
+        let err = ProviderError::Unavailable {
+            reason: UnavailableReason::ModelRetired,
+            detail: "openai/sora-2 was retired by OpenAI on 2026-09-24".into(),
+        };
+        assert!(!err.is_transient());
+        assert_eq!(
+            err.unavailable_reason(),
+            Some(UnavailableReason::ModelRetired)
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("retired this model"), "{msg}");
+        assert!(msg.contains("on 2026-09-24"), "{msg}");
+        assert!(!msg.contains("outage"), "{msg}");
     }
 
     #[test]

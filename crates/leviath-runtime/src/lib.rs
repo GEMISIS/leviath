@@ -107,6 +107,7 @@ pub mod insert;
 pub mod interaction_hub;
 pub mod interaction_points;
 pub(crate) mod lane_supervisor;
+pub(crate) mod listed_404s;
 pub(crate) mod mime_tools;
 pub(crate) mod output_tool;
 pub mod persist_stats;

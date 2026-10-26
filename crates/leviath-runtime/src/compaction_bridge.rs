@@ -130,6 +130,7 @@ async fn summarize(
         };
         match tokio::time::timeout(deadline, call).await {
             Ok(Ok(response)) => {
+                crate::listed_404s::answered(route.provider.name(), &route.model);
                 batch.usage.push(response.tokens_used);
                 batch.summaries.push((region.clone(), response.content));
             }

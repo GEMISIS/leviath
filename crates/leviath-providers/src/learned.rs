@@ -101,6 +101,20 @@ impl LearnedModel {
         }
     }
 
+    /// The date the provider retired this model, when it published one and
+    /// `today` is on or past it; `None` while it is still in service.
+    ///
+    /// A provider keeps listing a model after its shutdown date (OpenAI's
+    /// `/v1/models` still named `sora-2` a month after its `shutdown_date`)
+    /// and answers every call to it with a 404. Read off the listing, that
+    /// 404 looks like an outage of a listed model and is retried, so the date
+    /// is the one signal that the model is gone for good.
+    pub fn retired_by(&self, today: chrono::NaiveDate) -> Option<&str> {
+        self.retires
+            .as_deref()
+            .filter(|date| retirement_day(date).is_some_and(|day| day <= today))
+    }
+
     /// `base` with the mime lists this record names replaced.
     pub fn apply_mime(
         &self,
@@ -185,6 +199,48 @@ impl LearnedModels {
         self.find_by_key(key).and_then(|id| self.get(&id))
     }
 
+    /// The date the listing says the model `key` names (see
+    /// [`Self::find_by_key`]) was retired, when that date has passed.
+    ///
+    /// The id still stands in the store, so a refusal can say why; what
+    /// leaves is every offer of it: [`Self::catalog_in_service`] and
+    /// [`Self::to_model_infos_in_service`].
+    pub fn retired(&self, key: &str) -> Option<String> {
+        self.listed(key)?.retired_by(today()).map(str::to_string)
+    }
+
+    /// [`Self::catalog`] without the models whose retirement date has passed.
+    pub fn catalog_in_service(&self) -> Option<Vec<String>> {
+        let today = today();
+        let store = leviath_core::sync::lock(&self.0);
+        (!store.is_empty()).then(|| {
+            store
+                .iter()
+                .filter(|(_, m)| m.retired_by(today).is_none())
+                .map(|(id, _)| id.clone())
+                .collect()
+        })
+    }
+
+    /// [`Self::to_model_infos`] without the models whose retirement date has
+    /// passed: a picker offered a model its provider has shut down picks a
+    /// route that can only fail.
+    pub fn to_model_infos_in_service(
+        &self,
+        provider: &str,
+        capabilities: impl Fn(&str) -> ModelCapabilities,
+    ) -> Vec<ModelInfo> {
+        let today = today();
+        let mut infos = self.to_model_infos(provider, capabilities);
+        infos.retain(|m| {
+            m.retires
+                .as_deref()
+                .and_then(retirement_day)
+                .is_none_or(|day| day > today)
+        });
+        infos
+    }
+
     /// `base` corrected by what the listing said about `id`, if anything.
     pub fn corrected(&self, id: &str, base: ModelCapabilities) -> ModelCapabilities {
         match self.get(id) {
@@ -229,6 +285,19 @@ impl LearnedModels {
             })
             .collect()
     }
+}
+
+/// Today's date in UTC, the calendar a provider's shutdown date is written in.
+fn today() -> chrono::NaiveDate {
+    chrono::Utc::now().date_naive()
+}
+
+/// The day a published retirement date names: `YYYY-MM-DD`, or a timestamp
+/// that starts with one (`2026-09-24T00:00:00Z`). `None` for anything else,
+/// which leaves the model in service: retiring a model on a date nobody can
+/// read would take away a route that works.
+fn retirement_day(date: &str) -> Option<chrono::NaiveDate> {
+    chrono::NaiveDate::parse_from_str(date.trim().get(..10)?, "%Y-%m-%d").ok()
 }
 
 /// Unix seconds for an RFC 3339 timestamp of the form `YYYY-MM-DDTHH:MM:SSZ`.
@@ -469,6 +538,61 @@ mod tests {
         assert_eq!(listed[1].released, Some(86_400));
         assert_eq!(listed[1].retires.as_deref(), Some("2027-01-01"));
         assert_eq!(listed[1].pricing, Some(ModelPricing::flat(1.0, 2.0)));
+    }
+
+    fn day(text: &str) -> chrono::NaiveDate {
+        chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d").unwrap()
+    }
+
+    fn retiring(date: &str) -> LearnedModel {
+        LearnedModel {
+            retires: Some(date.to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// Retired on the shutdown day itself and after it; in service before
+    /// it, with no date, and with a date nobody can read.
+    #[test]
+    fn a_model_is_retired_from_its_shutdown_date_on() {
+        let today = day("2026-10-26");
+        assert_eq!(retiring("2026-09-24").retired_by(today), Some("2026-09-24"));
+        assert_eq!(retiring("2026-10-26").retired_by(today), Some("2026-10-26"));
+        assert_eq!(
+            retiring("2026-09-24T00:00:00Z").retired_by(today),
+            Some("2026-09-24T00:00:00Z")
+        );
+        assert_eq!(retiring("2026-10-27").retired_by(today), None);
+        assert_eq!(LearnedModel::default().retired_by(today), None);
+        assert_eq!(retiring("soon").retired_by(today), None);
+        assert_eq!(retiring("").retired_by(today), None);
+    }
+
+    /// A retired model stays in the store, so a refusal can name its date,
+    /// and leaves every offer: the catalogue and the listing.
+    #[test]
+    fn a_retired_model_is_kept_but_no_longer_offered() {
+        let models = LearnedModels::default();
+        assert_eq!(models.catalog_in_service(), None, "unread: cannot say");
+        models.replace(HashMap::from([
+            ("sora-2".to_string(), retiring("2000-01-01")),
+            ("gpt-9".to_string(), retiring("2999-01-01")),
+            ("gpt-5.5".to_string(), LearnedModel::default()),
+        ]));
+        assert_eq!(models.retired("sora-2").as_deref(), Some("2000-01-01"));
+        assert_eq!(models.retired("gpt-9"), None);
+        assert_eq!(models.retired("gpt-5.5"), None);
+        assert_eq!(models.retired("never-listed"), None);
+        assert!(models.contains("sora-2"));
+        let mut catalog = models.catalog_in_service().unwrap();
+        catalog.sort();
+        assert_eq!(catalog, ["gpt-5.5", "gpt-9"]);
+        let listed: Vec<String> = models
+            .to_model_infos_in_service("openai", table_for)
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(listed, ["gpt-5.5", "gpt-9"]);
     }
 
     #[test]

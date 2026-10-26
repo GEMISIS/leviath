@@ -569,12 +569,17 @@ fn open_route_providers(
 /// sends the stage somewhere that cannot answer it first. Only when nobody
 /// lists the model do the guesses stand, which is what keeps a model newer
 /// than every table routable at all.
+///
+/// A listing a provider has answered nothing but 404s for in this process
+/// ([`crate::listed_404s`]) is not counted as one: the route is offered only
+/// as the guess it now is.
 fn open_route_claims(
     providers: Vec<(String, Arc<dyn Provider>)>,
     key: &str,
 ) -> Vec<(String, String)> {
     let listed: Vec<(String, String)> = providers
         .iter()
+        .filter(|(name, _)| !crate::listed_404s::given_up(name, key))
         .filter_map(|(name, p)| p.lists_model(key).map(|id| (name.clone(), id)))
         .collect();
     if !listed.is_empty() {
@@ -4127,5 +4132,30 @@ mod tests {
             let caps = gateway.capabilities(&claims[0].1);
             assert_eq!(caps.max_context_tokens, 1_048_576, "{bare}");
         }
+    }
+
+    /// A listing given up on after a run of 404s no longer wins an open
+    /// route over another provider that lists the model.
+    #[test]
+    fn a_listing_given_up_on_does_not_claim_an_open_route() {
+        let client = || leviath_providers::provider::build_http_client(None).unwrap();
+        let meta = || -> Arc<dyn Provider> {
+            Arc::new(leviath_providers::meta::MetaProvider::new(
+                client(),
+                "k".into(),
+            ))
+        };
+        let both = vec![
+            ("listed-404s-resolve".to_string(), meta()),
+            ("listed-404s-other".to_string(), meta()),
+        ];
+        while crate::listed_404s::missed("listed-404s-resolve", "muse-wonder-1.0").is_none() {}
+        assert_eq!(
+            open_route_claims(both, "muse-wonder-1.0"),
+            [(
+                "listed-404s-other".to_string(),
+                "muse-wonder-1.0".to_string()
+            )]
+        );
     }
 }
