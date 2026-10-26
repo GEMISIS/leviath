@@ -38,6 +38,15 @@ same list.
 
 ### Fixed
 
+- A model OpenRouter's upstream caches by prefix on its own (Meta's Muse models)
+  read almost nothing from cache: under 1% of 270K-750K prompt tokens in an agent
+  run. Such a model's request now carries a `prompt_cache_key` (the hash of the
+  stable head of its system prompt), which keeps it on the upstream that cached
+  that head, and the head goes as one system message with the blocks that move
+  after it. A measured probe on Muse Spark read 21 745 of 22 256 tokens from
+  cache on the second call, at a seventh of the price. A stage's own
+  `prompt_cache_key` still wins; Anthropic and Gemini keep their markers.
+
 - A stage whose every `submit_output` was refused by its validator, then ran out
   of turns, said it "never called submit_output". It now says it submitted N times,
   every submission was refused, with the last refusal; a fan-out worker's failure
