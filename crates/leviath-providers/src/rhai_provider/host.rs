@@ -99,6 +99,12 @@ pub struct HttpJob {
     pub reply: oneshot::Sender<Result<String, HostHttpError>>,
 }
 
+/// The most of a body `execute_bytes` reads: 32 MiB. A script holds the
+/// body as a Rhai blob, which the engine caps at the same size
+/// (`leviath_scripting::MAX_BLOB_BYTES`), so reading past it would only fail
+/// inside the call.
+pub const BYTES_BODY_CAP: usize = 32 * 1024 * 1024;
+
 /// A response body read as bytes: what `http_get_bytes` and `http_post_bytes`
 /// hand a script, for an API that answers with a sound or a picture rather
 /// than JSON.
@@ -475,9 +481,7 @@ impl HttpExecutor for ReqwestExecutor {
                 .get(reqwest::header::CONTENT_TYPE)
                 .and_then(|v| v.to_str().ok()),
         );
-        // A script holds the body as a Rhai blob, which the engine caps at
-        // `MAX_BLOB_BYTES`: reading past it would only fail inside the call.
-        let cap = self.body_cap.min(leviath_scripting::MAX_BLOB_BYTES);
+        let cap = self.body_cap.min(BYTES_BODY_CAP);
         let bytes = read_body_capped(resp, cap).await.map_err(body_error)?;
         Ok(HostBytes { mime_type, bytes })
     }
