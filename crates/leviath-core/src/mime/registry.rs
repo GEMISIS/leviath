@@ -468,21 +468,35 @@ impl MimeRegistry {
 
     /// The resolved information for `mime_type`. Always answers: the `*/*`
     /// row is the floor, and a registry without one falls back to the
-    /// compiled-in binary defaults.
+    /// compiled-in defaults, which treat an unknown type as text.
+    ///
+    /// Layers, lowest first: `*/*`, the `type/*` family row, a structured
+    /// syntax suffix (`+json`, `+xml`, `+yaml` borrow the settings of
+    /// `application/json` and so on, but not its extensions), then the exact
+    /// row.
     pub fn info(&self, mime_type: &MimeType) -> MimeInfo {
-        let mut family = "binary".to_string();
-        let mut text = false;
-        let mut tokens = TokenRule::PerByte(0.34);
+        let mut family = "text".to_string();
+        let mut text = true;
+        let mut tokens = TokenRule::PerByte(0.25);
         let mut extensions = Vec::new();
         let mut stand_in = None;
         let mut check = None;
         let mut source = "fallback".to_string();
+        let suffix_key = mime_type
+            .subtype()
+            .rsplit_once('+')
+            .filter(|(_, sfx)| matches!(*sfx, "json" | "xml" | "yaml"))
+            .map(|(_, sfx)| format!("application/{sfx}"));
+        let exact = mime_type.as_str().to_string();
         let chain = [
-            "*/*".to_string(),
-            mime_type.family_pattern(),
-            mime_type.as_str().to_string(),
+            Some("*/*".to_string()),
+            Some(mime_type.family_pattern()),
+            suffix_key.clone(),
+            Some(exact),
         ];
-        for key in chain {
+        for key in chain.into_iter().flatten() {
+            let is_suffix =
+                suffix_key.as_deref() == Some(key.as_str()) && key != mime_type.as_str();
             if let Some(l) = self.rows.get(&key) {
                 if let Some(f) = &l.row.family {
                     family = f.clone();
@@ -493,7 +507,7 @@ impl MimeRegistry {
                 if let Some(r) = l.row.tokens {
                     tokens = r;
                 }
-                if let Some(e) = &l.row.extensions {
+                if let (Some(e), false) = (&l.row.extensions, is_suffix) {
                     extensions = e.iter().map(|s| s.to_ascii_lowercase()).collect();
                 }
                 if let Some(s) = &l.row.stand_in {
@@ -685,21 +699,69 @@ mod tests {
         assert!(md.text);
         assert_eq!(md.family, "text");
         let unknown = reg.info(&mt("application/x-made-up"));
-        assert_eq!(unknown.family, "binary");
-        assert!(!unknown.text);
+        assert_eq!(unknown.family, "text");
+        assert!(unknown.text);
         assert_eq!(unknown.source, "builtin");
         let unknown_kind = reg.info(&mt("chemical/x-pdb"));
-        assert_eq!(unknown_kind.family, "binary");
+        assert_eq!(unknown_kind.family, "text");
         assert!(!reg.keys().is_empty());
         assert!(reg.row("image/png").is_some());
         assert!(reg.row("nope").is_none());
     }
 
     #[test]
+    fn unknown_is_text_but_known_binaries_stay_binary() {
+        let reg = MimeRegistry::builtin();
+        for t in [
+            "application/vnd.api+json",
+            "application/atom+xml",
+            "application/foo+yaml",
+            "font/x-odd+json",
+            "application/toml",
+            "application/x-toml",
+            "application/yaml",
+            "application/x-yaml",
+            "text/x-yaml",
+            "application/x-never-heard-of",
+        ] {
+            let i = reg.info(&mt(t));
+            assert!(i.text, "{t} should be text");
+            assert_eq!(i.family, "text", "{t}");
+        }
+        assert!(
+            reg.info(&mt("application/vnd.api+json"))
+                .extensions
+                .is_empty()
+        );
+        for t in [
+            "font/woff2",
+            "font/ttf",
+            "font/otf",
+            "font/woff",
+            "application/gzip",
+            "application/x-tar",
+            "application/wasm",
+            "application/x-sqlite3",
+            "application/zip",
+            "application/octet-stream",
+        ] {
+            let i = reg.info(&mt(t));
+            assert!(!i.text, "{t} should be binary");
+            assert_eq!(i.family, "binary", "{t}");
+        }
+        assert_eq!(reg.info(&mt("application/pdf")).family, "document");
+        assert_eq!(
+            reg.resolve(None, None, &[0xff, 0xfe, 0x00]).as_str(),
+            "application/octet-stream"
+        );
+    }
+
+    #[test]
     fn empty_registry_has_a_floor() {
         let reg = MimeRegistry::empty();
         let info = reg.info(&mt("image/png"));
-        assert_eq!(info.family, "binary");
+        assert_eq!(info.family, "text");
+        assert!(info.text);
         assert_eq!(info.source, "fallback");
         assert!(reg.from_extension("png").is_none());
         assert!(reg.sniff(b"\x89PNG").is_none());

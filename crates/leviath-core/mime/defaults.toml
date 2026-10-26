@@ -3,7 +3,9 @@
 # Every row is a `[mime_types."type/subtype"]` table, the same shape a user
 # writes in `~/.leviath/config.toml` or a blueprint writes in its manifest.
 # A row for `type/*` supplies defaults for every subtype; `*/*` is the last
-# resort. A user row with the same key replaces these fields one by one.
+# resort, and it is text: a type nobody described is assumed readable, and
+# bytes that are not UTF-8 are still resolved to `application/octet-stream`
+# when sniffed. A user row with the same key replaces these fields one by one.
 #
 # Keys:
 #   family     what providers key their encoders on (text, image, audio,
@@ -19,9 +21,9 @@
 #              {type} {name} {size} {dims} {duration} {pages}
 
 ["*/*"]
-family = "binary"
-text = false
-tokens = { per_byte = 0.34 }
+family = "text"
+text = true
+tokens = { per_byte = 0.25 }
 
 ["text/*"]
 family = "text"
@@ -61,6 +63,31 @@ text = true
 tokens = { per_byte = 0.25 }
 extensions = ["json"]
 
+["application/toml"]
+family = "text"
+text = true
+tokens = { per_byte = 0.25 }
+
+["application/x-toml"]
+family = "text"
+text = true
+tokens = { per_byte = 0.25 }
+
+["application/yaml"]
+family = "text"
+text = true
+tokens = { per_byte = 0.25 }
+
+["application/x-yaml"]
+family = "text"
+text = true
+tokens = { per_byte = 0.25 }
+
+["text/x-yaml"]
+family = "text"
+text = true
+tokens = { per_byte = 0.25 }
+
 ["application/xml"]
 family = "text"
 text = true
@@ -69,6 +96,7 @@ extensions = ["xml"]
 
 ["image/*"]
 family = "image"
+text = false
 tokens = { per_pixel = 750, max = 1600 }
 
 ["image/png"]
@@ -97,6 +125,7 @@ extensions = ["svg"]
 
 ["audio/*"]
 family = "audio"
+text = false
 tokens = { per_second = 32 }
 
 ["audio/wav"]
@@ -120,6 +149,7 @@ extensions = ["m4a"]
 
 ["video/*"]
 family = "video"
+text = false
 tokens = { per_byte = 0.02 }
 
 ["video/mp4"]
@@ -135,12 +165,14 @@ extensions = ["mov"]
 # does; the providers that read PDFs natively bill roughly this per page.
 ["application/pdf"]
 family = "document"
+text = false
 tokens = { per_page = 2000 }
 extensions = ["pdf"]
 magic = "25504446"
 
 ["model/*"]
 family = "model"
+text = false
 tokens = { per_byte = 0.25 }
 
 ["model/obj"]
@@ -158,9 +190,60 @@ magic = "676C5446"
 ["model/stl"]
 extensions = ["stl"]
 
+# Binary formats stay binary now that an unknown type is text.
+["font/*"]
+family = "binary"
+text = false
+tokens = { per_byte = 0.34 }
+
+["font/woff"]
+extensions = ["woff"]
+
+["font/woff2"]
+extensions = ["woff2"]
+
+["font/ttf"]
+extensions = ["ttf"]
+
+["font/otf"]
+extensions = ["otf"]
+
 ["application/zip"]
+family = "binary"
+text = false
+tokens = { per_byte = 0.34 }
 extensions = ["zip"]
 magic = "504B0304"
 
+["application/gzip"]
+family = "binary"
+text = false
+tokens = { per_byte = 0.34 }
+extensions = ["gz"]
+magic = "1F8B"
+
+["application/x-tar"]
+family = "binary"
+text = false
+tokens = { per_byte = 0.34 }
+extensions = ["tar"]
+
+["application/wasm"]
+family = "binary"
+text = false
+tokens = { per_byte = 0.34 }
+extensions = ["wasm"]
+magic = "0061736D"
+
+["application/x-sqlite3"]
+family = "binary"
+text = false
+tokens = { per_byte = 0.34 }
+extensions = ["sqlite", "sqlite3"]
+magic = "53514C69746520666F726D6174203300"
+
 ["application/octet-stream"]
+family = "binary"
+text = false
+tokens = { per_byte = 0.34 }
 extensions = ["bin"]
