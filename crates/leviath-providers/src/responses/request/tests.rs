@@ -159,6 +159,37 @@ fn framework_hints_become_the_instructions_and_regions_do_not() {
 }
 
 #[test]
+fn the_unoffered_tools_note_follows_the_regions_and_leaves_instructions_alone() {
+    // The note names tools that differ run to run. In `instructions` it would
+    // come first and no two runs would share a cached prefix.
+    let head = vec![
+        block("task", "## task\nDesign it.", Volatility::Stable),
+        block("models", "## models\n- a, b", Volatility::Stable),
+    ];
+    let mut with_note = head.clone();
+    with_note.push(SystemBlock {
+        text: "Earlier turns called tools this stage lacks: web_fetch.".to_string(),
+        cache_hint: CacheHint::UntilChanged,
+        region: String::new(),
+        volatility: Volatility::Stable,
+    });
+    let plain = build_default(&request(head, vec![user("go")]));
+    let noted = build_default(&request(with_note, vec![user("go")]));
+
+    assert_eq!(noted["instructions"], DEFAULT_INSTRUCTIONS);
+    assert_eq!(noted["instructions"], plain["instructions"]);
+    let plain_input = plain["input"].as_array().expect("input");
+    let noted_input = noted["input"].as_array().expect("input");
+    // Every item before the note is the same item the request without it has.
+    assert_eq!(noted_input[..2], plain_input[..2]);
+    assert!(
+        noted_input[2].to_string().contains("web_fetch"),
+        "{noted_input:?}"
+    );
+    assert_eq!(noted_input[3], plain_input[2], "the conversation follows");
+}
+
+#[test]
 fn instructions_fall_back_to_a_fixed_preamble() {
     // Never varies by stage: it is the first bytes of the cached prefix.
     let req = request(
