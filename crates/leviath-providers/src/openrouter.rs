@@ -2117,6 +2117,14 @@ mod tests {
         assert_eq!(msgs[0]["content"][0]["cache_control"]["type"], "ephemeral");
         // Markers place its cache: it gets no key.
         assert_eq!(body.get("prompt_cache_key"), None);
+        // A block too short to mark goes as plain text, a message of its own.
+        let mut short = request.clone();
+        short.system[0].text = "Be brief.".to_string();
+        let body = provider.build_request_body(&short);
+        assert_eq!(
+            body["messages"][0],
+            serde_json::json!({"role": "system", "content": "Be brief."})
+        );
     }
 
     /// The same block on a non-Anthropic model stays a plain string: the
