@@ -5,6 +5,8 @@
 
 #[cfg(feature = "openrouter")]
 mod catalog;
+#[cfg(feature = "openrouter")]
+mod prefix;
 
 use crate::capabilities::{Match, Row};
 use crate::provider::{LimitsSource, ModelCapabilities};
@@ -232,9 +234,14 @@ impl OpenRouterProvider {
         let message_budget = 4usize.saturating_sub(system_breakpoints.len());
         let mut breakpoint_count = 0usize;
 
-        let mut messages: Vec<serde_json::Value> = Vec::new();
-        // System blocks go first; dropping them silently loses the system prompt.
-        for (index, block) in request.system.iter().enumerate() {
+        // System blocks go first; dropping them silently loses the system
+        // prompt. A model that caches by prefix gets them as `prefix` says.
+        let mut messages: Vec<serde_json::Value> = match is_anthropic {
+            true => Vec::new(),
+            false => prefix::system_messages(&request.system),
+        };
+        let marked = request.system.iter().enumerate();
+        for (index, block) in marked.filter(|_| is_anthropic) {
             match system_breakpoints.contains(&index) {
                 true => messages.push(serde_json::json!({
                     "role": "system",
@@ -338,11 +345,13 @@ impl OpenRouterProvider {
         }
 
         // Pass through extra model parameters (top_p, stop, seed, …).
-        crate::openai_compat::merge_extra_params(
-            body.as_object_mut()
-                .expect("an OpenRouter request body is always a JSON object"),
-            &request.extra,
-        );
+        let fields = body
+            .as_object_mut()
+            .expect("an OpenRouter request body is always a JSON object");
+        crate::openai_compat::merge_extra_params(fields, &request.extra);
+        if !is_anthropic {
+            prefix::keep_on_upstream(fields, &request.model, &request.system);
+        }
         body
     }
 }
@@ -2106,10 +2115,14 @@ mod tests {
             body
         );
         assert_eq!(msgs[0]["content"][0]["cache_control"]["type"], "ephemeral");
+        // Markers place its cache: it gets no key.
+        assert_eq!(body.get("prompt_cache_key"), None);
     }
 
     /// The same block on a non-Anthropic model stays a plain string: the
     /// annotation means nothing there and the gateway would carry it anyway.
+    /// It gets a `prompt_cache_key` instead, which keeps it on the upstream
+    /// that cached its prefix.
     #[test]
     fn a_system_block_is_not_marked_for_a_non_anthropic_model() {
         let provider = OpenRouterProvider::new(
@@ -2135,6 +2148,13 @@ mod tests {
 
         let body = provider.build_request_body(&request);
         assert!(body["messages"][0]["content"].is_string());
+        let key = body["prompt_cache_key"].as_str().expect("a cache key");
+        assert!(key.starts_with("lev-"), "{key}");
+        // A stage's own key wins.
+        let mut own = request;
+        own.extra = serde_json::json!({"prompt_cache_key": "mine"});
+        let body = provider.build_request_body(&own);
+        assert_eq!(body["prompt_cache_key"], "mine");
     }
 
     /// System markers come out of the same four-marker budget as the messages,
