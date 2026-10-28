@@ -643,10 +643,17 @@ impl ProviderRegistry {
     ///
     /// Compared by [`crate::pipeline::model_key`], so a gateway's namespaced
     /// `openai/gpt-5.5` answers for a blueprint that wrote `gpt-5.5`.
+    ///
+    /// A model the provider lists and answered nothing but 404s for, too many
+    /// times in a row in this process, is evidence too
+    /// ([`crate::listed_404s`]).
     pub(crate) fn refuses_model(&self, provider: &str, model: &str) -> bool {
         let Some(p) = self.get(provider) else {
             return false;
         };
+        if crate::listed_404s::given_up(provider, model) {
+            return true;
+        }
         let Some(catalog) = p.served_catalog() else {
             return false;
         };
@@ -663,8 +670,9 @@ impl ProviderRegistry {
     /// said no, so this is about the wording of a decision rather than the
     /// decision.
     pub(crate) fn refusal_reason(&self, provider: &str, model: &str) -> Option<String> {
-        self.get(provider)?
-            .refusal_reason(crate::pipeline::model_key(model))
+        let p = self.get(provider)?;
+        crate::listed_404s::refusal(provider, model)
+            .or_else(|| p.refusal_reason(crate::pipeline::model_key(model)))
     }
 
     /// Get all *natively-registered* provider names. Script providers are
@@ -1202,6 +1210,29 @@ mod tests {
         // And a provider that is not here explains nothing rather than
         // panicking on the lookup.
         assert_eq!(reg.refusal_reason("absent", "anything"), None);
+    }
+
+    /// A listed model given up on after a run of 404s is refused even on a
+    /// catalogue that names it, and the refusal says why; its neighbours on
+    /// the same provider are not.
+    #[test]
+    fn a_model_given_up_on_is_refused_with_why() {
+        let mut reg = ProviderRegistry::new();
+        reg.register(
+            "listed-404s-registry".to_string(),
+            Arc::new(StubProvider::publishing(&["gone-2", "fine-2"])),
+        );
+        assert!(!reg.refuses_model("listed-404s-registry", "gone-2"));
+        while crate::listed_404s::missed("listed-404s-registry", "gone-2").is_none() {}
+        assert!(reg.refuses_model("listed-404s-registry", "gone-2"));
+        assert!(!reg.refuses_model("listed-404s-registry", "fine-2"));
+        let why = reg
+            .refusal_reason("listed-404s-registry", "gone-2")
+            .expect("given up");
+        assert!(why.contains("not routed to again"), "{why}");
+        assert_eq!(reg.refusal_reason("listed-404s-registry", "fine-2"), None);
+        // Not registered here: nothing to refuse, whatever was counted.
+        assert!(!reg.refuses_model("absent", "gone-2"));
     }
 
     /// `refuses_model` folds three different "no" answers into `false`, because

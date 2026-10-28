@@ -313,10 +313,13 @@ pub(crate) fn fail_stalled_dispatch(
                 // Nothing recorded: the account and the key are both fine as
                 // far as anyone knows, so neither screen is the right one to
                 // send somebody to. An upstream outage is never recorded (it
-                // is not provider-wide), so it reads as nothing recorded.
-                Some(leviath_providers::UnavailableReason::ModelUnavailable) | None => {
-                    SetupBlocker::ProvidersUnavailable
-                }
+                // is not provider-wide), so it reads as nothing recorded; nor
+                // is a retired model.
+                Some(
+                    leviath_providers::UnavailableReason::ModelUnavailable
+                    | leviath_providers::UnavailableReason::ModelRetired,
+                )
+                | None => SetupBlocker::ProvidersUnavailable,
             },
             _ => SetupBlocker::ProviderMissing,
         };

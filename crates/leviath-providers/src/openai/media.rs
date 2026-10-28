@@ -83,14 +83,18 @@ pub(crate) fn speaks_in_chat(request: &InferenceRequest) -> bool {
 
 /// The media models this build names, for `lev validate` and a listing that
 /// cannot be read.
+///
+/// Only models still in service. `sora-2` and `sora-2-pro` left on their
+/// `shutdown_date`, 2026-09-24: OpenAI's listing still names them and every
+/// call 404s, so a row here would offer a route that cannot answer to a
+/// machine that has not read the listing. The `sora` shape is still routed
+/// as video (see [`kind`]), for whatever OpenAI lists next.
 pub(crate) const CATALOG: &[(&str, &str)] = &[
     ("gpt-image-2", "GPT Image 2"),
     ("gpt-image-1.5", "GPT Image 1.5"),
     ("gpt-image-1", "GPT Image 1"),
     ("gpt-image-1-mini", "GPT Image 1 Mini"),
     ("chatgpt-image-latest", "ChatGPT Image"),
-    ("sora-2", "Sora 2"),
-    ("sora-2-pro", "Sora 2 Pro"),
     ("gpt-4o-mini-tts", "GPT-4o mini TTS"),
     ("tts-1", "TTS 1"),
     ("tts-1-hd", "TTS 1 HD"),

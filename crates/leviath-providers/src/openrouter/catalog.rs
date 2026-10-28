@@ -8,8 +8,40 @@
 //! `supported_parameters` at all, so that field is optional here and the
 //! compiled table answers for those.
 
-use crate::learned::LearnedModel;
+use crate::learned::{LearnedModel, LearnedModels};
 use crate::pricing::ModelPricing;
+
+/// The gateway ids of models it lists without the version Meta's API puts in
+/// the name: Meta's `muse-wonder-1.0` is `meta/muse-wonder` here, and the bare
+/// `muse-wonder` is the same model. Everything else the gateway lists under
+/// the vendor's own id (`meta/muse-spark-1.3`).
+const GATEWAY_IDS: &[(&str, &str)] = &[
+    ("muse-wonder-1.0", "meta/muse-wonder"),
+    ("muse-wonder", "meta/muse-wonder"),
+];
+
+/// `model` as the gateway spells it, when that differs from the bare name.
+pub(crate) fn gateway_id(model: &str) -> &str {
+    GATEWAY_IDS
+        .iter()
+        .find(|(bare, _)| *bare == model)
+        .map_or(model, |(_, id)| id)
+}
+
+/// Why a stage naming the model `key` is refused, when the listing's
+/// `expiration_date` for it has passed; `None` while it is in service.
+///
+/// Such a model is no longer claimed as listed, so a provider that does list
+/// it wins an open route; with none, the route is found by `serves_model` and
+/// refused with this, rather than the stage being told the model is unknown.
+pub(crate) fn retirement(learned: &LearnedModels, key: &str) -> Option<String> {
+    let date = learned.retired(gateway_id(key))?;
+    Some(format!(
+        "OpenRouter retired it on {date} (the expiration_date its model \
+         listing publishes), so no call to it can succeed. Name a current \
+         model; `lev models list --provider openrouter` shows them."
+    ))
+}
 
 /// One model's rates from a `/models` entry, or `None` when it does not quote
 /// both sides.
@@ -115,9 +147,14 @@ pub(crate) fn parse_entry(entry: &serde_json::Value) -> Option<(String, LearnedM
             explicit_cache_control: Some(quotes_cache_write(entry)),
             pricing: parse_pricing(entry),
             released: entry.get("created").and_then(|v| v.as_i64()),
-            // The listing has no retirement date; OpenRouter simply drops a
-            // model from it.
-            retires: None,
+            // `expiration_date`: the day the gateway stops routing the model,
+            // published ahead of time for a model being withdrawn and null
+            // (or absent) for the rest. It drops the model from the listing
+            // some time after, so until then the date is the only sign.
+            retires: entry
+                .get("expiration_date")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
             input_types: modalities(entry, "input_modalities"),
             output_types: modalities(entry, "output_modalities"),
         },
@@ -178,6 +215,21 @@ mod tests {
         // No read rate quoted: it falls back to the input rate.
         assert!((pricing.cached_input_per_mtok - 1.0).abs() < 1e-9);
         assert!((pricing.cache_write_per_mtok - 0.40625).abs() < 1e-9);
+    }
+
+    /// `expiration_date` is the retirement date when the gateway sets one;
+    /// null means none.
+    #[test]
+    fn an_expiration_date_is_read_as_the_retirement_date() {
+        let (_, learned) = parse_entry(&json!({
+            "id": "acme/old",
+            "expiration_date": "2026-09-24"
+        }))
+        .unwrap();
+        assert_eq!(learned.retires.as_deref(), Some("2026-09-24"));
+        let (_, learned) =
+            parse_entry(&json!({ "id": "acme/current", "expiration_date": null })).unwrap();
+        assert_eq!(learned.retires, None);
     }
 
     #[test]

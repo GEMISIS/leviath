@@ -468,8 +468,13 @@ fn a_media_shape_alone_is_not_a_claim() {
     for own in ["gpt-image-1", "sora-2-pro", "tts-1-hd", "whisper-1"] {
         assert_eq!(provider.serves_model(own).as_deref(), Some(own), "{own}");
     }
-    // The catalogue lists; a newer name in its families is only a guess.
-    assert_eq!(provider.lists_model("sora-2").as_deref(), Some("sora-2"));
+    // The catalogue lists; a newer name in its families is only a guess, and
+    // so is a retired one the catalogue no longer names.
+    assert_eq!(
+        provider.lists_model("gpt-image-2").as_deref(),
+        Some("gpt-image-2")
+    );
+    assert_eq!(provider.lists_model("sora-2"), None);
     assert_eq!(provider.lists_model("gpt-5.5").as_deref(), Some("gpt-5.5"));
     assert_eq!(provider.lists_model("gpt-9"), None);
     assert_eq!(provider.serves_model("gpt-9").as_deref(), Some("gpt-9"));
@@ -538,6 +543,83 @@ async fn priming_learns_ids_and_dates_but_not_shape() {
     assert_eq!(o3.retires.as_deref(), Some("2027-01-01"));
     assert!(o3.learned);
     assert_eq!(o3.display_name, None);
+}
+
+/// The listing OpenAI sent for `sora-2` a month after its shutdown: still
+/// named, with a `shutdown_date` in the past. A model whose date has passed
+/// leaves the catalogue and the listing, is not claimed as listed even though
+/// a compiled row or the listing names it, is refused with its date, and a
+/// call to it fails at once without reaching the API; a model whose date is
+/// still ahead is untouched.
+#[tokio::test]
+async fn a_model_past_its_shutdown_date_is_retired() {
+    let body = br#"{"object":"list","data":[
+        {"id":"sora-2","object":"model","created":1,"owned_by":"system","shutdown_date":"2000-01-01"},
+        {"id":"gpt-image-2","object":"model","created":2,"owned_by":"system","shutdown_date":"2000-01-01"},
+        {"id":"gpt-5.5","object":"model","created":3,"owned_by":"system","shutdown_date":"2999-01-01"},
+        {"id":"gpt-5.4","object":"model","created":4,"owned_by":"system","shutdown_date":null}
+    ]}"#;
+    // One answer only: the listing. A call that reached the API would find
+    // nothing behind it and fail differently.
+    let (url, bodies) = spawn_mock_sequence(vec![(200, "OK", body.to_vec())]).await;
+    let provider = provider_with_url(url);
+    provider.prime_capabilities().await.expect("primes");
+
+    let mut catalog = provider.served_catalog().expect("primed");
+    catalog.sort();
+    assert_eq!(catalog, ["gpt-5.4", "gpt-5.5"]);
+    let ids: Vec<String> = provider
+        .list_models()
+        .await
+        .expect("from the store")
+        .into_iter()
+        .map(|m| m.id)
+        .collect();
+    assert_eq!(ids, ["gpt-5.4", "gpt-5.5"]);
+
+    // A compiled row (`gpt-image-2`) does not keep a retired model listed.
+    for retired in ["sora-2", "gpt-image-2"] {
+        assert_eq!(provider.lists_model(retired), None, "{retired}");
+        // Still routed by shape, so the stage is told why.
+        assert_eq!(
+            provider.serves_model(retired).as_deref(),
+            Some(retired),
+            "{retired}"
+        );
+        let why = provider.refusal_reason(retired).expect("retired");
+        assert!(why.contains("OpenAI retired it on 2000-01-01"), "{why}");
+    }
+    assert_eq!(provider.lists_model("gpt-5.5").as_deref(), Some("gpt-5.5"));
+    assert_eq!(provider.refusal_reason("gpt-5.5"), None);
+    assert_eq!(provider.refusal_reason("gpt-5.4"), None);
+
+    let mut request = simple_request();
+    request.model = "sora-2".to_string();
+    for err in [
+        provider.infer(&request).await.unwrap_err(),
+        provider
+            .infer_stream(&request)
+            .await
+            .err()
+            .expect("refused"),
+    ] {
+        assert_eq!(
+            err.unavailable_reason(),
+            Some(crate::provider::UnavailableReason::ModelRetired)
+        );
+        assert!(!err.is_transient(), "a retirement is not retried");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("openai/sora-2 was retired by OpenAI on 2000-01-01"),
+            "{msg}"
+        );
+        assert!(!msg.contains("model-unavailable"), "{msg}");
+    }
+    assert_eq!(
+        bodies.lock().unwrap().len(),
+        1,
+        "only the listing was asked"
+    );
 }
 
 #[tokio::test]
