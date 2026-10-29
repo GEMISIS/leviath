@@ -421,3 +421,89 @@ async fn an_embedded_host_reads_no_blueprint_from_a_path() {
     assert_eq!(issue.code, IssueCode::NotAllowed);
     assert!(issue.message.contains("coder"), "{}", issue.message);
 }
+
+/// A graph bringing the MCP server `items`, whose `build` stage submits an
+/// answer judged by `items__check_model`, on the fake provider's model.
+fn graph_judged_by_an_mcp_tool() -> RunGraph {
+    use crate::spec::graph::{McpServerDef, OutputDef, ValidatorToolDef};
+    let mut graph = crate::spec::graph::tests::minimal();
+    graph.mcp_servers = vec![McpServerDef {
+        name: McpServerName::new("items").unwrap(),
+        transport: None,
+        command: Some("items-server".into()),
+        url: None,
+        args: vec![],
+        env: Default::default(),
+        headers: Default::default(),
+    }];
+    for stage in &mut graph.stages {
+        stage.model.models = vec![ModelRef::parse("mock/m").unwrap()];
+    }
+    graph.stages[1].tools = vec![
+        ToolSelector::Tool(ToolName::new(leviath_tools::SUBMIT_OUTPUT_TOOL).unwrap()),
+        ToolSelector::Tool(ToolName::new("items__check_model").unwrap()),
+    ];
+    graph.stages[1].output = Some(OutputDef {
+        validator_tool: Some(ValidatorToolDef {
+            tool: ToolName::new("items__check_model").unwrap(),
+            content_arg: "model".into(),
+            args: leviath_core::JsonDoc::new(serde_json::json!({})),
+        }),
+        ..OutputDef::default()
+    });
+    graph
+}
+
+/// The dry run of a stage naming an MCP validator tool passes when the
+/// embedder declares the server's tools (which then fingerprint the server),
+/// and names the missing tool, and nothing that follows from it, when it
+/// does not.
+#[tokio::test]
+async fn a_check_sees_the_mcp_tools_the_embedder_declares() {
+    use crate::spec::request::{SpawnRequest, SpawnSource};
+    let dir = tempfile::tempdir().unwrap();
+    let mut request = SpawnRequest::new(SpawnSource::Raw(Box::new(graph_judged_by_an_mcp_tool())));
+    request.workdir = Some(dir.path().to_path_buf());
+
+    let items = McpServerName::new("items").unwrap();
+    let check_model = Tool {
+        name: "check_model".into(),
+        description: "judges a model".into(),
+        parameters: serde_json::json!({"type": "object"}),
+    };
+    let declared = env().with_mcp_tools(items.clone(), std::slice::from_ref(&check_model));
+    crate::resolve::check(&request, &declared).await.unwrap();
+    // Declared bare or prefixed, the tool is advertised as `items__check_model`.
+    let prefixed = Tool {
+        name: "items__check_model".into(),
+        ..check_model
+    };
+    let expected =
+        host::tools_fingerprint(&host::mcp_defs(&items, std::slice::from_ref(&prefixed)));
+    assert_eq!(
+        ResolveEnv::mcp_fingerprint(&declared, &items),
+        Some(expected.clone())
+    );
+    let declared_prefixed = env().with_mcp_tools(items.clone(), &[prefixed]);
+    assert_eq!(
+        ResolveEnv::mcp_fingerprint(&declared_prefixed, &items),
+        Some(expected)
+    );
+
+    let issues = crate::resolve::check(&request, &env()).await.unwrap_err();
+    let found: Vec<String> = issues
+        .iter()
+        .map(|i| format!("{} {:?}", i.path, i.code))
+        .collect();
+    assert_eq!(
+        found,
+        ["source.raw.stages.build.tools[1] Unresolvable"],
+        "{issues}"
+    );
+    assert!(
+        issues.0[0]
+            .message
+            .contains("'items' server offers no tool 'check_model'"),
+        "{issues}"
+    );
+}
