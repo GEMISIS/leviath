@@ -94,6 +94,13 @@ same list.
 - An OpenRouter request for an audio answer names a voice: `audio.voice` is the
   stage's `voice`, else `alloy` as on the OpenAI provider. Without it OpenAI's
   upstream answered 400 for a missing `audio.voice`.
+- Generated audio is typed by its bytes, not by the format Leviath asked for. An
+  OpenRouter model asked for `wav` can answer with an MP3, and the part came out
+  `audio/wav` over MPEG bytes. OpenRouter's streamed and buffered audio and OpenAI's
+  `gpt-audio` replies now read WAV, MP3 (an ID3 tag or a bare MPEG frame), Ogg and
+  FLAC off the leading bytes, and fall back to the reply's label, the stage's type or
+  the requested format only for bytes none of those match. A `gpt-audio` part's name
+  follows (`speech.mp3`).
 - A model its provider has retired is no longer offered or retried. OpenAI still
   lists `sora-2` and `sora-2-pro` with a `shutdown_date` of 2026-09-24 and answers
   every call with a 404, which read as "usually a short outage": each call spent its
