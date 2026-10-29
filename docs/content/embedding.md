@@ -146,6 +146,12 @@ match world.validate(request.clone()).await {
 }
 ```
 
+An application that resolves against its own machine, without a world, makes the same dry run
+with `leviath::runtime::resolve::check(&request, &env)`, where `env` is an
+`EmbedEnv` or its own `ResolveEnv`. An `EmbedEnv` knows no MCP servers; one whose embedder
+connects them is told what they offer with `.with_mcp_tools(server, &tools)`, so a stage naming
+`server__tool` (or a run whose output is judged by one) checks as it would on the daemon.
+
 Not every [seed](/docs/context) works when embedded, because some of them are daemon behaviour.
 A `literal` seed resolves as written. A `files`, `glob`, `command`, `code` or `tools` seed is not
 run: it is an issue when the region is `required`, and leaves the region empty otherwise. Pass that

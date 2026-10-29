@@ -97,6 +97,22 @@ pub enum ResolveMode {
     Check,
 }
 
+/// Check `request` against this machine without starting anything: the dry
+/// run ([`ResolveMode::Check`]) of a top-level spawn, for an embedder to
+/// find every problem a spawn would be refused for before it asks for one.
+/// Seeds with side effects never run. `Ok` says the request would resolve;
+/// the issues are the ones [`resolve`] would answer with, each with the path
+/// of the part of the request it is about.
+///
+/// The env is the embedder's own, so what it declares is what is checked:
+/// an [`EmbedEnv`](crate::embed::EmbedEnv) given the tools of the MCP
+/// servers the embedder connects checks a stage that names them.
+pub async fn check(request: &SpawnRequest, env: &dyn ResolveEnv) -> Result<(), SpawnIssues> {
+    resolve(request, &Caller::TopLevel, env, ResolveMode::Check)
+        .await
+        .map(|_| ())
+}
+
 /// Resolve `request` for `caller` against this machine.
 ///
 /// Returns every problem found when there is any. In [`ResolveMode::Spawn`],

@@ -5,13 +5,17 @@
 //! builder, the blueprints it chose to register, and the default tool service.
 //! It has no daemon config, no MCP servers and no sandboxes, so the answers
 //! here are the plain ones: shell-command, tool and code seeds are refused,
-//! and a dependency on an MCP server is never met.
+//! and a dependency on an MCP server is never met. An embedder that connects
+//! MCP servers itself declares their tools with
+//! [`with_mcp_tools`](EmbedEnv::with_mcp_tools), so a run naming them checks
+//! ([`resolve::check`](crate::resolve::check)) as it would on the daemon.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use leviath_providers::Tool;
 
 use super::BasicToolService;
 use crate::bind::host;
@@ -28,7 +32,7 @@ use crate::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
 use crate::spec::names::{
     BlueprintRef, Digest, McpServerName, MimePattern, ModelRef, ProviderName, RunId, WorkdirPath,
 };
-use crate::spec::run_spec::{RunSpec, SeededContent};
+use crate::spec::run_spec::{RunSpec, SeededContent, ToolDef};
 
 /// The child-run depth an embedded run gets when it does not say.
 const DEFAULT_MAX_DEPTH: u8 = 3;
@@ -46,6 +50,9 @@ pub struct EmbedEnv {
     workdir: Option<PathBuf>,
     mime: leviath_core::mime::MimeRegistry,
     tools: Option<Arc<BasicToolService>>,
+    /// The tools each MCP server the embedder connects offers, as the model
+    /// is offered them.
+    mcp: BTreeMap<McpServerName, Vec<ToolDef>>,
 }
 
 impl EmbedEnv {
@@ -66,6 +73,7 @@ impl EmbedEnv {
             workdir: None,
             mime: leviath_core::mime::MimeRegistry::builtin(),
             tools: None,
+            mcp: BTreeMap::new(),
         }
     }
 
@@ -99,6 +107,31 @@ impl EmbedEnv {
     /// The default tool service, which each bound run is registered with.
     pub fn with_basic_tools(mut self, tools: Arc<BasicToolService>) -> Self {
         self.tools = Some(tools);
+        self
+    }
+
+    /// The tools the MCP server `server` advertises, as the embedder
+    /// connected it: each named as the server lists it, with or without the
+    /// server's `server__` prefix. A stage may then name them (`server__tool`)
+    /// and a run's output may be judged by one, and the server is
+    /// fingerprinted by them. Declaring a server again replaces its tools.
+    ///
+    /// This is for checking a run ([`resolve::check`](crate::resolve::check)):
+    /// the embedder's own executor serves the calls of a run it starts.
+    pub fn with_mcp_tools(mut self, server: McpServerName, tools: &[Tool]) -> Self {
+        let prefix = format!("{server}__");
+        let advertised: Vec<Tool> = tools
+            .iter()
+            .map(|t| Tool {
+                name: match t.name.starts_with(&prefix) {
+                    true => t.name.clone(),
+                    false => format!("{prefix}{}", t.name),
+                },
+                ..t.clone()
+            })
+            .collect();
+        let defs = host::mcp_defs(&server, &advertised);
+        self.mcp.insert(server, defs);
         self
     }
 
@@ -222,7 +255,8 @@ impl ResolveEnv for EmbedEnv {
         _base: Option<&Path>,
         _workdir: Option<&Path>,
     ) -> Result<StageTools, SpawnIssues> {
-        let catalog = host::builtin_defs(&BasicToolService::tool_defs(Path::new(".")));
+        let mut catalog = host::builtin_defs(&BasicToolService::tool_defs(Path::new(".")));
+        catalog.extend(self.mcp.values().flatten().cloned());
         host::select_tools(&catalog, stage, &graph.mcp_servers).map(StageTools::from)
     }
 
@@ -293,8 +327,8 @@ impl ResolveEnv for EmbedEnv {
         self.fingerprint(provider)
     }
 
-    fn mcp_fingerprint(&self, _server: &McpServerName) -> Option<Digest> {
-        None
+    fn mcp_fingerprint(&self, server: &McpServerName) -> Option<Digest> {
+        self.mcp.get(server).map(|t| host::tools_fingerprint(t))
     }
 }
 
