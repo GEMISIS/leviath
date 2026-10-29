@@ -216,14 +216,14 @@ impl ResolveEnv for EmbedEnv {
 
     async fn tools(
         &self,
-        _graph: &RunGraph,
+        graph: &RunGraph,
         stage: &StageDef,
         _code: &CodeFiles,
         _base: Option<&Path>,
         _workdir: Option<&Path>,
     ) -> Result<StageTools, SpawnIssues> {
         let catalog = host::builtin_defs(&BasicToolService::tool_defs(Path::new(".")));
-        host::select_tools(&catalog, stage).map(StageTools::from)
+        host::select_tools(&catalog, stage, &graph.mcp_servers).map(StageTools::from)
     }
 
     async fn code(&self, code: &CodeRef, base: Option<&Path>) -> Result<Vec<u8>, String> {

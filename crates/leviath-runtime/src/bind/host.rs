@@ -21,7 +21,7 @@ use crate::pipeline::{
 use crate::provider_creds::ProviderCreds;
 use crate::providers::ProviderRegistry;
 use crate::spec::env::{CodeUse, CompactionPlan, ModelPlan};
-use crate::spec::graph::{CodeRef, StageDef, ToolSelector};
+use crate::spec::graph::{CodeRef, McpServerDef, StageDef, ToolSelector};
 use crate::spec::inputs::PathKind;
 use crate::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
 use crate::spec::names::{
@@ -301,13 +301,20 @@ pub fn mcp_defs(server: &McpServerName, tools: &[Tool]) -> Vec<ToolDef> {
 /// named without its server when only one server offers it), every tool of
 /// each group it names, and every tool of each MCP server it connects to.
 ///
-/// A named MCP tool (`server__tool`) the catalog lacks is left out, since a
-/// blueprint may name tools of servers this machine does not have. Any other
+/// A named MCP tool (`server__tool`) of a server the graph does not bring
+/// (`declared`) that the catalog lacks is left out, since a blueprint may
+/// name tools of servers this machine does not have. One of a server the
+/// graph brings is an issue: the server is here or should be, so the name is
+/// misspelled, or the server did not connect or offers nothing. Any other
 /// name the catalog lacks is an issue: it is a typo, or a tool the blueprint
 /// expected to ship and does not. So is a tool the stage requires and cannot
 /// have, since without it the stage cannot do its job. Each issue's path is
 /// relative to the stage.
-pub fn select_tools(catalog: &[ToolDef], stage: &StageDef) -> Result<Vec<ToolDef>, SpawnIssues> {
+pub fn select_tools(
+    catalog: &[ToolDef],
+    stage: &StageDef,
+    declared: &[McpServerDef],
+) -> Result<Vec<ToolDef>, SpawnIssues> {
     let defs: Vec<Tool> = catalog
         .iter()
         .map(|d| Tool {
@@ -348,21 +355,36 @@ pub fn select_tools(catalog: &[ToolDef], stage: &StageDef) -> Result<Vec<ToolDef
         let ToolSelector::Tool(name) = selector else {
             continue;
         };
-        if name.as_str().contains("__") || offers(catalog, name.as_str()) {
+        if offers(catalog, name.as_str()) {
             continue;
         }
-        issues.push(
-            SpawnIssue::new(
-                SpecPath::root().field("tools").index(i),
-                IssueCode::Unknown,
-                format!("no tool is named '{name}' here"),
-            )
-            .hint(
-                "check the spelling, or ship the tool in the blueprint's tools/ directory; \
-                 an MCP tool is named server__tool",
-            )
-            .known(catalog.iter().map(|d| d.name.to_string())),
-        );
+        let at = SpecPath::root().field("tools").index(i);
+        let brought = declared.iter().find_map(|s| {
+            name.as_str()
+                .strip_prefix(&format!("{}__", s.name))
+                .map(|tool| (&s.name, tool))
+        });
+        match brought {
+            Some(server_tool) => {
+                issues.push(missing_from_server(at, stage, name, server_tool, catalog));
+            }
+            // A tool of a server the graph does not bring is left out without
+            // a word: a blueprint may name tools of servers this machine does
+            // not have.
+            None if name.as_str().contains("__") => {}
+            None => issues.push(
+                SpawnIssue::new(
+                    at,
+                    IssueCode::Unknown,
+                    format!("no tool is named '{name}' here"),
+                )
+                .hint(
+                    "check the spelling, or ship the tool in the blueprint's tools/ directory; \
+                     an MCP tool is named server__tool",
+                )
+                .known(catalog.iter().map(|d| d.name.to_string())),
+            ),
+        }
     }
     for (i, name) in stage.required_tools.iter().enumerate() {
         let canonical = leviath_tools::canonical_tool_name(name.as_str());
@@ -379,6 +401,47 @@ pub fn select_tools(catalog: &[ToolDef], stage: &StageDef) -> Result<Vec<ToolDef
         }
     }
     issues.into_result(chosen)
+}
+
+/// The issue for `stage` naming `name`, a tool of a server the graph brings
+/// that `catalog` does not offer. A server offering nothing here did not
+/// connect, or advertises no tools, which the hint says; one offering other
+/// tools makes the name a misspelling, and those tools are the known names.
+fn missing_from_server(
+    at: SpecPath,
+    stage: &StageDef,
+    name: &ToolName,
+    (server, tool): (&McpServerName, &str),
+    catalog: &[ToolDef],
+) -> SpawnIssue {
+    let offered: Vec<String> = catalog
+        .iter()
+        .filter_map(|d| match &d.source {
+            ToolSource::Mcp { server: s, tool } if s == server => Some(tool.clone()),
+            _ => None,
+        })
+        .collect();
+    let (code, hint) = match offered.is_empty() {
+        true => (
+            IssueCode::Unresolvable,
+            "the server offers no tools here: it may not have connected, or it advertises \
+             none; check how the graph's mcp_servers entry starts it",
+        ),
+        false => (
+            IssueCode::Unknown,
+            "check the spelling against the tools the server offers",
+        ),
+    };
+    SpawnIssue::new(
+        at,
+        code,
+        format!(
+            "stage '{}' names tool '{name}', and the '{server}' server offers no tool '{tool}'",
+            stage.name
+        ),
+    )
+    .hint(hint)
+    .known(offered)
 }
 
 /// Whether `catalog` has a tool `name` refers to: by any spelling of the
