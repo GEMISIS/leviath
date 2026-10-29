@@ -200,8 +200,21 @@ fn catalog() -> Vec<ToolDef> {
     defs
 }
 
+/// A graph's declaration of the MCP server `name`, however it is reached.
+fn brought(name: &str) -> McpServerDef {
+    McpServerDef {
+        name: McpServerName::new(name).unwrap(),
+        transport: None,
+        command: Some(name.to_string()),
+        url: None,
+        args: vec![],
+        env: Default::default(),
+        headers: Default::default(),
+    }
+}
+
 fn picked(stage: &StageDef) -> Vec<String> {
-    select_tools(&catalog(), stage)
+    select_tools(&catalog(), stage, &[])
         .unwrap()
         .iter()
         .map(|d| d.name.to_string())
@@ -282,7 +295,7 @@ fn a_required_tool_the_stage_cannot_have_is_an_issue() {
         ToolName::new("read_file").unwrap(),
         ToolName::new("nope").unwrap(),
     ];
-    let issues = select_tools(&catalog(), &s).unwrap_err();
+    let issues = select_tools(&catalog(), &s, &[]).unwrap_err();
     assert_eq!(issues.len(), 1);
     let issue = issues.iter().next().unwrap();
     assert_eq!(issue.path.to_string(), "required_tools[1]");
@@ -296,12 +309,78 @@ fn a_named_tool_nothing_offers_is_an_issue_unless_it_is_an_mcp_tool() {
         .into_iter()
         .map(|n| ToolSelector::Tool(ToolName::new(n).unwrap()))
         .collect();
-    let issues = select_tools(&catalog(), &s).unwrap_err();
+    let issues = select_tools(&catalog(), &s, &[]).unwrap_err();
     let paths: Vec<String> = issues.iter().map(|i| i.path.to_string()).collect();
-    assert_eq!(paths, ["tools[3]"], "{issues}");
+    assert_eq!(
+        paths,
+        ["tools[3]"],
+        "a tool of a server the graph does not bring is left out: {issues}"
+    );
     let issue = issues.iter().next().unwrap();
     assert_eq!(issue.code, IssueCode::Unknown);
     assert!(issue.known.contains(&"read_file".to_string()));
+}
+
+/// A stage naming a tool of a server the graph brings gets an issue when the
+/// catalog does not offer it: a misspelling when the server offers other
+/// tools (which are the known names), and the server not having connected
+/// when it offers none. The server's own tools, named either way, pass.
+#[test]
+fn a_named_tool_of_a_server_the_graph_brings_must_be_offered() {
+    let mut s = stage(&[]);
+    s.tools = [
+        "gh__search",
+        "gh__serach",
+        "items__check_model",
+        "gone__tool",
+    ]
+    .into_iter()
+    .map(|n| ToolSelector::Tool(ToolName::new(n).unwrap()))
+    .collect();
+    let declared = [brought("gh"), brought("items")];
+    let issues = select_tools(&catalog(), &s, &declared).unwrap_err();
+    let paths: Vec<String> = issues.iter().map(|i| i.path.to_string()).collect();
+    assert_eq!(paths, ["tools[1]", "tools[2]"], "{issues}");
+
+    let misspelled = &issues.0[0];
+    assert_eq!(misspelled.code, IssueCode::Unknown);
+    assert_eq!(
+        misspelled.message,
+        "stage 'plan' names tool 'gh__serach', and the 'gh' server offers no tool 'serach'"
+    );
+    assert_eq!(misspelled.known, ["search", "plain"]);
+    assert!(
+        misspelled.hint.as_deref().unwrap().contains("spelling"),
+        "{misspelled}"
+    );
+
+    let unconnected = &issues.0[1];
+    assert_eq!(unconnected.code, IssueCode::Unresolvable);
+    assert_eq!(
+        unconnected.message,
+        "stage 'plan' names tool 'items__check_model', and the 'items' server offers no tool \
+         'check_model'"
+    );
+    assert!(unconnected.known.is_empty());
+    assert!(
+        unconnected
+            .hint
+            .as_deref()
+            .unwrap()
+            .contains("not have connected"),
+        "{unconnected}"
+    );
+
+    s.tools = ["gh__search", "plain"]
+        .into_iter()
+        .map(|n| ToolSelector::Tool(ToolName::new(n).unwrap()))
+        .collect();
+    let names: Vec<String> = select_tools(&catalog(), &s, &declared)
+        .unwrap()
+        .iter()
+        .map(|d| d.name.to_string())
+        .collect();
+    assert_eq!(names, ["gh__search", "plain"]);
 }
 
 #[test]

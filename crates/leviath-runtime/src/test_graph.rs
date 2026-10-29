@@ -654,7 +654,7 @@ pub(crate) mod spawning {
 
         async fn tools(
             &self,
-            _graph: &RunGraph,
+            graph: &RunGraph,
             stage: &StageDef,
             _code: &CodeFiles,
             _base: Option<&Path>,
@@ -665,7 +665,7 @@ pub(crate) mod spawning {
                     Ok(StageTools::from(given[stage.name.as_str()].1.clone()))
                 }
                 StageAnswers::Host(h) => {
-                    host::select_tools(&h.catalog, stage).map(StageTools::from)
+                    host::select_tools(&h.catalog, stage, &graph.mcp_servers).map(StageTools::from)
                 }
             }
         }

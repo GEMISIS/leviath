@@ -419,7 +419,7 @@ impl ResolveEnv for DaemonEnv {
         // then, so what is there at spawn is there from the first turn.
         let rescans = graph.tool_rescan != leviath_runtime::spec::graph::ToolRescan::AtSpawn;
         let mut catalog = self.catalog(code, base, workdir.filter(|_| rescans));
-        let tools = host::select_tools(&catalog.defs, stage)?;
+        let tools = host::select_tools(&catalog.defs, stage, &graph.mcp_servers)?;
         let code = tools
             .iter()
             .filter_map(|t| match &t.source {
