@@ -4,6 +4,8 @@
 //! Uses OpenAI-compatible format with additional headers.
 
 #[cfg(feature = "openrouter")]
+mod audio;
+#[cfg(feature = "openrouter")]
 mod catalog;
 #[cfg(feature = "openrouter")]
 mod prefix;
@@ -20,6 +22,10 @@ use {
     },
     crate::rate_limit::RateLimiter,
     async_trait::async_trait,
+    audio::{
+        AudioStreamAccumulator, openrouter_audio_sse_event, request_audio_format,
+        request_audio_mime, request_audio_voice, request_wants_audio,
+    },
     catalog::{gateway_id, parse_entry, retirement},
     futures_core::Stream,
     std::collections::HashMap,
@@ -315,20 +321,16 @@ impl OpenRouterProvider {
         // that tells us this stage expects an audio part; it must be translated
         // into the gateway's modality flag rather than passed through as an
         // unknown model parameter.
-        let wants_audio = request
-            .extra
-            .get(crate::provider::OUTPUT_MIMES_KEY)
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|mimes| {
-                mimes
-                    .iter()
-                    .filter_map(serde_json::Value::as_str)
-                    .any(|mime| mime.starts_with("audio/"))
-            });
+        let wants_audio = request_wants_audio(request);
+        // An audio answer is spoken in a voice, and the upstream refuses a
+        // request that names none (OpenAI: a 400 for a missing `audio.voice`).
+        // A stage's own `voice` goes inside `audio` rather than beside it;
+        // otherwise the one the OpenAI provider sends by default.
         if wants_audio {
             body["modalities"] = serde_json::json!(["text", "audio"]);
             body["audio"] = serde_json::json!({
                 "format": request_audio_format(request),
+                "voice": request_audio_voice(request),
             });
         }
 
@@ -349,6 +351,9 @@ impl OpenRouterProvider {
             .as_object_mut()
             .expect("an OpenRouter request body is always a JSON object");
         crate::openai_compat::merge_extra_params(fields, &request.extra);
+        if wants_audio {
+            fields.remove("voice");
+        }
         if !is_anthropic {
             prefix::keep_on_upstream(fields, &request.model, &request.system);
         }
@@ -1051,139 +1056,6 @@ impl Provider for OpenRouterProvider {
 }
 
 #[cfg(feature = "openrouter")]
-fn request_wants_audio(request: &InferenceRequest) -> bool {
-    request
-        .extra
-        .get(crate::provider::OUTPUT_MIMES_KEY)
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|mimes| {
-            mimes
-                .iter()
-                .filter_map(serde_json::Value::as_str)
-                .any(|mime| mime.starts_with("audio/"))
-        })
-}
-
-#[cfg(feature = "openrouter")]
-fn request_audio_mime(request: &InferenceRequest) -> Option<&str> {
-    request
-        .extra
-        .get(crate::provider::OUTPUT_MIMES_KEY)
-        .and_then(serde_json::Value::as_array)?
-        .iter()
-        .filter_map(serde_json::Value::as_str)
-        .find(|mime| mime.starts_with("audio/") && !mime.ends_with("/*"))
-}
-
-#[cfg(feature = "openrouter")]
-fn request_audio_format(request: &InferenceRequest) -> String {
-    let Some(mime) = request_audio_mime(request) else {
-        // OpenRouter's audio-output API needs a format. A wildcard stage has
-        // no preferred container, so ask for WAV and use the returned type if
-        // the gateway reports something more specific.
-        return "wav".to_string();
-    };
-
-    let extension = leviath_core::mime::MimeType::parse(mime)
-        .ok()
-        .and_then(|mime_type| {
-            leviath_core::mime::MimeRegistry::builtin()
-                .info(&mime_type)
-                .extensions
-                .first()
-                .cloned()
-        });
-    extension.unwrap_or_else(|| mime.strip_prefix("audio/").unwrap_or("wav").to_string())
-}
-
-#[cfg(feature = "openrouter")]
-#[derive(Default)]
-struct AudioStreamAccumulator {
-    requested_mime: Option<String>,
-    returned_mime: Option<String>,
-    format: Option<String>,
-    chunks: Vec<String>,
-    emitted: bool,
-}
-
-#[cfg(feature = "openrouter")]
-impl AudioStreamAccumulator {
-    fn new(requested_mime: Option<&str>, format: &str) -> Self {
-        Self {
-            requested_mime: requested_mime.map(str::to_string),
-            format: Some(format.to_string()),
-            ..Self::default()
-        }
-    }
-
-    fn observe(&mut self, event: &serde_json::Value) {
-        let Some(audio) = event.pointer("/choices/0/delta/audio") else {
-            return;
-        };
-        if let Some(data) = audio.get("data").and_then(serde_json::Value::as_str) {
-            self.chunks.push(data.to_string());
-        }
-        if let Some(mime) = audio
-            .get("mime_type")
-            .or_else(|| audio.get("content_type"))
-            .and_then(serde_json::Value::as_str)
-        {
-            self.returned_mime = Some(mime.to_string());
-        }
-        if let Some(format) = audio.get("format").and_then(serde_json::Value::as_str) {
-            self.format = Some(format.to_string());
-        }
-    }
-
-    fn take_blob(&mut self) -> Option<leviath_core::mime::Blob> {
-        if self.emitted {
-            return None;
-        }
-        let blob = crate::mime_output::streamed_audio_blob(
-            &self.chunks,
-            self.requested_mime.as_deref(),
-            self.returned_mime.as_deref(),
-            self.format.as_deref(),
-        );
-        self.emitted = blob.is_some();
-        blob
-    }
-}
-
-#[cfg(feature = "openrouter")]
-fn openrouter_audio_sse_event(
-    buffer: &mut String,
-    audio: &mut AudioStreamAccumulator,
-) -> Option<Option<Result<StreamChunk>>> {
-    let event = leviath_net::sse::next_event(buffer)?;
-    let data = event.data.trim();
-    if data == "[DONE]" {
-        return Some(audio.take_blob().map(|blob| {
-            Ok(StreamChunk {
-                delta: String::new(),
-                tool_calls: Vec::new(),
-                tokens: None,
-                finish_reason: None,
-                reasoning: None,
-                parts: vec![blob],
-            })
-        }));
-    }
-
-    let json = serde_json::from_str::<serde_json::Value>(data).ok()?;
-    let mut framed = format!("data: {data}\n\n");
-    let mut parsed = crate::openai_compat::parse_openai_sse_event(&mut framed)?;
-    audio.observe(&json);
-    if let Some(Ok(chunk)) = &mut parsed
-        && chunk.finish_reason.is_some()
-        && let Some(blob) = audio.take_blob()
-    {
-        chunk.parts.push(blob);
-    }
-    Some(parsed)
-}
-
-#[cfg(feature = "openrouter")]
 #[cfg(test)]
 mod mime_tests;
 
@@ -1412,6 +1284,52 @@ mod tests {
         assert!(body.get("prompt_regions").is_none());
         assert!(body.get("output_mimes").is_none());
         assert_eq!(body["modalities"], serde_json::json!(["text", "audio"]));
+    }
+
+    /// An audio answer needs a voice: OpenAI's upstream answers a request
+    /// without `audio.voice` with a 400. The default is the one the OpenAI
+    /// provider sends, and a stage's own `voice` goes inside `audio`, not
+    /// beside it as a stray top-level parameter.
+    #[test]
+    fn an_audio_answer_is_asked_for_in_a_voice() {
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
+        let mut request = InferenceRequest {
+            system: vec![],
+            messages: vec![crate::provider::Message {
+                role: "user".to_string(),
+                content: "Hello".into(),
+                cache_breakpoint: false,
+                reasoning: None,
+            }],
+            model: "openai/gpt-audio".to_string(),
+            max_tokens: 1024,
+            temperature: 0.7,
+            tools: vec![],
+            extra: serde_json::json!({ "output_mimes": ["audio/mpeg"] }),
+            request_timeout_secs: None,
+        };
+        let body = provider.build_request_body(&request);
+        assert_eq!(
+            body["audio"],
+            serde_json::json!({ "format": "mp3", "voice": "alloy" })
+        );
+
+        request.extra = serde_json::json!({ "output_mimes": ["audio/wav"], "voice": "verse" });
+        let body = provider.build_request_body(&request);
+        assert_eq!(
+            body["audio"],
+            serde_json::json!({ "format": "wav", "voice": "verse" })
+        );
+        assert!(body.get("voice").is_none(), "{body}");
+
+        // A stage that asks for no audio keeps `voice` as the parameter it wrote.
+        request.extra = serde_json::json!({ "voice": "verse" });
+        let body = provider.build_request_body(&request);
+        assert!(body.get("audio").is_none());
+        assert_eq!(body["voice"], "verse");
     }
 
     #[test]

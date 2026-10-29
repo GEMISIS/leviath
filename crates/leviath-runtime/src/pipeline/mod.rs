@@ -186,11 +186,16 @@ pub(crate) use inference::{
 };
 mod resolve;
 pub use resolve::{
-    HeadSource, ModelDefaults, ToolCatalog, ToolOwners, bare_user_model, expand_connector_grants,
-    filter_tools_for_stage, is_unread_catalog_refusal, model_key, providers_tried,
-    resolve_stage_model, tool_source,
+    HeadSource, ModelDefaults, bare_user_model, is_unread_catalog_refusal, model_key,
+    providers_tried, resolve_stage_model,
 };
-pub(crate) use resolve::{Resolving, resolve_candidates, resolve_stage_route};
+pub(crate) use resolve::{
+    Resolving, StageMimes, made_beyond_text, resolve_candidates, resolve_stage_route,
+};
+mod tool_grants;
+pub use tool_grants::{
+    ToolCatalog, ToolOwners, expand_connector_grants, filter_tools_for_stage, tool_source,
+};
 mod stall;
 pub use stall::{DEFAULT_STALL_TIMEOUT_SECS, PausedForSetup, StallTimeout};
 pub(crate) use stall::{

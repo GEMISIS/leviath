@@ -1,17 +1,17 @@
-//! Stage model and tool resolution: turning a graph stage's
-//! [`ModelChoice`] and tool grants into concrete [`ResolvedStage`]s against
-//! whatever providers and tools the host actually has.
+//! Stage model resolution: turning a graph stage's [`ModelChoice`] into a
+//! concrete route against whatever providers the host actually has. Its tool
+//! grants are `tool_grants`'.
 //!
 //! Lives in the runtime rather than the CLI daemon so an embedding host
 //! resolves stages exactly the way `lev run` does. The one policy input that
 //! comes from the CLI's config file - the user's default provider/model -
 //! arrives as a plain [`ModelDefaults`] value.
 
-use crate::spec::graph::{ModelChoice, ToolGroup};
+use crate::spec::graph::ModelChoice;
 use crate::spec::names::ModelRef;
 
 use crate::providers::ProviderRegistry;
-use leviath_providers::{Provider, Tool};
+use leviath_providers::Provider;
 use std::sync::Arc;
 
 /// The user's default provider/model, the fallback when none of a stage's
@@ -495,6 +495,14 @@ fn resolve_candidates_in_order(
     // the id, and the run has spent a step going nowhere. The head is not
     // filtered here - `resolve_stage_route` refuses it outright, because a stage
     // silently running the next model down is the thing being fixed.
+    without_phantoms(candidates, registry)
+}
+
+/// `candidates` with every entry after the head that the runtime could not
+/// dispatch to taken out: an unregistered provider, or a pair whose provider
+/// says it does not carry the model. The head is left for
+/// `resolve_stage_route` to refuse with a reason.
+fn without_phantoms(mut candidates: Vec<Candidate>, registry: &ProviderRegistry) -> Vec<Candidate> {
     let tail: Vec<Candidate> = candidates
         .split_off(1)
         .into_iter()
@@ -502,6 +510,97 @@ fn resolve_candidates_in_order(
         .collect();
     candidates.extend(tail);
     candidates
+}
+
+/// The mime a stage's model works with beyond text: what the stage hands it
+/// and what the stage expects it to hand back.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct StageMimes<'a> {
+    /// What the stage's regions accept beyond text (`input_accepts`).
+    pub takes: &'a [String],
+    /// What the model has to produce as parts of its own: see
+    /// [`made_beyond_text`].
+    pub makes: &'a [String],
+}
+
+/// What of `declared` (a stage's declared output types) a model has to hand
+/// back as a part of its own, deduplicated.
+///
+/// A type the mime registry calls text (`text/*`, `application/json`, an
+/// unknown type) is left out, along with the catch-all `*/*`: a reply's text
+/// already is one, so it asks nothing of the model that every model cannot
+/// give. So is a pattern that does not read as a mime type at all.
+pub(crate) fn made_beyond_text(declared: &[String]) -> Vec<String> {
+    let mimes = leviath_core::mime::MimeRegistry::builtin();
+    let mut made: Vec<String> = Vec::new();
+    for pattern in declared {
+        let beyond_text = leviath_core::mime::MimeType::parse(pattern)
+            .is_ok_and(|mime_type| !mimes.info(&mime_type).text);
+        if beyond_text && !made.contains(pattern) {
+            made.push(pattern.clone());
+        }
+    }
+    made
+}
+
+/// `candidates` for what `about` names, which must hand back `makes`, with a
+/// note per route dropped; or why no route can.
+///
+/// A route whose model's description says it produces all of `makes` leads.
+/// One whose description cannot say (see
+/// [`leviath_providers::ModelMime::produces_all`]) is kept behind those, since
+/// it may well produce it. One whose description says it cannot is dropped:
+/// sent there, the stage asks for an output the route has no way to give, and
+/// either the provider refuses the request or the output never arrives. Each
+/// group keeps the order it came in, so the provider preference holds within
+/// it. When every route is one that cannot, the stage is refused by name.
+fn for_output(
+    candidates: Vec<Candidate>,
+    makes: &[String],
+    registry: &ProviderRegistry,
+    about: Resolving<'_>,
+) -> Result<(Vec<Candidate>, Vec<String>), String> {
+    if makes.is_empty() {
+        return Ok((candidates, Vec::new()));
+    }
+    let mut capable = Vec::new();
+    let mut unknown = Vec::new();
+    let mut unable = Vec::new();
+    for entry in candidates {
+        let verdict = registry
+            .get(&entry.provider)
+            .map(|p| p.mime(&entry.model))
+            .and_then(|mime| mime.produces_all(makes).map(|ok| (ok, mime.output)));
+        match verdict {
+            Some((true, _)) => capable.push(entry),
+            Some((false, output)) => unable.push(format!(
+                "{}/{} (makes {})",
+                entry.provider,
+                entry.model,
+                output.join(", ")
+            )),
+            None => unknown.push(entry),
+        }
+    }
+    let subject = about.subject();
+    let wanted = makes.join(", ");
+    if capable.is_empty() && unknown.is_empty() {
+        return Err(format!(
+            "{subject} declares output {wanted}, and no route to its models can produce it: \
+             {}. Name a model that produces {wanted} in {}, or correct a model's \
+             `output_types` under [model_capabilities] if its description is wrong.",
+            unable.join(", "),
+            about.models_list(),
+        ));
+    }
+    let notes = unable
+        .into_iter()
+        .map(|route| {
+            format!("[model] {subject} will not run on {route}: it cannot produce {wanted}")
+        })
+        .collect();
+    let ordered = capable.into_iter().chain(unknown).collect();
+    Ok((without_phantoms(ordered, registry), notes))
 }
 
 /// What every refusal for an unread model list says, so a caller can tell it
@@ -708,6 +807,7 @@ pub(crate) fn head_source(
     defaults: &ModelDefaults,
     registry: &ProviderRegistry,
     head: &Candidate,
+    mimes: StageMimes<'_>,
     about: Resolving<'_>,
 ) -> HeadSource {
     if model_override.is_some() || !model_cfg.allow_user_default {
@@ -718,7 +818,14 @@ pub(crate) fn head_source(
         fallback_model: None,
         ..defaults.clone()
     };
-    let own = resolve_candidates(model_cfg, None, &without, registry, &[], about);
+    // Ordered for the stage's mime exactly as the head was, so a route the
+    // mime moved to the front is not mistaken for one the user's settings
+    // did. With none of the blueprint's own routes able to produce the
+    // output, the head can only have come from the user's settings.
+    let own = resolve_candidates(model_cfg, None, &without, registry, mimes.takes, about);
+    let own = for_output(own, mimes.makes, registry, about)
+        .map(|(own, _)| own)
+        .unwrap_or_default();
     if own
         .first()
         .is_some_and(|e| e.provider == head.provider && e.model == head.model)
@@ -770,219 +877,6 @@ pub fn bare_user_model<'a>(provider: &str, model: &'a str) -> &'a str {
         return model;
     }
     rest
-}
-
-/// Which MCP server advertises each tool: advertised name -> server name.
-///
-/// Built where the servers are registered, because that is the only place the
-/// mapping exists. A [`Tool`] carries a name, a description and a schema, and
-/// although `leviath-mcp` always advertises exactly `<server>__<tool>`, the
-/// server half cannot be read back out of it: a server name may itself contain
-/// `_`, so `a__b__c` is either `a`'s `b__c` or `a__b`'s `c`. There is no string
-/// pattern that reliably answers "does this tool belong to tracker". A grant
-/// names the server and this table answers for it. It is also how the filter
-/// tells an MCP def from a script def, which nothing on the [`Tool`] itself
-/// records.
-pub type ToolOwners = std::collections::HashMap<String, String>;
-
-/// Where a run-time tool def came from, which is what a group grant selects on.
-///
-/// Decided by name, because a [`Tool`] carries no provenance: the built-in and
-/// sub-agent names are fixed lists, an MCP name is in `owners`, and script
-/// discovery drops any script whose name one of those already owns, so what
-/// is left can only be a script.
-pub fn tool_source(name: &str, owners: &ToolOwners) -> ToolGroup {
-    if leviath_tools::is_builtin_tool(name) {
-        ToolGroup::Builtin
-    } else if leviath_tools::is_subagent_tool(name) {
-        ToolGroup::Subagent
-    } else if owners.contains_key(name) {
-        ToolGroup::Mcp
-    } else {
-        ToolGroup::Scripts
-    }
-}
-
-/// Every tool a run could offer, and which MCP server each came from.
-///
-/// The two travel together because a connector grant needs both: the defs to
-/// filter, and the ownership to know what a server's name covers. Passed as one
-/// value rather than two adjacent `&`s: two references of different types
-/// next to each other is exactly the pair a reader transposes.
-#[derive(Clone, Copy)]
-pub struct ToolCatalog<'a> {
-    /// Every tool definition available to the run.
-    pub defs: &'a [Tool],
-    /// Which MCP server advertises each of them. Empty for a run with no MCP
-    /// servers, which makes every connector grant resolve to nothing.
-    pub owners: &'a ToolOwners,
-}
-
-/// A stage's Layer-1 grant list: the names it asked for, plus every tool
-/// belonging to a server it named.
-///
-/// Connector grants are resolved here rather than at parse time because the
-/// answer only exists once the servers are connected - which is the whole point
-/// of naming a server instead of its tools. A connector that resolves to
-/// nothing (server not installed, or not connected this run) contributes
-/// nothing, exactly as an `available_tools` name matching nothing does.
-///
-/// Order is `available_tools` first, then each connector's tools in the order
-/// the servers were named, and the result is de-duplicated: a tool named
-/// individually *and* covered by a connector is granted once.
-pub fn expand_connector_grants(
-    available: &[String],
-    connectors: &[String],
-    owners: &ToolOwners,
-) -> Vec<String> {
-    if connectors.is_empty() {
-        return available.to_vec();
-    }
-    let mut granted: Vec<String> = available.to_vec();
-    for server in connectors {
-        // Sorted so a stage's advertised tool order does not depend on hash
-        // iteration - the model sees this list, and a set that reshuffles
-        // between runs is a difference nobody can explain.
-        let mut owned: Vec<&String> = owners
-            .iter()
-            .filter(|(_, owner)| *owner == server)
-            .map(|(tool, _)| tool)
-            .collect();
-        owned.sort();
-        for tool in owned {
-            if !granted.contains(tool) {
-                granted.push(tool.clone());
-            }
-        }
-    }
-    granted
-}
-
-/// Filter the catalog's tool defs down to those a stage's `available_tools`
-/// grants: the names it lists (alias-resolved), plus every def whose source a
-/// listed group covers. Shared by spawn-time stage resolution and the mid-run
-/// tool-service refresh so both apply Layer-1 identically.
-///
-/// Connector grants are expanded into `available` by
-/// [`expand_connector_grants`] before this sees it. Group grants are *not*
-/// pre-expanded, on purpose: a `dynamic_tools` agent that grants `@scripts`
-/// installs a tool mid-run and expects the next refresh to offer it, which
-/// only works if the group is still a group when the refresh filters.
-///
-/// The stage-control tools (`submit_output`, `fan_out`) are never granted by
-/// a group; the stage mode writes them into the list by name.
-pub(crate) fn filter_tools_by_available(
-    catalog: ToolCatalog<'_>,
-    available: &[String],
-) -> Vec<Tool> {
-    if available.is_empty() {
-        return Vec::new();
-    }
-    let all = catalog.defs;
-    let groups = ToolGroup::named_in(available);
-    let wanted: std::collections::HashSet<&str> = available
-        .iter()
-        .filter(|n| !ToolGroup::is_token(n))
-        .map(|n| leviath_tools::canonical_tool_name(n))
-        .collect();
-    // Names that match nothing get one more chance, as a server-qualified MCP
-    // tool. Computed once rather than per candidate, and only from the names
-    // that actually missed - so a stage whose grants all resolve does no extra
-    // work.
-    let unmatched: Vec<&str> = wanted
-        .iter()
-        .copied()
-        .filter(|n| !all.iter().any(|t| t.name == *n))
-        .collect();
-    let recovered = recover_unqualified(all, &unmatched);
-    let grouped = |name: &str| {
-        !groups.is_empty()
-            && !leviath_tools::STAGE_CONTROL_TOOLS.contains(&name)
-            && groups
-                .iter()
-                .any(|g| g.covers(tool_source(name, catalog.owners)))
-    };
-    all.iter()
-        .filter(|t| {
-            wanted.contains(t.name.as_str())
-                || recovered.contains(t.name.as_str())
-                || grouped(&t.name)
-        })
-        .cloned()
-        .collect()
-}
-
-/// MCP tools named without their server, matched to the qualified name when
-/// exactly one server offers them.
-///
-/// MCP tools are advertised as `<server>__<tool>`, so a blueprint written
-/// against bare names says `create_issue` where the tool is
-/// `github__create_issue`. Left alone that grant matches nothing and the tool
-/// is silently not offered.
-///
-/// Three things keep this from doing harm:
-///
-/// - It only ever sees names that matched **nothing**. A built-in `read_file`
-///   matches itself, so a server that also offers `read_file` can never capture
-///   the grant.
-/// - It requires exactly one candidate. Two servers offering `create_issue`
-///   leave the name unresolved, because it genuinely is ambiguous and the
-///   manifest has to say which. A silent "whichever registered first" is what
-///   qualified names exist to prevent.
-/// - It matches on the qualified shape, so `create_issue` finds
-///   `github__create_issue` and not some unrelated tool ending in those
-///   characters.
-fn recover_unqualified<'a>(
-    all: &'a [Tool],
-    unmatched: &[&str],
-) -> std::collections::HashSet<&'a str> {
-    let mut recovered = std::collections::HashSet::new();
-    for name in unmatched {
-        let suffix = format!("__{name}");
-        let mut candidates = all
-            .iter()
-            .filter(|t| t.name.ends_with(&suffix) && t.name.len() > suffix.len());
-        let (Some(only), None) = (candidates.next(), candidates.next()) else {
-            continue;
-        };
-        tracing::debug!(
-            wrote = %name,
-            resolved = %only.name,
-            "a stage names an MCP tool without its server; resolved because exactly one offers it"
-        );
-        recovered.insert(only.name.as_str());
-    }
-    recovered
-}
-
-/// The stage's Layer-1 tool set for a run that may have nobody watching.
-///
-/// Same filter as `filter_tools_by_available`, then - for an unattended run -
-/// minus every tool whose only outcome is a prompt for a person
-/// ([`BLOCKING_INTERACTION_TOOLS`](crate::dynamic_interaction::BLOCKING_INTERACTION_TOOLS)),
-/// unless the stage named it in `required_tools`.
-///
-/// Dropping the definition rather than auto-answering the call is what makes the
-/// difference visible to the model: it never sees the tool, so it decides for
-/// itself instead of spending a round trip to be told nobody is there. A call
-/// that arrives anyway (a model repeating itself from context) meets the ordinary
-/// unoffered-tool refusal.
-pub fn filter_tools_for_stage(
-    catalog: ToolCatalog<'_>,
-    available: &[String],
-    required: &[String],
-    unattended: bool,
-) -> Vec<Tool> {
-    let mut tools = filter_tools_by_available(catalog, available);
-    if unattended {
-        tools.retain(|t| {
-            !crate::dynamic_interaction::BLOCKING_INTERACTION_TOOLS.contains(&t.name.as_str())
-                || required
-                    .iter()
-                    .any(|n| leviath_tools::canonical_tool_name(n) == t.name)
-        });
-    }
-    tools
 }
 
 /// Every provider a stage could have used, in the order they were tried, for
@@ -1049,8 +943,8 @@ pub(crate) struct StageRoute {
 }
 
 /// Decide the model of what `about` names (a stage, or the graph's
-/// compaction), whose model choice is `choice` and which takes the mime types
-/// `needs` beyond text, or say why it has no usable one.
+/// compaction), whose model choice is `choice` and which takes and makes the
+/// mime types `mimes` beyond text, or say why it has no usable one.
 ///
 /// The last fallback in [`resolve_stage_model`] is unchecked: it hands back
 /// the stage's own first entry whether or not anything answers to that name,
@@ -1062,7 +956,7 @@ pub(crate) struct StageRoute {
 pub(crate) fn resolve_stage_route(
     about: Resolving<'_>,
     choice: &ModelChoice,
-    needs: &[String],
+    mimes: StageMimes<'_>,
     model_override: Option<&str>,
     defaults: &ModelDefaults,
     registry: &ProviderRegistry,
@@ -1080,8 +974,20 @@ pub(crate) fn resolve_stage_route(
             unread.join(", "),
         ));
     }
-    let mut candidates =
-        resolve_candidates(choice, model_override, defaults, registry, needs, about);
+    let candidates = resolve_candidates(
+        choice,
+        model_override,
+        defaults,
+        registry,
+        mimes.takes,
+        about,
+    );
+    // A pinned `provider/model` override is the caller naming the one route
+    // it wants, so it is sent as asked whatever its model is said to make.
+    let (mut candidates, unmade) = match model_override.is_some_and(|ov| ov.contains('/')) {
+        true => (candidates, Vec::new()),
+        false => for_output(candidates, mimes.makes, registry, about)?,
+    };
     let head = candidates.remove(0);
     // `registry.has` also consults the script layer, so a `.rhai` provider
     // sitting on disk counts as usable and is never false-rejected here.
@@ -1160,7 +1066,15 @@ pub(crate) fn resolve_stage_route(
     // model it names. It rides the stage's operational log so `lev run`, the
     // dashboard and the journal all carry it; a stage that starts on its own
     // first choice says nothing.
-    let mut notes = match head_source(choice, model_override, defaults, registry, &head, about) {
+    let mut notes = match head_source(
+        choice,
+        model_override,
+        defaults,
+        registry,
+        &head,
+        mimes,
+        about,
+    ) {
         HeadSource::Blueprint => Vec::new(),
         HeadSource::Override => vec![format!(
             "[model] {subject} starts on {}/{} (override_model); blueprint asked for {}",
@@ -1176,6 +1090,7 @@ pub(crate) fn resolve_stage_route(
             blueprint_choice(choice)
         )],
     };
+    notes.extend(unmade);
     notes.extend(dropped);
     Ok(StageRoute {
         provider_name: head.provider,
@@ -1187,6 +1102,10 @@ pub(crate) fn resolve_stage_route(
 
 #[cfg(test)]
 mod tests {
+    use super::super::tool_grants::*;
+    use crate::spec::graph::ToolGroup;
+    use leviath_providers::Tool;
+
     /// A catalog over `defs` with no MCP servers behind it, which is what every
     /// test that is not about connectors wants.
     fn catalog(defs: &[Tool]) -> ToolCatalog<'_> {
@@ -2445,6 +2364,7 @@ mod tests {
                 &defaults,
                 &registry,
                 &got[0],
+                StageMimes::default(),
                 Resolving::Stage("s")
             ),
             HeadSource::Fallback
@@ -2474,6 +2394,7 @@ mod tests {
                 &defaults,
                 &registry,
                 &got[0],
+                StageMimes::default(),
                 Resolving::Stage("s")
             ),
             HeadSource::Blueprint
@@ -2522,6 +2443,7 @@ mod tests {
                 &displaced,
                 &registry,
                 &got[0],
+                StageMimes::default(),
                 Resolving::Stage("s")
             ),
             HeadSource::Override
@@ -2532,7 +2454,15 @@ mod tests {
         };
         let got = resolve_stage_candidates(&cfg, None, &same, &registry);
         assert_eq!(
-            head_source(&cfg, None, &same, &registry, &got[0], Resolving::Stage("s")),
+            head_source(
+                &cfg,
+                None,
+                &same,
+                &registry,
+                &got[0],
+                StageMimes::default(),
+                Resolving::Stage("s")
+            ),
             HeadSource::Blueprint
         );
         let got = resolve_stage_candidates(&cfg, Some("anthropic/sonnet"), &displaced, &registry);
@@ -2543,9 +2473,185 @@ mod tests {
                 &displaced,
                 &registry,
                 &got[0],
+                StageMimes::default(),
                 Resolving::Stage("s"),
             ),
             HeadSource::Blueprint
+        );
+    }
+
+    /// Providers described three ways: `wordy` writes text and reads images,
+    /// `unsure` was never described (text only), `speaks` can hand back audio.
+    fn registry_by_output() -> ProviderRegistry {
+        let mut r = ProviderRegistry::new();
+        let described = |input: &[&str], output: &[&str]| FakeProvider {
+            mime: Some(leviath_providers::ModelMime::new(input, output)),
+            ..Default::default()
+        };
+        r.register(
+            "wordy".to_string(),
+            Arc::new(described(&["text/*", "image/*"], &["text/*"])),
+        );
+        r.register("unsure".to_string(), Arc::new(FakeProvider::default()));
+        r.register(
+            "speaks".to_string(),
+            Arc::new(described(&["text/*"], &["text/*", "audio/*"])),
+        );
+        r
+    }
+
+    #[test]
+    fn output_puts_capable_routes_first_keeps_unknown_ones_and_drops_the_rest() {
+        let registry = registry_by_output();
+        let cfg = model_cfg(vec![
+            ("wordy", "a"),
+            ("unsure", "b"),
+            ("speaks", "c"),
+            ("wordy", "e"),
+            ("speaks", "d"),
+        ]);
+        let about = Resolving::Stage("say");
+        let listed =
+            resolve_candidates(&cfg, None, &ModelDefaults::default(), &registry, &[], about);
+        let audio = vec!["audio/*".to_string()];
+        let (got, notes) = for_output(listed.clone(), &audio, &registry, about).unwrap();
+        assert_eq!(
+            pairs(&got),
+            vec![("speaks", "c"), ("speaks", "d"), ("unsure", "b")],
+            "capable first and unknown after, each group in the order it came"
+        );
+        assert_eq!(
+            notes,
+            vec![
+                "[model] stage 'say' will not run on wordy/a (makes text/*): it cannot produce audio/*",
+                "[model] stage 'say' will not run on wordy/e (makes text/*): it cannot produce audio/*",
+            ]
+        );
+        // Nothing asked of the output: nothing moves and nothing is said.
+        let (same, quiet) = for_output(listed, &[], &registry, about).unwrap();
+        assert_eq!(
+            pairs(&same),
+            pairs(&resolve_candidates(
+                &cfg,
+                None,
+                &ModelDefaults::default(),
+                &registry,
+                &[],
+                about
+            ))
+        );
+        assert!(quiet.is_empty());
+
+        // A head on a provider that is not here says nothing either way, so it
+        // is kept; behind a capable route it is a phantom and is left out.
+        let ghost = vec![
+            Candidate::new("ghost".into(), "x".into()),
+            Candidate::new("speaks".into(), "c".into()),
+        ];
+        let (got, _) = for_output(ghost, &audio, &registry, about).unwrap();
+        assert_eq!(pairs(&got), vec![("speaks", "c")]);
+
+        // Every route described as unable: refused, naming each.
+        let wordy = model_cfg(vec![("wordy", "a"), ("wordy", "e")]);
+        let listed = resolve_candidates(
+            &wordy,
+            None,
+            &ModelDefaults::default(),
+            &registry,
+            &[],
+            about,
+        );
+        let err = for_output(listed, &audio, &registry, about).unwrap_err();
+        assert!(
+            err.starts_with("stage 'say' declares output audio/*"),
+            "{err}"
+        );
+        assert!(
+            err.contains("wordy/a (makes text/*), wordy/e (makes text/*)"),
+            "{err}"
+        );
+        assert!(err.contains("the stage's models list"), "{err}");
+    }
+
+    #[test]
+    fn only_output_beyond_text_asks_anything_of_a_model() {
+        let declared: Vec<String> = [
+            "text/markdown",
+            "application/json",
+            "*/*",
+            "image/*",
+            "audio/mpeg",
+            "image/*",
+            "a/b;c",
+            "model/*",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            made_beyond_text(&declared),
+            ["image/*", "audio/mpeg", "model/*"]
+        );
+        assert!(made_beyond_text(&[]).is_empty());
+    }
+
+    /// A head the stage's output moved to the front is still the blueprint's
+    /// own choice, not one the user's settings made.
+    #[test]
+    fn a_head_chosen_for_its_output_is_the_blueprints() {
+        let registry = registry_by_output();
+        let cfg = model_cfg(vec![("wordy", "a"), ("speaks", "c")]);
+        let defaults = ModelDefaults::default();
+        let audio = vec!["audio/mpeg".to_string()];
+        let mimes = StageMimes {
+            takes: &[],
+            makes: &audio,
+        };
+        let route = resolve_stage_route(
+            Resolving::Stage("say"),
+            &cfg,
+            mimes,
+            None,
+            &defaults,
+            &registry,
+        )
+        .unwrap();
+        assert_eq!(
+            (route.provider_name.as_str(), route.model.as_str()),
+            ("speaks", "c")
+        );
+        assert!(
+            !route.notes.iter().any(|n| n.contains("override_model")),
+            "{:?}",
+            route.notes
+        );
+        let head = Candidate::new("speaks".into(), "c".into());
+        assert_eq!(
+            head_source(
+                &cfg,
+                None,
+                &defaults,
+                &registry,
+                &head,
+                mimes,
+                Resolving::Stage("say")
+            ),
+            HeadSource::Blueprint
+        );
+        // None of the blueprint's routes can produce it, so a head that can
+        // only came from the user's settings.
+        let unable = model_cfg(vec![("wordy", "a")]);
+        assert_eq!(
+            head_source(
+                &unable,
+                None,
+                &defaults,
+                &registry,
+                &head,
+                mimes,
+                Resolving::Stage("say")
+            ),
+            HeadSource::Override
         );
     }
 

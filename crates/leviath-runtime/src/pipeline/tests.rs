@@ -2439,6 +2439,67 @@ fn a_pinned_routes_not_found_still_ends_the_stage() {
     assert!(world.get::<ResolveTransition>(e).is_some());
 }
 
+/// A 400 saying this route cannot do what was asked of it (a modality or a
+/// parameter the model does not support) is the route's limit, not the
+/// request's fault: the call moves to the next route in the list, and the
+/// move is journaled as such. Each move uses up a route, so it is bounded by
+/// the list; once none is left the stage ends naming every one tried.
+#[test]
+fn a_capability_refusal_moves_the_call_to_the_next_route() {
+    let (mut world, tx) = world_with_results();
+    let (lane, mut journal) = mpsc::unbounded_channel();
+    world.insert_resource(crate::pipeline::JournalSender::new(lane, None));
+    let e = world
+        .spawn((
+            agent_state(),
+            AwaitingInference,
+            stage_on_the_gateway(),
+            // Pinned: the route is the author's, and still cannot do it.
+            spec_listing(&["openrouter/meta/muse-1", "openai/gpt-x"]),
+        ))
+        .id();
+    let refusal = || {
+        leviath_providers::ProviderError::from_http(
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"error":{"message":"This model does not support the 'audio' modality.","type":"invalid_request_error","param":"modalities","code":"unsupported_value"}}"#,
+            None,
+        )
+    };
+
+    fail_call(&mut world, &tx, e, refusal());
+
+    let si = world.get::<StageInference>(e).unwrap();
+    assert_eq!(
+        (si.provider_name.as_str(), si.model.as_str()),
+        ("openai", "gpt-x")
+    );
+    assert!(world.get::<ReadyToInfer>(e).is_some());
+    let records = failovers(&mut journal);
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0].reason, "route-incapable");
+    assert_eq!(records[0].kind, "bad-request");
+
+    // Bounded: two more refusals spend the last route and then end the stage.
+    for _ in 0..2 {
+        world
+            .entity_mut(e)
+            .remove::<ReadyToInfer>()
+            .insert(AwaitingInference);
+        fail_call(&mut world, &tx, e, refusal());
+    }
+    let AgentStatus::Error { message } = &world.get::<AgentState>(e).unwrap().status else {
+        panic!("the stage ends once no route is left");
+    };
+    assert!(
+        message.contains("openrouter/meta/muse-1 (route-incapable)"),
+        "{message}"
+    );
+    assert!(
+        message.contains("openai/gpt-x (route-incapable)"),
+        "{message}"
+    );
+}
+
 /// A 5xx or a 429 that outlived the retry policy moves to the next route
 /// rather than ending the stage; a bad request moves nowhere.
 #[test]

@@ -137,6 +137,24 @@ pub struct StageDef {
 }
 
 impl StageDef {
+    /// The mime patterns the stage declares as its output: its output format
+    /// when that is a mime type, and the types its output routing names.
+    ///
+    /// The one answer to "what does this stage expect its model to hand
+    /// back": a provider reads it to ask for an audio answer, and the resolver
+    /// to prefer a route whose model can give one. An `output.artifacts`
+    /// entry is not part of it, because a file the answer hands back may as
+    /// well be one a tool wrote.
+    pub fn declared_output_mimes(&self) -> Vec<String> {
+        let format = self.output.as_ref().and_then(|o| o.format.as_deref());
+        format
+            .into_iter()
+            .map(str::to_string)
+            .chain(self.output_routing.keys().cloned())
+            .filter(|m| m.contains('/'))
+            .collect()
+    }
+
     /// Whether the stage has a tool that changes files the framework sees: a
     /// built-in that writes, every built-in through a group, or one of
     /// `extra`, the tools a gate counts as writing, when the stage names it.

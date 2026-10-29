@@ -252,8 +252,9 @@ pub struct FailoverRecord {
     pub to_model: String,
     /// Why the call moved: the provider was unusable
     /// (`UnavailableReason::label`), its availability trouble outlived the
-    /// retries (`retries-exhausted`), or it did not have the model a bare
-    /// name asked for (`model-not-found`).
+    /// retries (`retries-exhausted`), it did not have the model a bare
+    /// name asked for (`model-not-found`), or it said it cannot do what the
+    /// request asked of it (`route-incapable`).
     pub reason: String,
     /// A stable label for the failure itself (`FailureKind::label`), or empty
     /// when the error carried no classification.
