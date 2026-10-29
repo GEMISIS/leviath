@@ -45,6 +45,20 @@ same list.
 
 ### Fixed
 
+- A stage that declares output beyond text (`output_routing = { "audio/mpeg" = ... }`,
+  or a mime `output` format) starts on a route whose model can produce it. A bare
+  model name went to the first provider in `provider_order` listing it, even when
+  that route's model is described as producing only text. Such a route is now
+  dropped, with a `[model]` line in the run's log; a route nothing describes is
+  kept behind the capable ones; and a stage with no route that can produce its
+  output is refused at spawn, naming the stage, the routes and the output.
+- A bad request saying the route cannot do what was asked ("does not support the
+  'audio' modality", `unsupported_parameter`, "No endpoints found that support")
+  moves the call to the next route in the stage's list, journaled as
+  `route-incapable`, instead of ending the stage. Any other bad request still ends it.
+- An OpenRouter request for an audio answer names a voice: `audio.voice` is the
+  stage's `voice`, else `alloy` as on the OpenAI provider. Without it OpenAI's
+  upstream answered 400 for a missing `audio.voice`.
 - A model its provider has retired is no longer offered or retried. OpenAI still
   lists `sora-2` and `sora-2-pro` with a `shutdown_date` of 2026-09-24 and answers
   every call with a 404, which read as "usually a short outage": each call spent its

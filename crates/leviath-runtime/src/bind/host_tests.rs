@@ -689,3 +689,150 @@ fn a_stage_grants_its_tools_groups_and_connectors() {
     assert!(grants.contains(&"read_file".to_string()), "{grants:?}");
     assert!(grants.contains(&"gh__search".to_string()), "{grants:?}");
 }
+
+/// A provider that serves every model and describes each one with the same
+/// mime, for the choices that turn on what a model can hand back.
+struct Makes(Option<leviath_providers::ModelMime>);
+
+#[async_trait::async_trait]
+impl leviath_providers::Provider for Makes {
+    async fn infer(
+        &self,
+        _r: &leviath_providers::InferenceRequest,
+    ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
+        Err(leviath_providers::ProviderError::Other("makes".into()))
+    }
+    async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
+        1
+    }
+    fn max_context_tokens(&self, _m: &str) -> usize {
+        5000
+    }
+    fn name(&self) -> &str {
+        "makes"
+    }
+    fn capabilities(&self, _m: &str) -> leviath_providers::ModelCapabilities {
+        leviath_providers::ModelCapabilities::default()
+    }
+    fn mime(&self, _m: &str) -> leviath_providers::ModelMime {
+        self.0
+            .clone()
+            .unwrap_or_else(leviath_providers::ModelMime::text_only)
+    }
+    fn serves_model(&self, model_key: &str) -> Option<String> {
+        Some(model_key.to_string())
+    }
+}
+
+#[tokio::test]
+async fn the_mime_stub_answers_every_question() {
+    use leviath_providers::Provider;
+    let p = Makes(None);
+    let req = leviath_providers::InferenceRequest {
+        system: vec![],
+        messages: vec![],
+        model: "m".to_string(),
+        max_tokens: 1,
+        temperature: 0.0,
+        tools: vec![],
+        extra: serde_json::Value::Null,
+        request_timeout_secs: None,
+    };
+    assert!(p.infer(&req).await.is_err());
+    assert_eq!(p.count_tokens("x", "m").await, 1);
+    assert_eq!(p.name(), "makes");
+    let _ = p.capabilities("m");
+}
+
+/// Three routes to one model: one whose description says it writes text only
+/// (`wordy`), one nothing has described (`unsure`), and one that can speak
+/// (`speaks`), in that preference.
+fn routes_by_output() -> (ProviderRegistry, ModelDefaults) {
+    use leviath_providers::ModelMime;
+    let mut r = ProviderRegistry::new();
+    r.register(
+        "wordy".into(),
+        Arc::new(Makes(Some(ModelMime::new(
+            &["text/*", "image/*"],
+            &["text/*"],
+        )))),
+    );
+    r.register("unsure".into(), Arc::new(Makes(None)));
+    r.register(
+        "speaks".into(),
+        Arc::new(Makes(Some(ModelMime::new(
+            &["text/*"],
+            &["text/*", "audio/*"],
+        )))),
+    );
+    let defaults = ModelDefaults {
+        provider: "wordy".into(),
+        provider_order: vec!["wordy".into(), "unsure".into(), "speaks".into()],
+        ..Default::default()
+    };
+    (r, defaults)
+}
+
+/// A stage on the bare model `voice` that routes `routed` to a region.
+fn stage_routing(routed: &str) -> StageDef {
+    let mut s = stage(&["voice"]);
+    s.output_routing.insert(
+        routed.to_string(),
+        crate::spec::names::RegionName::new("speech").unwrap(),
+    );
+    s
+}
+
+#[test]
+fn a_stage_that_makes_audio_starts_on_a_route_that_can_make_it() {
+    let (r, defaults) = routes_by_output();
+    let plan = choose_model(&stage_routing("audio/mpeg"), None, &defaults, &r).unwrap();
+    assert_eq!(
+        (plan.model.provider.as_str(), plan.model.id.as_str()),
+        ("speaks", "voice"),
+        "the route whose model can hand back audio leads"
+    );
+    assert_eq!(
+        plan.model.fallbacks,
+        vec![ModelRef::parse("unsure/voice").unwrap()],
+        "a route nothing described stays behind it; one described as text only is dropped"
+    );
+    assert!(
+        plan.notes
+            .iter()
+            .any(|n| n.contains("wordy/voice") && n.contains("audio/mpeg")),
+        "the dropped route is named in the stage's notes: {:?}",
+        plan.notes
+    );
+
+    // Text-shaped output asks nothing of the model beyond its reply, so the
+    // preference stands.
+    let mut json = stage(&["voice"]);
+    json.output = Some(crate::spec::graph::OutputDef {
+        format: Some("application/json".into()),
+        ..Default::default()
+    });
+    let plan = choose_model(&json, None, &defaults, &r).unwrap();
+    assert_eq!(plan.model.provider.as_str(), "wordy");
+    let plan = choose_model(&stage(&["voice"]), None, &defaults, &r).unwrap();
+    assert_eq!(plan.model.provider.as_str(), "wordy");
+}
+
+#[test]
+fn a_stage_no_route_can_make_the_output_of_is_refused_by_name() {
+    let (r, mut defaults) = routes_by_output();
+    defaults.provider_order = vec!["wordy".into()];
+    let issue = choose_model(&stage_routing("audio/*"), None, &defaults, &r).unwrap_err();
+    assert_eq!(issue.code, IssueCode::Unresolvable);
+    for named in ["plan", "voice", "audio/*", "wordy"] {
+        assert!(issue.message.contains(named), "names {named}: {issue}");
+    }
+    // A route nothing described is not a refusal: it may well speak.
+    defaults.provider_order = vec!["wordy".into(), "unsure".into()];
+    let plan = choose_model(&stage_routing("audio/*"), None, &defaults, &r).unwrap();
+    assert_eq!(plan.model.provider.as_str(), "unsure");
+    // A run that pins `provider/model` asked for that route.
+    let pinned = ModelRef::parse("wordy/voice").unwrap();
+    let plan = choose_model(&stage_routing("audio/*"), Some(&pinned), &defaults, &r).unwrap();
+    assert_eq!(plan.model.provider.as_str(), "wordy");
+}

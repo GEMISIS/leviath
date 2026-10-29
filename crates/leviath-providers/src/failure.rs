@@ -481,6 +481,44 @@ impl ProviderError {
         FailureKind::ALL.into_iter().find(|k| k.label() == label)
     }
 
+    /// Whether this is a bad request that says the route cannot do what was
+    /// asked of it: a modality, a parameter or a value the model does not
+    /// support (`Unsupported value: ... does not support the 'audio'
+    /// modality`, `unsupported_parameter`, OpenRouter's `No endpoints found
+    /// that support ...`).
+    ///
+    /// Told apart from every other bad request because it is the one a
+    /// different route can answer: the request is well formed, and this model
+    /// on this provider has no way to give it. A malformed body, a missing
+    /// field or a prompt over the window fails the same way everywhere, and
+    /// stays a plain bad request. Only the provider's own words are read, not
+    /// the remedy this crate appends.
+    pub fn is_capability_refusal(&self) -> bool {
+        const SAID: [&str; 9] = [
+            "does not support",
+            "doesn't support",
+            "not supported",
+            "unsupported parameter",
+            "unsupported_parameter",
+            "unsupported value",
+            "unsupported_value",
+            "unsupported modality",
+            "no endpoints found that support",
+        ];
+        let ProviderError::ApiError(message) = self else {
+            return false;
+        };
+        let kind = FailureKind::BadRequest;
+        let Some(rest) = message.strip_prefix(&format!("[{}] ", kind.label())) else {
+            return false;
+        };
+        let detail = rest
+            .strip_suffix(kind.remedy())
+            .unwrap_or(rest)
+            .to_ascii_lowercase();
+        SAID.iter().any(|said| detail.contains(said))
+    }
+
     /// This 404, read as an outage, when the provider's own listing names the
     /// model it was for. `None` for anything that is not a 404.
     ///
@@ -514,6 +552,47 @@ impl ProviderError {
 mod tests {
     use super::*;
     use crate::provider::build_http_client;
+
+    /// A 400 is a capability refusal only when the provider's words say the
+    /// route cannot do it; any other 400, any other status, and this crate's
+    /// own remedy text are not.
+    #[test]
+    fn a_capability_refusal_is_a_bad_request_saying_the_route_cannot() {
+        let bad =
+            |body: &str| ProviderError::from_http(reqwest::StatusCode::BAD_REQUEST, body, None);
+        for refusal in [
+            r#"{"error":{"message":"This model does not support the 'audio' modality.","code":"unsupported_value"}}"#,
+            "Unsupported parameter: 'modalities' is not supported with this model.",
+            r#"{"error":{"param":"audio","code":"unsupported_parameter"}}"#,
+            "Unsupported value: 'audio' for this model",
+            "unsupported_value",
+            "Unsupported modality: audio",
+            "Multi-modal output is not supported.",
+            "The model doesn't support audio output.",
+            "No endpoints found that support the requested output modalities: audio",
+        ] {
+            assert!(bad(refusal).is_capability_refusal(), "{refusal}");
+        }
+        for plain in [
+            "Missing required parameter: 'messages'.",
+            "Invalid JSON body",
+            "",
+        ] {
+            assert!(!bad(plain).is_capability_refusal(), "{plain:?}");
+        }
+        // The same words on another status, or on another kind of error, are
+        // not this.
+        let elsewhere = ProviderError::from_http(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            "not supported",
+            None,
+        );
+        assert!(!elsewhere.is_capability_refusal());
+        assert!(!ProviderError::Other("not supported".into()).is_capability_refusal());
+        // A message built without the remedy is read whole.
+        let bare = ProviderError::ApiError("[bad-request] not supported".into());
+        assert!(bare.is_capability_refusal());
+    }
 
     /// The chain keeps every cause once, in order, so a wrapper that repeats
     /// the message beneath it does not print it twice.

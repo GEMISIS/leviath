@@ -440,6 +440,26 @@ impl ModelMime {
             .all(|w| self.input.iter().any(|have| pattern_covers(have, w)))
     }
 
+    /// Whether the model can hand back a part of every pattern in `wanted`,
+    /// as far as its description says.
+    ///
+    /// `Some(true)` when each pattern overlaps an output pattern (`audio/*`
+    /// is met by `audio/wav`, and `audio/mpeg` by `audio/*`), `Some(false)`
+    /// when one does not. `None` when the model is
+    /// [`text_only`](Self::text_only): that is what every model nothing has
+    /// described answers, so it cannot be told from a model described as
+    /// text only, and a caller must not read it as a no.
+    pub fn produces_all(&self, wanted: &[String]) -> Option<bool> {
+        if *self == Self::text_only() {
+            return None;
+        }
+        Some(wanted.iter().all(|w| {
+            self.output
+                .iter()
+                .any(|have| pattern_covers(have, w) || pattern_covers(w, have))
+        }))
+    }
+
     /// Whether the model takes anything beyond text: what the tables' tests
     /// check for each model they list.
     #[cfg(test)]
@@ -635,6 +655,34 @@ mod mime_tests {
         assert!(pattern_covers("Image/*", "image/PNG"));
         assert!(!pattern_covers("image", "image/png"));
         assert!(!pattern_covers("image/png", "image/jpeg"));
+    }
+
+    #[test]
+    fn produces_all_reads_the_output_side_and_knows_when_it_cannot_say() {
+        let wanted = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let speaks = ModelMime::new(&["text/*"], &["text/*", "audio/*"]);
+        assert_eq!(speaks.produces_all(&wanted(&["audio/mpeg"])), Some(true));
+        assert_eq!(speaks.produces_all(&wanted(&["audio/*"])), Some(true));
+        assert_eq!(
+            speaks.produces_all(&wanted(&["audio/*", "image/*"])),
+            Some(false),
+            "every pattern has to be met"
+        );
+        let wav = ModelMime::new(&["text/*"], &["audio/wav"]);
+        assert_eq!(
+            wav.produces_all(&wanted(&["audio/*"])),
+            Some(true),
+            "a narrower output still meets a family"
+        );
+        assert_eq!(wav.produces_all(&wanted(&["audio/mpeg"])), Some(false));
+        // Described, and what it describes is text with images in.
+        let reads = ModelMime::new(&["text/*", "image/*"], &["text/*"]);
+        assert_eq!(reads.produces_all(&wanted(&["audio/*"])), Some(false));
+        // Nothing described it: no answer, not a no.
+        assert_eq!(
+            ModelMime::text_only().produces_all(&wanted(&["audio/*"])),
+            None
+        );
     }
 
     #[test]

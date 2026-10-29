@@ -19,9 +19,16 @@
 //!   list that serves the same model: the author left the route open, so a
 //!   provider that cannot serve the model is the wrong route, not the wrong
 //!   model. A pinned `provider/model` keeps its answer.
+//! - **The route says it cannot do what was asked**: a bad request whose
+//!   words are a modality, a parameter or a value the model does not support
+//!   ([`ProviderError::is_capability_refusal`]). The next route in the list,
+//!   whatever it is: the request is sound, and this route has no way to give
+//!   it.
 //!
-//! A bad request, a refused prompt, a token limit or a malformed answer moves
-//! nothing: the same request fails the same way everywhere.
+//! Every move uses up the route it moves to, so a call moves at most once per
+//! route in the stage's list. Any other bad request, a refused prompt, a token
+//! limit or a malformed answer moves nothing: the same request fails the same
+//! way everywhere.
 
 use bevy_ecs::prelude::Component;
 use leviath_providers::{FailureKind, ProviderError, UnavailableReason};
@@ -39,6 +46,8 @@ pub(crate) enum Reroute {
     Exhausted,
     /// The provider does not have the model.
     NotServed,
+    /// The route cannot do what the request asked of it.
+    Incapable,
 }
 
 impl Reroute {
@@ -50,6 +59,9 @@ impl Reroute {
         if err.failure_kind() == Some(FailureKind::NotFound) {
             return Some(Self::NotServed);
         }
+        if err.is_capability_refusal() {
+            return Some(Self::Incapable);
+        }
         err.is_transient().then_some(Self::Exhausted)
     }
 
@@ -59,6 +71,7 @@ impl Reroute {
             Self::Unusable(reason) => reason.label(),
             Self::Exhausted => "retries-exhausted",
             Self::NotServed => "model-not-found",
+            Self::Incapable => "route-incapable",
         }
     }
 
@@ -73,7 +86,9 @@ impl Reroute {
         model: &str,
     ) -> Option<usize> {
         match self {
-            Self::Unusable(_) | Self::Exhausted => (!fallbacks.is_empty()).then_some(0),
+            Self::Unusable(_) | Self::Exhausted | Self::Incapable => {
+                (!fallbacks.is_empty()).then_some(0)
+            }
             Self::NotServed if open => fallbacks.iter().position(|f| {
                 f.provider_or_empty() != provider
                     && super::model_key(f.model.as_str()) == super::model_key(model)
@@ -171,6 +186,10 @@ mod tests {
             retry_after_secs: Some(3),
         };
         assert_eq!(Reroute::of(&limited), Some(Reroute::Exhausted));
+        let incapable = ProviderError::ApiError(
+            "[bad-request] HTTP 400 Bad Request: this model does not support audio output".into(),
+        );
+        assert_eq!(Reroute::of(&incapable), Some(Reroute::Incapable));
         // What fails the same way everywhere ends the stage.
         for stays in [
             ProviderError::ApiError("[bad-request] HTTP 400 Bad Request: no".into()),
@@ -190,6 +209,7 @@ mod tests {
         );
         assert_eq!(Reroute::Exhausted.label(), "retries-exhausted");
         assert_eq!(Reroute::NotServed.label(), "model-not-found");
+        assert_eq!(Reroute::Incapable.label(), "route-incapable");
     }
 
     #[test]
@@ -211,6 +231,9 @@ mod tests {
         );
         assert_eq!(Reroute::Exhausted.next(&list, false, "x", "y"), Some(0));
         assert_eq!(Reroute::Exhausted.next(&[], true, "x", "y"), None);
+        // A route that cannot do it moves on down the list, pinned or open.
+        assert_eq!(Reroute::Incapable.next(&list, false, "x", "y"), Some(0));
+        assert_eq!(Reroute::Incapable.next(&[], true, "x", "y"), None);
     }
 
     /// A spec whose one stage `s` lists `models`.

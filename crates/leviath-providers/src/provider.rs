@@ -552,6 +552,12 @@ pub const PROMPT_REGIONS_KEY: &str = "prompt_regions";
 /// stage wants, and it is never sent on as a model parameter.
 pub const OUTPUT_MIMES_KEY: &str = "output_mimes";
 
+/// The voice an audio answer is asked for in when the stage names none. A
+/// chat model that answers in speech needs one: OpenAI refuses the request
+/// without it, directly or behind a gateway. One default for every route to
+/// such a model, so the same stage sounds the same wherever it lands.
+pub(crate) const DEFAULT_AUDIO_VOICE: &str = "alloy";
+
 /// The `request.extra` keys the runtime owns, left out of the pass-through
 /// merge into a chat request body.
 pub(crate) const RUNTIME_EXTRA_KEYS: &[&str] = &[PROMPT_REGIONS_KEY, OUTPUT_MIMES_KEY];

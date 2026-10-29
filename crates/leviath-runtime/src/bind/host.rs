@@ -15,8 +15,8 @@ use leviath_core::JsonDoc;
 use leviath_providers::Tool;
 
 use crate::pipeline::{
-    ModelDefaults, Resolving, ToolCatalog, ToolOwners, expand_connector_grants,
-    filter_tools_for_stage, resolve_candidates, resolve_stage_route,
+    ModelDefaults, Resolving, StageMimes, ToolCatalog, ToolOwners, expand_connector_grants,
+    filter_tools_for_stage, made_beyond_text, resolve_candidates, resolve_stage_route,
 };
 use crate::provider_creds::ProviderCreds;
 use crate::providers::ProviderRegistry;
@@ -89,7 +89,9 @@ pub fn check_code(code: &[u8], used_as: CodeUse) -> Result<(), String> {
 /// The choice is made by the stage resolver every spawn uses, so a gateway's
 /// unread model list, a provider that refuses the model and a model that
 /// cannot run with zero data retention are refused here. The model is chosen
-/// for the mime types the stage's own `input_accepts` names. An issue sits at
+/// for the mime types the stage's own `input_accepts` names, and for what it
+/// declares as its output: a route whose model cannot produce that is
+/// dropped, and a stage with no other route is refused. An issue sits at
 /// the root, which is the stage's model: the resolver puts the stage's path
 /// in front of it.
 pub fn choose_model(
@@ -108,10 +110,14 @@ pub fn choose_model(
         .iter()
         .map(ToString::to_string)
         .collect();
+    let makes = made_beyond_text(&stage.declared_output_mimes());
     let resolved = resolve_stage_route(
         Resolving::Stage(stage.name.as_str()),
         &stage.model,
-        &needs,
+        StageMimes {
+            takes: &needs,
+            makes: &makes,
+        },
         requested_text.as_deref(),
         defaults,
         registry,
@@ -179,7 +185,14 @@ pub fn compaction_routes(
             notes: Vec::new(),
         });
     }
-    let route = resolve_stage_route(about, &choice, &[], None, defaults, registry)?;
+    let route = resolve_stage_route(
+        about,
+        &choice,
+        StageMimes::default(),
+        None,
+        defaults,
+        registry,
+    )?;
     let head = ModelRef::parse(&format!("{}/{}", route.provider_name, route.model)).ok();
     Ok(CompactionPlan {
         routes: head.into_iter().chain(route.fallbacks).collect(),

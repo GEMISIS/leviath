@@ -183,7 +183,7 @@ somewhere else.
 | `output.artifacts` | `[]` | The files the stage hands back beside its answer, by name and type. See [Final outputs](/docs/outputs#large-results) |
 | `output.overwrite_artifacts` | `[mime]` setting, off | Whether an artifact may replace a different file already at its path. See [Final outputs](/docs/outputs#large-results) |
 | `output.validator_tool` | none | A tool the stage is given, called with each answer before it is recorded. It must be read-only and idempotent. See [Rhai output validators](/docs/rhai-validators#when-a-script-cannot-judge-it-a-validator-tool) |
-| `output_routing` | `{}` | Where the model's produced parts go, by mime type: `"image/*" = "artwork"`. See [Routing produced parts](/docs/context#routing-produced-parts) |
+| `output_routing` | `{}` | Where the model's produced parts go, by mime type: `"image/*" = "artwork"`. A route whose model cannot produce a type named here is not used. See [Routing produced parts](/docs/context#routing-produced-parts) and [which entry a stage starts on](/docs/providers#which-entry-a-stage-starts-on) |
 | `reset` | `[]` | Regions emptied when the stage is entered, for a clean slate. See [A clean slate for the next stage](/docs/context#a-clean-slate-for-the-next-stage) |
 | `tool_accepts` | `{}` | What each tool may be handed at this stage, as `tool = ["image/*"]`. See [Mime](/docs/mime#what-a-tool-may-be-handed) |
 

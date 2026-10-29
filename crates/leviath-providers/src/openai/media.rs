@@ -195,7 +195,8 @@ pub(crate) async fn chat_audio(
             request.model
         ))
     })?;
-    let voice = media::extra_str(request, "voice").unwrap_or_else(|| "alloy".to_string());
+    let voice = media::extra_str(request, "voice")
+        .unwrap_or_else(|| crate::provider::DEFAULT_AUDIO_VOICE.to_string());
     let mut body = crate::openai_compat::build_openai_request_body(request);
     let fields = body
         .as_object_mut()

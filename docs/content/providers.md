@@ -140,7 +140,10 @@ models = [
 | A 5xx, a 429 or "overloaded" | Yes, with backoff | The next entry in the list |
 | `model-unavailable`: the model is listed but could not be served | Yes, with backoff | The next entry in the list |
 | `not-found`: a real 404 for the model | No | A bare model name only: the next provider serving that model |
-| A bad request, a refused prompt, a request over the window | No | The stage ends (or takes its `error` edge) |
+| `route-incapable`: a bad request saying the model does not support what was asked (a modality, a parameter or a value: "does not support", "not supported", `unsupported_parameter`, "No endpoints found that support") | No | The next entry in the list |
+| Any other bad request, a refused prompt, a request over the window | No | The stage ends (or takes its `error` edge) |
+
+Each move uses up the entry it moves to, so a call moves at most once per entry in the list.
 
 A pinned `provider/model` never moves to another provider over a `not-found`: the author named
 that route. It still moves down its own list over the other rows, as above.
@@ -251,6 +254,23 @@ In order:
 
 Everything below the first line is the failover chain, in that same order, so a stage that starts on
 your override still has the blueprint's own entries to fall back to.
+
+The list is then ordered for what the stage hands back. A stage whose declared output goes beyond
+text (an `output` format or an `output_routing` key such as `audio/mpeg` or `image/*`) asks each
+entry's model whether it produces that, from the same mime data `lev models list` shows:
+
+- An entry whose model is described as producing it moves to the front.
+- An entry whose model nothing describes (text in and text out, which is also what an undescribed
+  model reports) stays, behind those.
+- An entry whose model is described as unable to produce it is dropped, with a line in the run's
+  log such as `[model] stage 'say' will not run on openai/gpt-5.5 (makes text/*): it cannot produce
+  audio/mpeg`.
+
+Each group keeps the order it had, so `provider_order` still decides among routes to one model.
+When every entry is one that cannot, the stage is refused at spawn naming the stage, each route
+and the output it lacks. If a model's description is wrong, correct its `output_types` under
+`[model_capabilities]`. A `lev run --model <provider>/<model>` is sent as named. Text-shaped
+output (`markdown`, `text/*`, `application/json`) asks nothing of the model and moves nothing.
 
 A run says so when one of your two settings moved a stage off the model its blueprint named. The
 run's log carries one line per stage at spawn, such as `[model] stage 'fix' starts on
