@@ -108,10 +108,10 @@ pub fn message_audio_blob(
                 format!("audio/{format}")
             }
         });
-    let mime = returned_mime
+    let said = returned_mime
         .or(declared_mime)
         .map(str::to_string)
-        .or(format_mime)?;
+        .or(format_mime);
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(data.trim())
         .ok()?;
@@ -119,7 +119,7 @@ pub fn message_audio_blob(
         return None;
     }
     // The MIME may be user supplied or introduced by a future model.
-    let mime_type = MimeType::parse(&mime).ok()?;
+    let mime_type = audio_type_of(&bytes, said.as_deref())?;
     let sha12: String = sha256_hex(&bytes).chars().take(12).collect();
     Some(Blob::new(mime_type, bytes).named(format!("audio-{sha12}")))
 }
@@ -151,11 +151,10 @@ pub fn streamed_audio_blob(
                 format!("audio/{format}")
             }
         });
-    let mime = returned_mime
+    let said = returned_mime
         .or(declared_mime)
         .map(str::to_string)
-        .or(format_mime)?;
-    let mime_type = MimeType::parse(&mime).ok()?;
+        .or(format_mime);
 
     let individually_decoded = chunks
         .iter()
@@ -172,8 +171,37 @@ pub fn streamed_audio_blob(
     if bytes.is_empty() {
         return None;
     }
+    let mime_type = audio_type_of(&bytes, said.as_deref())?;
     let sha12: String = sha256_hex(&bytes).chars().take(12).collect();
     Some(Blob::new(mime_type, bytes).named(format!("audio-{sha12}")))
+}
+
+/// The type audio bytes are: what their leading bytes say when they say an
+/// audio type, else `said` (the reply's label, the stage's declared type, or
+/// the format Leviath asked for), else `None`. A gateway asked for `wav` can
+/// answer with an MP3, and a part labelled by the request came out
+/// `audio/wav` over MPEG bytes.
+fn audio_type_of(bytes: &[u8], said: Option<&str>) -> Option<MimeType> {
+    sniff_audio(bytes).or_else(|| MimeType::parse(said?).ok())
+}
+
+/// The audio type the leading bytes identify: a builtin registry row's
+/// magic (WAV, ID3-tagged MP3, Ogg, FLAC), or a bare MPEG audio frame,
+/// which has no fixed prefix: eleven sync bits, then any layer but `00`
+/// (that is AAC's ADTS framing, not MPEG audio). `None` for anything else.
+pub fn sniff_audio(bytes: &[u8]) -> Option<MimeType> {
+    if let Some(sniffed) = MimeRegistry::builtin()
+        .sniff(bytes)
+        .filter(|t| t.as_str().starts_with("audio/"))
+    {
+        return Some(sniffed);
+    }
+    match bytes {
+        [0xFF, second, ..] if second & 0xE0 == 0xE0 && second & 0x06 != 0 => {
+            MimeType::parse("audio/mpeg").ok()
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -339,6 +367,55 @@ mod tests {
         )
         .unwrap();
         assert_eq!(returned.mime_type.as_str(), "audio/x-returned");
+    }
+
+    #[test]
+    fn audio_is_typed_by_its_bytes_not_by_the_format_asked_for() {
+        // An MP3 frame answered to a request for wav is an MP3.
+        let streamed = streamed_audio_blob(
+            &["//uQZAA=".to_string()],
+            Some("audio/wav"),
+            Some("audio/wav"),
+            Some("wav"),
+        )
+        .unwrap();
+        assert_eq!(streamed.mime_type.as_str(), "audio/mpeg");
+        let buffered = message_audio_blob(
+            &serde_json::json!({ "audio": { "data": "//uQZAA=", "format": "wav" } }),
+            Some("audio/wav"),
+        )
+        .unwrap();
+        assert_eq!(buffered.mime_type.as_str(), "audio/mpeg");
+        // Bytes that say what they are need no label at all.
+        let unlabelled = streamed_audio_blob(&["SUQzBAA=".to_string()], None, None, None).unwrap();
+        assert_eq!(unlabelled.mime_type.as_str(), "audio/mpeg");
+        let unlabelled = message_audio_blob(
+            &serde_json::json!({ "audio": { "data": "T2dnUwA=" } }),
+            None,
+        )
+        .unwrap();
+        assert_eq!(unlabelled.mime_type.as_str(), "audio/ogg");
+    }
+
+    #[test]
+    fn audio_bytes_are_sniffed_by_magic_or_mpeg_frame_sync() {
+        let sniff = |bytes: &[u8]| sniff_audio(bytes).map(|t| t.as_str().to_string());
+        assert_eq!(
+            sniff(b"RIFF\x24\0\0\0WAVEfmt ").as_deref(),
+            Some("audio/wav")
+        );
+        assert_eq!(sniff(b"ID3\x04\0").as_deref(), Some("audio/mpeg"));
+        assert_eq!(sniff(b"\xFF\xFB\x90\x64").as_deref(), Some("audio/mpeg"));
+        assert_eq!(sniff(b"\xFF\xF3\x40").as_deref(), Some("audio/mpeg"));
+        assert_eq!(sniff(b"OggS\0").as_deref(), Some("audio/ogg"));
+        assert_eq!(sniff(b"fLaC\0").as_deref(), Some("audio/flac"));
+        // AAC's ADTS sync (layer 00), no sync at all, a RIFF that is not
+        // WAVE, and bytes too short or unknown say no audio type.
+        assert_eq!(sniff(b"\xFF\xF1\x50"), None);
+        assert_eq!(sniff(b"\xFF\x00"), None);
+        assert_eq!(sniff(b"RIFF\x24\0\0\0WEBPVP8 "), None);
+        assert_eq!(sniff(b"\xFF"), None);
+        assert_eq!(sniff(b"\x01\x02\x03"), None);
     }
 
     #[test]

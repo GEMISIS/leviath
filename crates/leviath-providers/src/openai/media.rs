@@ -252,14 +252,15 @@ pub(crate) async fn chat_audio(
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(data)
         .map_err(|e| ProviderError::InvalidResponse(format!("undecodable audio reply: {e}")))?;
-    let name = format!("speech.{}", media::extension(mime));
-    parsed.parts.push(
-        leviath_core::mime::Blob::new(
-            leviath_core::mime::MimeType::parse(mime).expect("a fixed audio type is a mime type"),
-            bytes,
-        )
-        .named(&name),
-    );
+    // The bytes say what the audio is; the format asked for is only the
+    // fallback for bytes no magic recognises.
+    let mime_type = crate::mime_output::sniff_audio(&bytes).unwrap_or_else(|| {
+        leviath_core::mime::MimeType::parse(mime).expect("a fixed audio type is a mime type")
+    });
+    let name = format!("speech.{}", media::extension(mime_type.as_str()));
+    parsed
+        .parts
+        .push(leviath_core::mime::Blob::new(mime_type, bytes).named(&name));
     if parsed.content.trim().is_empty() {
         parsed.content = audio
             .and_then(|a| a.get("transcript"))

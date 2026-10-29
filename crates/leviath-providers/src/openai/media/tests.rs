@@ -661,6 +661,28 @@ async fn gpt_audio_is_asked_for_text_and_audio_and_the_audio_becomes_a_part() {
 }
 
 #[tokio::test]
+async fn gpt_audio_asked_for_wav_that_answers_mp3_is_typed_and_named_by_its_bytes() {
+    let reply = serde_json::json!({
+        "choices": [{
+            "message": { "content": "spoken", "audio": { "data": "//uQZAA=" } },
+            "finish_reason": "stop"
+        }]
+    });
+    let (url, _) = spawn_mock_sequence(vec![(200, "OK", reply.to_string().into_bytes())]).await;
+    let asked = request(
+        "gpt-audio",
+        "hi",
+        vec![],
+        audio_extra(serde_json::json!({ "audio_format": "wav" })),
+    );
+    let response = chat_audio(&endpoint(&url), &asked, true)
+        .await
+        .expect("audio");
+    assert_eq!(response.parts[0].mime_type.as_str(), "audio/mpeg");
+    assert_eq!(response.parts[0].name.as_deref(), Some("speech.mp3"));
+}
+
+#[tokio::test]
 async fn gpt_audio_defaults_to_alloy_mp3_and_keeps_text_the_model_wrote() {
     let reply = serde_json::json!({
         "choices": [{
