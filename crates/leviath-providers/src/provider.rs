@@ -556,6 +556,7 @@ pub const OUTPUT_MIMES_KEY: &str = "output_mimes";
 /// chat model that answers in speech needs one: OpenAI refuses the request
 /// without it, directly or behind a gateway. One default for every route to
 /// such a model, so the same stage sounds the same wherever it lands.
+#[cfg(any(feature = "openai", feature = "openrouter"))]
 pub(crate) const DEFAULT_AUDIO_VOICE: &str = "alloy";
 
 /// The `request.extra` keys the runtime owns, left out of the pass-through
