@@ -3,13 +3,15 @@
 //! The fence itself (the globs, their layers, and how a path is resolved
 //! against them) is [`leviath_core::write_paths`]. This is what a tool call
 //! writes, read off its arguments: the `path` of `write_file` and `edit_file`,
-//! and every redirect target of a `shell` line.
+//! and every target of a `shell` line: its redirects and the path operands of
+//! the programs `shell_keys::targets` knows to write (`rm`, `mkdir`, `cp`,
+//! `mv`, `tee`, ...).
 //!
 //! What it does not see is just as much a part of the contract. A shell
-//! command that writes without a redirect (`cp`, `mv`, `tee`, `sed -i`), an MCP
-//! tool, and the install tools all write where their own permissions let
-//! them. `lev validate` warns about a stage that sets write paths and still
-//! has shell or MCP tools.
+//! command that writes through a program not in that table (`sed -i`, a
+//! script), an MCP tool, and the install tools all write where their own
+//! permissions let them. `lev validate` warns about a stage that sets write
+//! paths and still has shell or MCP tools.
 
 use leviath_core::write_paths::WriteFence;
 
@@ -55,6 +57,7 @@ pub(crate) fn write_paths_refusal_for(
             .map(|path| Target {
                 written: path.to_string(),
                 lands: vec![path.into()],
+                by: tool.to_string(),
             })
             .into_iter()
             .collect(),
@@ -72,19 +75,20 @@ pub(crate) fn write_paths_refusal_for(
                     return Some(format!(
                         "[blocked] shell refused: this line may change directory in a way that \
                          is not followed (a `cd` behind `{{`, `!`, `then`, `command` or an \
-                         assignment, `popd`, `CDPATH`, `.`, `source` or `eval`), so where its \
-                         relative redirects land cannot be held to this stage's write paths \
-                         ({}). Redirect to a path from the workdir on a line that does not move, \
-                         or use write_file.",
+                         assignment, `popd`, `CDPATH`, `.`, `source` or `eval`), or writes \
+                         through a glob, brace list or `~user` that could reach anywhere, so \
+                         where its relative writes land cannot be held to this stage's write \
+                         paths ({}). Write to a path from the workdir on a line that does not \
+                         move, or use write_file.",
                         fence.describe()
                     ));
                 }
                 Landing::Unparsed | Landing::Unnamed => {
                     return Some(format!(
-                        "[blocked] shell refused: this line redirects a write to a place that \
-                         cannot be read ahead of time (a variable, a substitution, or a construct \
-                         that does not parse), so it cannot be held to this stage's write paths \
-                         ({}). Redirect to a literal path inside them, or use write_file.",
+                        "[blocked] shell refused: this line writes to a place that cannot be \
+                         read ahead of time (a variable, a substitution, or a construct that \
+                         does not parse), so it cannot be held to this stage's write paths \
+                         ({}). Write to a literal path inside them, or use write_file.",
                         fence.describe()
                     ));
                 }

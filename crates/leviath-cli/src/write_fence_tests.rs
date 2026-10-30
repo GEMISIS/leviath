@@ -188,7 +188,9 @@ fn a_redirect_is_judged_where_the_shell_would_put_it() {
 
 /// The workdir's own fence follows `cd` and `>&` the same way, whatever the
 /// stage's write paths, and names where an escaping write would land. A line
-/// whose moves it cannot follow is not a known escape.
+/// whose moves it cannot follow, or whose target only the shell can name, is
+/// refused as outside: it used to be left to the write policy, and under a
+/// policy that allows writes that let it run.
 #[test]
 fn the_workdir_fence_follows_cd_and_a_dup_to_a_name() {
     let (_dir, root) = workdir();
@@ -207,30 +209,45 @@ fn the_workdir_fence_follows_cd_and_a_dup_to_a_name() {
     );
     let dup = refused("echo x >&/tmp/esc.txt").unwrap();
     assert!(dup.contains("outside the working directory"), "{dup}");
-    // Not a known escape: left to the write policy, which asks (see
-    // `tool_service`), rather than refused outright as a fenced stage does.
     for line in MOVING_LINES {
-        assert_eq!(refused(line), None, "{line}");
+        let lost = refused(line).unwrap_or_default();
+        assert!(
+            lost.contains("after a move that cannot be followed"),
+            "{line}: {lost}"
+        );
     }
     assert_eq!(refused("cd docs && echo x > a.txt"), None);
-    assert_eq!(refused("echo x > $OUT"), None, "left to the write policy");
+    let unnamed = refused("echo x > $OUT").unwrap();
+    assert!(unnamed.contains("only the shell can name"), "{unnamed}");
 }
 
-/// A line that moves in a way not followed is told apart for the approval
-/// layer, which asks about it every time; a placed one is not.
+/// The programs that write the files their arguments name are held to the
+/// stage's write paths like a redirect, from every directory the line may be
+/// in.
 #[test]
-fn an_unplaced_redirect_is_told_apart() {
+fn a_writing_program_is_held_to_the_globs() {
     let (_dir, root) = workdir();
-    let unplaced = |command: &str| {
-        crate::tools::unplaced_redirect("bash", &json!({ "command": command }), &root)
+    let fence = docs_only();
+    let shell = |command: &str| {
+        write_paths_refusal_for("shell", &json!({ "command": command }), &root, &fence, true)
     };
-    assert!(unplaced("cd $DIR && make > log"));
-    assert!(!unplaced("cd docs && make > log"));
-    assert!(!unplaced("make > log"));
-    assert!(!crate::tools::unplaced_redirect(
-        "write_file",
-        &json!({ "path": "log" }),
-        &root
-    ));
-    assert!(!crate::tools::unplaced_redirect("shell", &json!({}), &root));
+    assert_eq!(shell("mkdir -p docs/api && touch docs/api/a.md"), None);
+    assert_eq!(shell("cp src/a.md docs/b.md"), None, "the source is read");
+    assert_eq!(shell("ls src && cat src/main.rs"), None);
+    let refused = shell("rm -rf src/old").unwrap();
+    assert!(
+        refused.starts_with("[blocked] shell refused: src/old is outside"),
+        "{refused}"
+    );
+    let refused = shell("mv docs/a.md src/a.md").unwrap();
+    assert!(refused.contains("src/a.md is outside"), "{refused}");
+    let moved = shell("cd docs && rm a.md").unwrap();
+    assert!(moved.contains("'a.md' may land at a.md"), "{moved}");
+    let lost = shell("cd $DIR && rm -rf build").unwrap();
+    assert!(lost.contains("may change directory"), "{lost}");
+    let unnamed = shell("rm -rf $DIR").unwrap();
+    assert!(
+        unnamed.contains("cannot be read ahead of time"),
+        "{unnamed}"
+    );
 }

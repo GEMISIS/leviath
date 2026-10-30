@@ -333,8 +333,13 @@ pub(crate) fn clamp_raw_graph(
     }
 }
 
-/// Refuse a shell call whose redirect writes outside the working directory, or
-/// `None` when every literal target it names stays inside.
+/// Refuse a shell call that writes outside the working directory, through a
+/// redirect or through a program that writes the files its arguments name
+/// (`rm`, `mkdir`, `cp`, `mv`, `tee`, ...: see `shell_keys::targets`), or
+/// `None` when every target it names stays inside. A target the line cannot
+/// place (a `cd` not followed, a variable, a glob that could reach anywhere)
+/// is refused too: it is not a known escape, but it is not known to stay
+/// inside either, and this is the fence.
 ///
 /// [`clamp_by_effect`] answers "which policy governs this write" and is a
 /// separate question from "is this path allowed at all". Folding them together
@@ -347,8 +352,9 @@ pub(crate) fn clamp_raw_graph(
 /// [`ToolPolicy::Ask`] blocks until answered - an unattended run would park in
 /// `WaitingInput` holding its slot rather than being protected.
 ///
-/// The message names the offending path so the model can retry inside the
-/// workspace instead of guessing which part of its line was refused.
+/// The message names the offending path and what writes it, so the model can
+/// retry inside the workspace instead of guessing which part of its line was
+/// refused.
 ///
 /// Reads the target through [`crate::shell_keys`], which knows whether the
 /// platform's shell treats `\` as an escape - so `> C:\Users\me\out.txt` on
@@ -382,6 +388,10 @@ pub(crate) fn escaping_write_refusal_for(
     let command = arguments.get("command").and_then(|v| v.as_str())?;
     let home = crate::yolo::home();
     use crate::shell_keys::Landing;
+    // A write the fence cannot place is treated as outside it. Leaving it to
+    // the write policy instead shipped once: under a policy that allows
+    // writes (`--yolo`, an autonomous profile) the question is answered yes,
+    // and `cd /tmp && rm -rf x && mkdir x` ran outside the workdir.
     let targets = match crate::shell_keys::landing_for(
         command,
         backslash_escapes,
@@ -389,16 +399,26 @@ pub(crate) fn escaping_write_refusal_for(
         home.as_deref(),
     ) {
         Landing::Known(targets) => targets,
-        // A target only the shell can name (`> $OUT`) is left to the write
-        // policy, which never lets a grant cover one: it prompts every time.
-        Landing::Unnamed => return None,
-        // After a `cd` to somewhere this cannot read, every relative target
-        // could be anywhere.
-        // After a move this does not follow, a relative target could be
-        // anywhere. That is not a known escape, so it is left to the write
-        // policy (which asks, and offers no grant: see
-        // `unplaced_redirect`); a stage with write paths refuses it.
-        Landing::Lost => return None,
+        Landing::Unnamed => {
+            return Some(
+                "[denied] This shell line writes to a path only the shell can name (a variable \
+                 or a substitution: `> $OUT`, `rm -rf $DIR`, `cp a $(pwd)/b`), so where it \
+                 writes cannot be checked against the working directory. Name the path \
+                 literally, or use the `write_file` tool."
+                    .to_string(),
+            );
+        }
+        Landing::Lost => {
+            return Some(
+                "[denied] This shell line writes to a relative path after a move that cannot be \
+                 followed (a `cd` to a variable or `-`, or behind `{`, `!`, `then`, `command` \
+                 or an assignment, `popd`, `CDPATH`, `.`, `source` or `eval`), or through a \
+                 glob, brace list or `~user` that could reach anywhere, so where it writes \
+                 cannot be checked against the working directory. Write to a path from the \
+                 workdir on a line that does not move, or use the `write_file` tool."
+                    .to_string(),
+            );
+        }
         // Refused even when the redirect would land inside the tree: "inside"
         // is a judgement about a path this could not read, and the fence is
         // only as good as what it can read.
@@ -413,44 +433,25 @@ pub(crate) fn escaping_write_refusal_for(
             );
         }
     };
-    let (written, landed) = targets.iter().find_map(|t| {
+    let (target, landed) = targets.iter().find_map(|t| {
         let out = t
             .lands
             .iter()
             .find(|l| !leviath_core::resolves_within(l, workdir))?;
-        Some((&t.written, out))
+        Some((t, out))
     })?;
+    let by = match target.by.as_str() {
+        crate::shell_keys::REDIRECT => "redirect".to_string(),
+        program => format!("`{program}`"),
+    };
     Some(format!(
-        "[denied] Shell redirect writes to '{written}', which may land at '{}', outside the \
-         working directory ({}). The `write_file` tool refuses the same path; a redirect is \
-         not a way around it. Write inside the workspace instead.",
+        "[denied] Shell {by} writes to '{}', which may land at '{}', outside the working \
+         directory ({}). The `write_file` tool refuses the same path; the shell is not a way \
+         around it. Write inside the workspace instead.",
+        target.written,
         landed.display(),
         workdir.display()
     ))
-}
-
-/// Whether a `shell` call redirects to a relative path on a line that may
-/// change directory in a way [`crate::shell_keys::landing_for`] does not
-/// follow. Such a write is asked about every time and never covered by a
-/// grant or the safe list: approving it was approving that line.
-pub(crate) fn unplaced_redirect(
-    tool_name: &str,
-    arguments: &serde_json::Value,
-    workdir: &std::path::Path,
-) -> bool {
-    let command = match leviath_tools::canonical_tool_name(tool_name) {
-        "shell" => arguments.get("command").and_then(|v| v.as_str()),
-        _ => None,
-    };
-    command.is_some_and(|command| {
-        let home = crate::yolo::home();
-        crate::shell_keys::landing_for(
-            command,
-            crate::shell_keys::BACKSLASH_ESCAPES,
-            workdir,
-            home.as_deref(),
-        ) == crate::shell_keys::Landing::Lost
-    })
 }
 
 /// What a `shell` call names outside the workdir, as far as the read fence
@@ -1572,6 +1573,145 @@ mod policy_tests {
                 .unwrap_or_default();
         assert!(refusal.contains("cannot be read"), "{refusal}");
         assert!(refusal.contains("write_file"), "{refusal}");
+    }
+
+    /// The live escape (#1069): the coder's `cd /tmp && rm -rf uidtest &&
+    /// mkdir uidtest && ... > project.godot` was allowed, because only the
+    /// redirect was judged and the `cd` was followed for it alone. Every
+    /// writing program on the line is now judged from where the `cd` puts
+    /// it, and the refusal names the program and where it lands.
+    #[test]
+    fn a_writing_program_outside_the_workdir_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let refused = |command: &str| {
+            escaping_write_refusal("shell", &shell_call(command), dir.path()).unwrap_or_default()
+        };
+        let live = refused("cd /tmp && rm -rf uidtest && mkdir uidtest && echo x > project.godot");
+        assert!(
+            live.contains("Shell `rm` writes to 'uidtest', which may land at '/tmp/uidtest'")
+                && live.contains("outside the working directory"),
+            "{live}"
+        );
+        let later = refused("cd /tmp/uidtest && echo x > bad.log");
+        assert!(
+            later.contains("Shell redirect writes to 'bad.log'"),
+            "{later}"
+        );
+        for command in [
+            "rm -rf /tmp/uidtest",
+            "rmdir /tmp/uidtest",
+            "mkdir -p /tmp/uidtest/a",
+            "cp a.txt /tmp/a.txt",
+            "cp -t /tmp a.txt",
+            "mv a.txt ../a.txt",
+            "mv /tmp/a.txt a.txt",
+            "touch /tmp/stamp",
+            "echo x | tee /tmp/out.log",
+            "ln -s a.txt /tmp/a.txt",
+            "truncate -s 0 /tmp/a.txt",
+            "dd if=a.img of=/tmp/a.img",
+            "install -m 644 a.txt /tmp/a.txt",
+            "git -C /tmp/repo commit -m x",
+            "git init /tmp/repo",
+            "git clone url /tmp/repo",
+            "git worktree add /tmp/wt",
+            "echo x > ~/.bashrc",
+            "rm -rf ~/.cache/x",
+            "rm -rf /tmp/*",
+            "rm -rf .*",
+            "mkdir -p {/tmp,x}/y",
+            "(cd /tmp && rm -rf x)",
+        ] {
+            let refusal = refused(command);
+            assert!(
+                refusal.contains("outside the working directory")
+                    || refusal.contains("could reach anywhere"),
+                "{command:?}: {refusal}"
+            );
+        }
+    }
+
+    /// Each case the fence can no longer pass on: a `cd` it does not follow
+    /// (to a variable, or in any construct), and a target only the shell can
+    /// name. Both used to be left to the write policy, which an autonomous
+    /// run answers yes.
+    #[test]
+    fn a_write_the_fence_cannot_place_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let refused = |command: &str| {
+            escaping_write_refusal("shell", &shell_call(command), dir.path()).unwrap_or_default()
+        };
+        for command in [
+            "cd $DIR && rm -rf build",
+            "cd \"$(mktemp -d)\" && mkdir x",
+            "{ cd /tmp; }; rm -rf x",
+            "if true; then cd /tmp; fi; mkdir x",
+            "cd - && touch x",
+            "popd; rm x",
+        ] {
+            let refusal = refused(command);
+            assert!(
+                refusal.contains("after a move that cannot be followed"),
+                "{command:?}: {refusal}"
+            );
+        }
+        for command in [
+            "rm -rf $DIR",
+            "rm -rf \"$TMPDIR/x\"",
+            "mkdir -p $(mktemp -d)/x",
+            "cp a.txt $OUT",
+            "echo x > $OUT",
+            "dd if=a of=$OUT",
+            "git -C $REPO reset --hard",
+        ] {
+            let refusal = refused(command);
+            assert!(
+                refusal.contains("only the shell can name"),
+                "{command:?}: {refusal}"
+            );
+        }
+    }
+
+    /// The control: the same programs inside the workdir, after a `cd` that
+    /// stays inside, and the read-only commands the issue names, are not
+    /// refused.
+    #[test]
+    fn a_writing_program_inside_the_workdir_and_a_read_are_allowed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("src")).expect("src");
+        for command in [
+            "rm -rf build",
+            "rmdir empty",
+            "mkdir -p build/out",
+            "mkdir -p src/{a,b}",
+            "cp a.txt b.txt",
+            "cp /etc/hosts hosts.txt",
+            "mv a.txt src/a.txt",
+            "touch src/stamp",
+            "echo x | tee out.log",
+            "ln -s a.txt b.txt",
+            "truncate -s 0 out.log",
+            "dd if=/dev/zero of=blank.img bs=1 count=1",
+            "install -m 644 a.txt src/a.txt",
+            "git -C src commit -m x",
+            "git -C /tmp/repo log",
+            "git init src/repo",
+            "cd src && rm -rf build && mkdir build",
+            "cd src || mkdir -p a; touch b | tee c",
+            "rm -f *.tmp",
+            "rm -f src/*.o",
+            "ls /tmp",
+            "cat /etc/hosts",
+            "ls -la /tmp && cat /etc/hosts | head -1",
+            "cd /tmp && ls",
+            "echo rm -rf /tmp/x",
+        ] {
+            assert_eq!(
+                escaping_write_refusal("shell", &shell_call(command), dir.path()),
+                None,
+                "{command:?} stays inside or writes nothing, and must not be refused"
+            );
+        }
     }
 
     /// An absolute path *into* the workdir is inside it, so the check cannot be

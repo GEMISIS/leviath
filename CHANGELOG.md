@@ -57,6 +57,16 @@ same list.
   replaced when the file changed. The same files had been read about seven times each
   into a region keeping every copy. `evict_to` is a new region key; `lev validate` refuses
   one outside 0 to 1, and `evict_to = 1.0` is the old one-entry-per-write behaviour.
+- The shell tool's workdir fence judges every write on the line, not only its redirects.
+  The path operands of `rm`, `rmdir`, `mkdir`, `touch`, `truncate`, `tee`, `mv`, the
+  destination of `cp`, `ln` and `install`, `dd of=`, and the repository `git -C`, `init`,
+  `clone` and `worktree` write to are held to the working directory and to the stage's
+  write paths like a redirect, from every directory a `cd` on the line may have moved to.
+  A write the fence cannot place (after a `cd` it does not follow, to a variable or
+  substitution, to `~user`, through a glob or brace list that could climb) is refused
+  instead of being left to the write policy, which an autonomous run answers yes: a coder
+  ran `cd /tmp && rm -rf uidtest && mkdir uidtest` and was allowed. A redirect to `~/...`
+  is now judged at the home directory rather than under the workdir.
 - A stage that declares output beyond text (`output_routing = { "audio/mpeg" = ... }`,
   or a mime `output` format) starts on a route whose model can produce it. A bare
   model name went to the first provider in `provider_order` listing it, even when
