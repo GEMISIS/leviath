@@ -245,6 +245,7 @@ fn each_writer_names_its_targets() {
         ("/bin/rm -f a", vec![w("rm", "a")]),
         ("FOO=1 command rm a", vec![w("rm", "a")]),
         ("exec builtin rm a", vec![w("rm", "a")]),
+        ("command", vec![]),
         ("rm -f - a", vec![w("rm", "-"), w("rm", "a")]),
         ("git -C d commit -m x", vec![w("git", "d")]),
         (
