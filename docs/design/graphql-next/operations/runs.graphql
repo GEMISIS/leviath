@@ -1,0 +1,376 @@
+# Runs: spawning, the run's honest state, its family, where it is, what it ran
+# (down to the exact blueprint revision), what its model calls cost, its
+# context, what it handed back, and what it asked a person.
+
+# R0 Operator starts a run from an installed blueprint, pinned to the revision read; the idempotency key makes a retried spawn return the first run.
+mutation SpawnRun($request: SpawnRunRequest!) {
+  spawnRun(request: $request) {
+    replayed
+    warnings
+    run {
+      id
+      task
+      startedAt
+      blueprint { id name digest number }
+      state { __typename }
+      currentStage { name position }
+    }
+  }
+}
+
+# R1 Operator monitors a family after fan-out: roll-ups of tokens and spend over the subtree, and each child's state and spend.
+query RunFamily($runId: ID!, $first: Int! = 25) {
+  run(id: $runId) {
+    id
+    state { __typename }
+    parent { id }
+    ancestors { id }
+    subtree {
+      runCount
+      depth
+      usage { inputTokens outputTokens cacheReadTokens }
+      cost { totalUsd pricedUsd unpricedCalls providerReported }
+    }
+    children(first: $first) {
+      results {
+        id
+        task
+        state { __typename }
+        cost { totalUsd pricedUsd unpricedCalls }
+        currentStage { name position }
+      }
+      cursor
+      total
+    }
+  }
+}
+
+# R2 Operator checks the state, hosting and movement of a run that looks stalled, and its stage ledger with every visit.
+query RunPosition($runId: ID!) {
+  run(id: $runId) {
+    id
+    isHosted
+    lastMovedAt
+    workingSeconds
+    state {
+      __typename
+      ... on Running { runningIn: stage { name } turn }
+      ... on WaitingOnPerson { questions { __typename id prompt askedAt } }
+      ... on WaitingOnSubAgents { outstanding questionsBelow { id run { id } prompt } }
+      ... on NeedsSetup { blocker remedy provider { name } }
+      ... on WaitingUnexplained { lastMovedAt }
+      ... on Lost { lastMovedAt claimed { __typename } }
+      ... on Paused { stage { name } }
+      ... on UnrecognizedState { daemonWord }
+    }
+    currentStage { name position definition { __typename name } }
+    stages {
+      name
+      position
+      visitCount
+      runawayDetected
+      state { __typename since }
+      modelsUsed { providerName modelName }
+      visits { number enteredAt leftAt workingSeconds }
+    }
+  }
+}
+
+# R3 Operator compares the exact blueprint revision a run executed with what is installed under that name now.
+query RunBlueprintProvenance($runId: ID!) {
+  run(id: $runId) {
+    id
+    blueprintSource
+    blueprint {
+      id
+      number
+      digest
+      name
+      version
+      createdAt
+      extensions { relativePath digest }
+      stages { __typename name tools { grants { __typename ... on ToolByName { name } } } }
+      blueprint { id revision { id number digest } }
+    }
+    stages { name visitCount definition { __typename name } }
+  }
+}
+
+# R4 Operator diagnoses an expensive or failing inference sequence by provider, model, outcome, retry decision and spend.
+query InferenceDiagnosis($runId: ID!, $first: Int! = 50, $filter: ModelAttemptFilter) {
+  run(id: $runId) {
+    id
+    cost { totalUsd pricedUsd unpricedCalls providerReported }
+    modelsUsed { providerName modelName provider { id number } }
+    modelAttempts(first: $first, filter: $filter) {
+      results {
+        __typename
+        id
+        number
+        at
+        durationMs
+        backoffMs
+        providerName
+        modelName
+        provider { id number digest }
+        model { id qualifiedName }
+        stage { name }
+        turn { number visit { number } }
+        failover { toProviderName toModelName why }
+        ... on AnsweredAttempt { usage { inputTokens outputTokens } cost { totalUsd } requestedExecutions { id } }
+        ... on FailedAttempt { failure transient atCapacity next }
+      }
+      cursor
+      total
+    }
+  }
+}
+
+# R5 Operator inspects the current context window and how its tokens are spread before steering a run.
+query CurrentRunContext($runId: ID!) {
+  run(id: $runId) {
+    id
+    context {
+      digest
+      takenAt
+      stage { name }
+      totalTokens
+      maxTokens
+      regions { name tokens maxTokens entryCount text definition { __typename name } }
+    }
+  }
+}
+
+# R6 Operator traces what changed the context, who or what caused each change, and reads the exact window before and after.
+query ContextCausality($runId: ID!, $digest: String!, $first: Int! = 20) {
+  run(id: $runId) {
+    id
+    held: contextSnapshot(digest: $digest) { digest takenAt totalTokens regions { name tokens } }
+    contextSnapshots(first: $first) { results { digest takenAt totalTokens stage { name } } cursor total }
+    contextChanges(first: $first) {
+      results {
+        __typename
+        at
+        journalPosition
+        before { digest totalTokens }
+        after { digest totalTokens }
+        regions { regionName tokenDelta entriesAdded entriesRemoved digestBefore digestAfter }
+        ... on ToolContextChange { execution { id call { toolName } } }
+        ... on ModelContextChange { attempt { id number } }
+        ... on InteractionContextChange { interaction { __typename id } }
+        ... on RuntimeContextChange { action }
+      }
+      cursor
+      total
+    }
+  }
+}
+
+# R7 Operator checks the answer and the files handed back with it, the files the run changed, and the artifacts of the tool calls it selects.
+query RunDeliverables($runId: ID!, $first: Int! = 50, $executions: ToolExecutionFilter) {
+  run(id: $runId) {
+    id
+    state { __typename }
+    answer {
+      text
+      format
+      truncated
+      submittedAt
+      stage { name }
+      artifacts { name mimeType size sha256 path url file { path } part { sha256 } }
+    }
+    changedFileCount
+    changedFiles { path outsideWorkingDirectory }
+    executions(first: $first, filter: $executions) {
+      results { id call { toolName } artifacts { name path } }
+      cursor
+      total
+    }
+  }
+}
+
+# R8 Operator finds a run's open interactions, with the exact call an approval gates, before deciding how to settle one.
+query OpenRunInteractions($runId: ID!, $first: Int! = 25) {
+  run(id: $runId) {
+    id
+    state { __typename }
+    interactions(first: $first, filter: { settlement: { isNull: true } }) {
+      results {
+        __typename
+        id
+        prompt
+        askedAt
+        holdsRun
+        digest
+        stage { name }
+        ... on ToolApproval { call { toolName rawArguments tool { __typename ... on ToolRevision { name description } } } }
+        ... on TaintGateApproval { dataTaint toolClearance call { toolName } }
+        ... on ChoiceQuestion { options document }
+        ... on TextQuestion { document askedBy { __typename } }
+        ... on ConfirmQuestion { document }
+        ... on DocumentEdit { draft: document }
+      }
+      cursor
+      total
+    }
+  }
+}
+
+# R9 Operator sends the one answer the interaction's type takes, with the digest it reviewed, and reads the settlement and the run.
+mutation SettleInteraction($request: AnswerInteractionRequest!) {
+  answerInteraction(request: $request) {
+    alreadyInState
+    interaction { __typename id settlement { __typename settledAt } }
+    run { id state { __typename } }
+  }
+}
+
+# R10 Operator reviews a run's settled interactions and how each was settled.
+query SettledRunInteractions($runId: ID!, $first: Int! = 50) {
+  run(id: $runId) {
+    id
+    interactions(first: $first, filter: { settlement: { isNull: false } }) {
+      results {
+        __typename
+        id
+        prompt
+        askedAt
+        stage { name }
+        settlement {
+          __typename
+          settledAt
+          ... on Approved { scope }
+          ... on Denied { feedback }
+          ... on TextGiven { text }
+          ... on OptionChosen { index option }
+          ... on Declined { feedback }
+          ... on NotAnswered { why }
+        }
+      }
+      cursor
+      total
+    }
+  }
+}
+
+# R11 Operator requests a portable export of selected runs; the idempotency key makes a retry return the same job.
+mutation StartRunExport($request: StartRunExportRequest!) {
+  startRunExport(request: $request) {
+    replayed
+    export { id startedAt fields state { __typename } }
+  }
+}
+
+# R12 Operator polls an export job; its download link says when it expires.
+query RunExportStatus($exportId: ID!) {
+  runExport(id: $exportId) {
+    id
+    startedAt
+    runsWritten
+    state {
+      __typename
+      ... on JobQueued { since }
+      ... on JobRunning { since }
+      ... on JobComplete { finishedAt outcome { __typename ... on ExportOutcome { runsWritten download { url expiresAt } } } }
+      ... on JobFailed { finishedAt error }
+      ... on JobExpired { reason }
+    }
+  }
+}
+
+# R13 New: operator lists the runs stopped until a person answers, by state variant, with the questions holding each one.
+query RunsWaitingOnPerson($first: Int! = 50) {
+  runs(first: $first, filter: { state: { waitingOnPerson: {} } }, orderBy: [{ field: LAST_MOVED_AT, direction: ASC }]) {
+    results {
+      id
+      title
+      lastMovedAt
+      state { __typename ... on WaitingOnPerson { questions { __typename id prompt askedAt stage { name } } } }
+    }
+    cursor
+    total
+  }
+}
+
+# R14 New: operator finds parents parked on many sub-agents, and parents whose sub-agents are waiting on a person, in one filter each.
+query ParentsWaitingOnSubAgents($first: Int! = 50, $outstandingOver: Int! = 3) {
+  busy: runs(first: $first, filter: { state: { waitingOnSubAgents: { outstanding: { gt: $outstandingOver } } } }) {
+    results { id state { __typename ... on WaitingOnSubAgents { outstanding } } }
+    total
+  }
+  blockedBelow: runs(first: $first, filter: { state: { waitingOnSubAgents: { questionsBelow: { some: {} } } } }) {
+    results { id state { ... on WaitingOnSubAgents { questionsBelow { id prompt run { id } } } } }
+    total
+  }
+}
+
+# R15 New: reviewer lists finished runs whose record is suspect, and the problems recorded against each.
+query RunsWithProblems($first: Int! = 50, $since: DateTime!) {
+  runs(first: $first, filter: { state: { completedWithProblems: { finishedAt: { gte: $since } } } }) {
+    results {
+      id
+      title
+      state { __typename ... on CompletedWithProblems { finishedAt problems { __typename summary } } }
+    }
+    total
+  }
+  lost: runs(first: $first, filter: { state: { lost: {} } }) { results { id lastMovedAt isHosted } total }
+}
+
+# R16 New: auditor lists every run that executed one exact blueprint revision, by the digest the runs pinned.
+query RunsOfBlueprintRevision($digest: String!, $first: Int! = 50) {
+  runs(first: $first, filter: { blueprint: { digest: { eq: $digest } } }) {
+    results { id startedAt blueprintSource blueprint { id number name } state { __typename } }
+    cursor
+    total
+  }
+}
+
+# R17 New: an agent that cannot hold a stream waits, bounded, until a run needs a person or finishes; the answer says which, or that it timed out.
+query AwaitRunDecision($runId: ID!, $timeoutSeconds: Int! = 25, $spendCrossingsSeen: Int) {
+  awaitRun(
+    id: $runId
+    until: { or: [{ waitingOnPerson: {} }, { needsSetup: {} }, { finished: {} }] }
+    timeoutSeconds: $timeoutSeconds
+    spendCrossingsSeen: $spendCrossingsSeen
+  ) {
+    matched
+    timedOut
+    waitedSeconds
+    newSpendCrossings { thresholdUsd spentUsd at }
+    run { id state { __typename ... on Finished { finishedAt } } }
+  }
+}
+
+# R18 New: operator tails one stage's output log incrementally, resuming from the offset the last read returned.
+query StageLogTail($runId: ID!, $from: LogPosition, $maxBytes: Int! = 32768) {
+  run(id: $runId) {
+    id
+    currentStage {
+      name
+      log(stream: OUTPUT, from: $from, maxBytes: $maxBytes) { offset nextOffset text reachedEnd stageFinished nextStage { name } }
+    }
+  }
+}
+
+# R19 New: operator works the approval inbox across every run, oldest first, with the run each approval holds and the call it gates.
+query OpenApprovalInbox($first: Int! = 50) {
+  openInteractions(
+    first: $first
+    filter: { or: [{ toolApproval: {} }, { taintGateApproval: {} }] }
+    orderBy: [{ field: ASKED_AT, direction: ASC }]
+  ) {
+    results {
+      __typename
+      id
+      prompt
+      askedAt
+      digest
+      run { id title state { __typename } }
+      ... on ToolApproval { call { toolName rawArguments } }
+      ... on TaintGateApproval { call { toolName } dataTaint toolClearance }
+    }
+    cursor
+    total
+  }
+}

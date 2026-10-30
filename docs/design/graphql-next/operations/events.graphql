@@ -1,0 +1,81 @@
+# Live frames. Frames are chosen with one Boolean per frame type, and every
+# fact a frame carries can also be read by a query, so a client that cannot
+# hold a stream polls instead (see AwaitRunDecision in runs.graphql).
+
+# E0 Operator watches one run family. The opening frame identifies the server instance; a dropped-events frame means reread with queries.
+subscription WatchRunFamily($filter: RunFilter!, $frames: RunEventFrameFilter) {
+  runEvents(filter: $filter, frames: $frames, includeDescendants: true) {
+    __typename
+    ... on Event { seq at }
+    ... on RunEvent { runId }
+    ... on SubscriptionOpenedEvent { serverInstance daemon { events { state since } } }
+    ... on EventsDroppedEvent { count }
+    ... on RunChangedEvent { state { __typename } stage { name } toolCallCount acceptsMessages }
+    ... on StageTransitionedEvent { from { name } to { name } visit { number enteredAt } }
+    ... on InteractionOpenedEvent {
+      interaction {
+        __typename
+        id
+        prompt
+        askedAt
+        ... on ToolApproval { call { toolName } }
+        ... on TaintGateApproval { call { toolName } dataTaint toolClearance }
+        ... on ChoiceQuestion { options }
+      }
+    }
+    ... on RunFinishedEvent { state { __typename finishedAt ... on Failed { error } } answer { text } }
+  }
+}
+
+# E1 Operator watches config health, daemon links and updates without polling settings.
+subscription WatchMachineEvents($frames: MachineEventFrameFilter) {
+  machineEvents(frames: $frames) {
+    __typename
+    ... on Event { seq at }
+    ... on SubscriptionOpenedEvent { serverInstance }
+    ... on EventsDroppedEvent { count }
+    ... on DaemonLinkChangedEvent { restarted daemon { control { state since } events { state since } } }
+    ... on ConfigHealthChangedEvent { config { path savedAt problem { __typename message path } } }
+    ... on UpdateFinishedEvent {
+      job { id state { __typename ... on JobComplete { outcome { __typename ... on UpdateOutcome { restartRequired } } } } }
+    }
+  }
+}
+
+# E2 Operator follows an update job step by step through its terminal frame.
+subscription WatchUpdateJob($jobId: ID!) {
+  updateJobEvents(id: $jobId) {
+    __typename
+    ... on Event { seq at }
+    ... on UpdateStepChangedEvent { step status detail }
+    ... on UpdateFinishedEvent {
+      job {
+        id
+        steps { step status detail }
+        state {
+          __typename
+          ... on JobComplete { finishedAt outcome { __typename ... on UpdateOutcome { restartRequired } } }
+          ... on JobFailed { finishedAt error }
+        }
+      }
+    }
+  }
+}
+
+# E3 New: the polling twin of E2 for a client that cannot hold a stream: the same job, steps and outcome by query.
+query UpdateJobStatus($jobId: ID!) {
+  updateJob(id: $jobId) {
+    id
+    startedAt
+    requestedSteps
+    steps { step status detail }
+    state {
+      __typename
+      ... on JobRunning { since }
+      ... on JobComplete { finishedAt outcome { __typename ... on UpdateOutcome { restartRequired } } }
+      ... on JobFailed { finishedAt error }
+      ... on JobExpired { reason }
+    }
+  }
+  server { restartRequired }
+}
