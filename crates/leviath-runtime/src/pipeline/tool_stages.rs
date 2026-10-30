@@ -90,10 +90,12 @@ fn advertise_refreshed(
     overrides.0.insert(stage_index, tools);
 }
 
-/// Carry `submit_output`'s description from the set a stage advertised into
-/// the set looked up again. The lookup reads the catalog, which describes the
-/// tool and not the shape this stage was told to submit, and that shape is
-/// the whole of how a model learns a format it has never seen.
+/// Carry `submit_output`'s description and parameters from the set a stage
+/// advertised into the set looked up again. The lookup reads the catalog,
+/// which describes the tool and not the shape this stage was told to submit,
+/// and that shape is the whole of how a model learns a format it has never
+/// seen: the description says it, and an object schema's fields are in the
+/// parameters.
 fn keep_output_shape(fresh: &mut [Tool], current: &[Tool]) {
     let Some(told) = current
         .iter()
@@ -106,6 +108,7 @@ fn keep_output_shape(fresh: &mut [Tool], current: &[Tool]) {
         .filter(|t| t.name == leviath_tools::SUBMIT_OUTPUT_TOOL)
     {
         tool.description.clone_from(&told.description);
+        tool.parameters.clone_from(&told.parameters);
     }
 }
 

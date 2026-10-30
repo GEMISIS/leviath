@@ -553,6 +553,34 @@ fn tools_use_the_flat_responses_shape() {
     assert_eq!(body["parallel_tool_calls"], true);
 }
 
+/// `submit_output` for a stage whose answer is a JSON object has the
+/// object's fields beside `content`, none required, and refers to the
+/// schema's `$defs`. Strict mode would refuse that shape with a 400, so it is
+/// sent as it is, not strict.
+#[test]
+fn an_output_schemas_optional_fields_are_sent_not_strict() {
+    let parameters = json!({
+        "type": "object",
+        "properties": {
+            "content": { "type": "string" },
+            "artifacts": { "type": "array" },
+            "summary": { "type": "string" },
+            "files": { "type": "array", "items": { "$ref": "#/$defs/File" } }
+        },
+        "$defs": { "File": { "type": "string" } }
+    });
+    let mut req = request(vec![], vec![user("go")]);
+    req.tools = vec![Tool {
+        name: "submit_output".to_string(),
+        description: "Submit your final answer.".to_string(),
+        parameters: parameters.clone(),
+    }];
+    let body = build_default(&req);
+    let tool = &body["tools"][0];
+    assert_eq!(tool["strict"], false);
+    assert_eq!(tool["parameters"], parameters);
+}
+
 #[test]
 fn a_request_with_no_tools_sends_no_tool_keys() {
     let body = build_default(&request(vec![], vec![user("go")]));

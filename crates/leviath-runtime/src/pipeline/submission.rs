@@ -248,15 +248,11 @@ impl<'a> BatchSubmissions<'a> {
     /// Whether a `submit_output` call with `args` hands back the answer the
     /// visit held as the batch arrived, which [`apply`](Self::apply) answers
     /// as a repeat without judging it again.
-    pub(super) fn repeats_held(
-        &self,
-        args: &serde_json::Value,
-        workdir: Option<&std::path::Path>,
-    ) -> bool {
+    pub(super) fn repeats_held(&self, args: &serde_json::Value, ctx: &OutputContext<'_>) -> bool {
         self.guarded
             && self
                 .held
-                .is_some_and(|held| crate::output_tool::repeats(args, held, workdir))
+                .is_some_and(|held| crate::output_tool::repeats(args, held, ctx.spec, ctx.workdir))
     }
 
     /// Note a call the batch finished before a restart, whose result was
@@ -277,7 +273,9 @@ impl<'a> BatchSubmissions<'a> {
     ) -> String {
         if let Some(previous) = self.submitted.as_ref().or(self.held) {
             self.resubmissions += 1;
-            if self.guarded && crate::output_tool::repeats(&call.arguments, previous, ctx.workdir) {
+            if self.guarded
+                && crate::output_tool::repeats(&call.arguments, previous, ctx.spec, ctx.workdir)
+            {
                 self.repeats += 1;
                 self.answered = true;
                 return REPEATED_SUBMISSION.to_string();

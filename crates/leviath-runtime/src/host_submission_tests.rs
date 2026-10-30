@@ -297,3 +297,52 @@ async fn a_refused_call_beside_the_answer_keeps_the_stage_going() {
     assert_eq!(announced(&events), ["Wrote it."]);
     assert_eq!(resubmissions(&host, run), [("answer".to_string(), 1)]);
 }
+
+/// A stage whose answer is a JSON object, offered `submit_output` with the
+/// object's fields among its parameters as a resolved stage is. A model that
+/// gives prose is told where the fields go; one that then gives them as
+/// arguments gets past the call's own checks and has its answer recorded as
+/// the object.
+#[tokio::test]
+async fn a_schemas_fields_given_as_arguments_are_the_answer() {
+    let report = json!({
+        "type": "object",
+        "properties": { "summary": { "type": "string" } },
+        "required": ["summary"],
+    });
+    let script = Script::new(vec![
+        calling(&[(SUBMIT_OUTPUT_TOOL, json!({ "content": "I wrote it." }))]),
+        calling(&[(SUBMIT_OUTPUT_TOOL, json!({ "summary": "done" }))]),
+        submit("{\"summary\":\"done\"}"),
+    ]);
+    let mut host = host(script.clone(), Default::default());
+    let mut spec = spec("fields", vec![output("answer")], false);
+    let own = Arc::make_mut(&mut spec);
+    // The tool's own `content`, which it requires until a schema's fields
+    // join it.
+    let base = json!({
+        "type": "object",
+        "properties": { "content": { "type": "string" } },
+        "required": ["content"],
+    });
+    for plan in &mut own.stages {
+        plan.output = Some(crate::spec::graph::OutputDef {
+            format: Some("json".into()),
+            schema: Some(leviath_core::JsonDoc::new(report.clone())),
+            ..Default::default()
+        });
+        let merged = leviath_tools::submit_output_parameters(&base, &report).expect("an object");
+        plan.tools[0].schema = leviath_core::JsonDoc::new(merged);
+    }
+    let run = place(&mut host, spec);
+    let events = settle(&mut host).await;
+
+    assert_eq!(script.calls(), 2);
+    assert!(
+        script.last().contains("required fields (`summary`)"),
+        "{}",
+        script.last()
+    );
+    assert_eq!(host.world.agent_status(run), Some(AgentStatus::Complete));
+    assert_eq!(announced(&events), ["{\"summary\":\"done\"}"]);
+}

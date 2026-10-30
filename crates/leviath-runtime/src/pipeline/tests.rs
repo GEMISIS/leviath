@@ -6300,6 +6300,8 @@ fn a_refresh_keeps_the_output_shape_in_submit_outputs_description() {
     ]))));
     let mut told = stage_inf(&["submit_output"]);
     told.tools[0].description = "Submit a2ui: follow this example".to_string();
+    let fields = serde_json::json!({"type": "object", "properties": {"summary": {}}});
+    told.tools[0].parameters = fields.clone();
     let shaped = world
         .spawn((
             StageCursor { index: 0 },
@@ -6339,6 +6341,11 @@ fn a_refresh_keeps_the_output_shape_in_submit_outputs_description() {
     assert_eq!(
         described(plain)[0],
         ("submit_output".to_string(), String::new())
+    );
+    // An object schema's fields stay in the parameters, too.
+    assert_eq!(
+        world.get::<StageInference>(shaped).unwrap().tools[0].parameters,
+        fields
     );
 }
 

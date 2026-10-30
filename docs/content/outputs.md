@@ -257,6 +257,17 @@ until one passes, so a bad correction never replaces a good answer.
 A submission is checked for well-formedness first, so "this is not even JSON" comes back before a
 list of missing properties. That is the more useful thing to hear.
 
+When the schema is an object with `properties`, as above, `submit_output` takes the answer in
+either of two forms. Its fields can be the tool's own arguments (`summary` and `files_changed`
+beside `artifacts`), because the schema's properties are added to the tool's parameters, none of
+them required there. Or the whole object can be written as JSON text in `content`, as before.
+Leviath assembles the arguments into the object and checks it against the schema the same way, so
+both forms record the same answer. A call that uses both forms is accepted only when they agree,
+and an empty `content` counts as agreeing. A call that uses neither form is told the schema's
+required fields and where they go, not where a JSON parser stopped. A schema of any other kind (an
+array, a string, an object with no properties, or one with its own `content` or `artifacts`
+property) keeps the answer in `content` only.
+
 One asymmetry to know about: a schema that itself will not compile skips the check and records the
 submission unchecked, where a [Rhai validator](/docs/rhai-validators) that cannot run rejects by
 default. A bad schema refusing every submission would leave the run unable to finish, so it fails
