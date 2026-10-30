@@ -128,6 +128,44 @@ pub fn submit_output_description(described: &str) -> String {
     }
 }
 
+/// The `submit_output` tool's parameters for a stage whose answer is a JSON
+/// object, so a model can fill its fields in as arguments as it would any
+/// tool's: `parameters` (the tool's own) with the output schema's properties
+/// beside `content` and `artifacts`. `None` for a schema that is not that
+/// kind (see [`leviath_core::output::argument_fields`]), which keeps the tool
+/// as it is.
+///
+/// Nothing is required, `content` included: the answer comes either way, and
+/// whether it is whole is the output check's to say once it is assembled,
+/// with the schema's own wording. The schema's `$defs` come along, so a
+/// property that refers to one still finds it. No provider is sent the tool
+/// in strict mode, so a schema that leaves fields optional is accepted.
+pub fn submit_output_parameters(parameters: &Value, schema: &Value) -> Option<Value> {
+    let fields = leviath_core::output::argument_fields(schema)?;
+    let mut merged = parameters.clone();
+    let object = merged.as_object_mut()?;
+    let properties = object.get_mut("properties")?.as_object_mut()?;
+    if let Some(content) = properties.get_mut("content").and_then(Value::as_object_mut) {
+        content.insert(
+            "description".to_string(),
+            json!(
+                "The whole answer as one JSON object, written as text. Leave it out when you give \
+             the answer's fields as arguments."
+            ),
+        );
+    }
+    for (name, field) in fields {
+        properties.insert(name.clone(), field.clone());
+    }
+    object.remove("required");
+    for defs in ["$defs", "definitions"] {
+        if let Some(found) = schema.get(defs) {
+            object.insert(defs.to_string(), found.clone());
+        }
+    }
+    Some(merged)
+}
+
 /// What an agent is told about fanning out.
 ///
 /// Says the three things that go wrong. One: each item is all its worker gets,

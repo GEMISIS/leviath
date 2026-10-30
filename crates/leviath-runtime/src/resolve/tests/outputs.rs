@@ -203,3 +203,71 @@ async fn a_validator_tool_must_be_one_the_stage_is_given() {
         );
     }
 }
+
+/// A stage whose schema is an object offers `submit_output` with the
+/// schema's fields among its parameters, and says in the description that
+/// they go there or as one JSON object in `content`. A schema of any other
+/// kind keeps the parameters the tool came with, and says `content`.
+#[tokio::test]
+async fn an_object_schema_shapes_the_submit_tools_parameters_and_description() {
+    let submit = ToolDef {
+        schema: JsonDoc::new(serde_json::json!({
+            "type": "object",
+            "properties": {"content": {"type": "string"}},
+            "required": ["content"]
+        })),
+        ..tool(leviath_tools::SUBMIT_OUTPUT_TOOL)
+    };
+    let env = || Fake {
+        tools: [
+            ("plan".to_string(), Ok(vec![submit.clone()])),
+            ("build".to_string(), Ok(vec![submit.clone()])),
+        ]
+        .into(),
+        ..Fake::default()
+    };
+    let offered = |resolved: &Resolved| resolved.spec.stages[0].tools[0].clone();
+    let mut g = graph();
+    g.output = Some(OutputDef {
+        format: Some("json".into()),
+        schema: Some(JsonDoc::new(serde_json::json!({
+            "type": "object",
+            "properties": {"summary": {"type": "string"}},
+            "required": ["summary"]
+        }))),
+        ..OutputDef::default()
+    });
+    let shaped = offered(&spawn(&raw(g.clone()), &env()).await.unwrap());
+    let parameters = shaped.schema.value();
+    assert!(
+        parameters["properties"]["summary"].is_object(),
+        "{parameters}"
+    );
+    assert!(
+        parameters["properties"]["content"].is_object(),
+        "{parameters}"
+    );
+    assert!(parameters.get("required").is_none(), "{parameters}");
+    assert!(
+        shaped.description.contains(
+            "Give its properties as the arguments of `submit_output`, or the whole JSON object \
+             as the text of `content`."
+        ),
+        "{}",
+        shaped.description
+    );
+
+    g.output = Some(OutputDef {
+        schema: Some(JsonDoc::new(serde_json::json!({"type": "array"}))),
+        ..OutputDef::default()
+    });
+    let listed = offered(&spawn(&raw(g), &env()).await.unwrap());
+    assert_eq!(listed.schema, submit.schema);
+    assert!(
+        listed
+            .description
+            .contains("Give the whole JSON document as the text of `content`."),
+        "{}",
+        listed.description
+    );
+}

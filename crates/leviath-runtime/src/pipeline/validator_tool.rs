@@ -127,11 +127,7 @@ impl Candidates<'_> {
                     .resolved
                     .is_some_and(|r| r.denied.contains_key(&c.tool_id))
             })
-            .filter(|c| {
-                !self
-                    .submissions
-                    .repeats_held(&c.arguments, self.ctx.workdir)
-            })
+            .filter(|c| !self.submissions.repeats_held(&c.arguments, self.ctx))
             .filter_map(|c| {
                 crate::output_tool::precheck(&c.arguments, self.ctx)
                     .ok()

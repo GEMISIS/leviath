@@ -28,6 +28,8 @@
 //!
 //! [`OutputSpec`]: leviath_core::output::OutputSpec
 
+use std::borrow::Cow;
+
 use leviath_core::output::{FinalOutput, OutputSpec};
 use leviath_scripting::output_validator::Verdict;
 
@@ -148,7 +150,7 @@ pub(crate) fn handle_output_tool(
     if let Some(refusal) = tool_refusal(ctx) {
         return (refusal, None);
     }
-    record(args, content, ctx, now, window)
+    record(args, &content, ctx, now, window)
 }
 
 /// The submission's content, once every check that needs nothing beyond the
@@ -161,7 +163,7 @@ pub(crate) fn handle_output_tool(
 pub(crate) fn precheck<'v>(
     args: &'v serde_json::Value,
     ctx: &OutputContext<'_>,
-) -> Result<&'v str, String> {
+) -> Result<Cow<'v, str>, String> {
     let OutputContext {
         spec,
         validators,
@@ -169,9 +171,8 @@ pub(crate) fn precheck<'v>(
         stage_names,
         ..
     } = *ctx;
-    let Some(content) = args.get("content").and_then(|v| v.as_str()) else {
-        return Err("[error] missing 'content' argument".to_string());
-    };
+    let answer = answer(args, spec)?;
+    let content = answer.as_ref();
     if content.trim().is_empty() {
         return Err(
             "[error] final output is empty - submit the answer itself, not a placeholder"
@@ -237,7 +238,97 @@ pub(crate) fn precheck<'v>(
             return Err(refusal);
         }
     }
-    Ok(content)
+    Ok(answer)
+}
+
+/// The answer a submission hands back, as the text the checks read and the
+/// run records, or why there is none.
+///
+/// Usually `content`. A stage whose schema is an object also takes the
+/// object's fields as the tool's own arguments (see
+/// [`leviath_core::output::argument_fields`]), and those are assembled into
+/// the object here, so either form records the same answer and meets the
+/// same checks. A call that gives both has given the answer twice, which is
+/// fine when they agree and refused when they do not, since neither can be
+/// picked without guessing. A call that gives neither (no field, and no JSON
+/// in `content`) is told where the answer goes, rather than where a parser
+/// stopped reading prose.
+fn answer<'v>(
+    args: &'v serde_json::Value,
+    spec: Option<&OutputSpec>,
+) -> Result<Cow<'v, str>, String> {
+    let content = args.get("content").and_then(serde_json::Value::as_str);
+    let schema = spec.and_then(|s| s.schema.as_ref());
+    let Some((schema, fields)) =
+        schema.and_then(|s| leviath_core::output::argument_fields(s).map(|f| (s, f)))
+    else {
+        return content
+            .map(Cow::Borrowed)
+            .ok_or_else(|| "[error] missing 'content' argument".to_string());
+    };
+    let given: serde_json::Map<String, serde_json::Value> = fields
+        .keys()
+        .filter_map(|name| Some((name.clone(), args.get(name)?.clone())))
+        .collect();
+    let parsed = content.and_then(|c| serde_json::from_str::<serde_json::Value>(c).ok());
+    if !given.is_empty() {
+        let assembled = serde_json::Value::Object(given);
+        if content.is_some_and(|c| !c.trim().is_empty()) && parsed.as_ref() != Some(&assembled) {
+            return Err(
+                "[error] the answer was given twice and the two differ: as this tool's \
+                 arguments and as `content`. Give the fields as the arguments and leave \
+                 `content` out, or give the whole JSON object as `content` alone."
+                    .to_string(),
+            );
+        }
+        return Ok(Cow::Owned(assembled.to_string()));
+    }
+    match (content, parsed) {
+        (Some(content), Some(_)) => Ok(Cow::Borrowed(content)),
+        // A schema too broken to check anything checks this neither, as
+        // `precheck` records such a submission unchecked.
+        (Some(content), None)
+            if matches!(
+                leviath_tools::validate_output(schema, content),
+                leviath_tools::ArgValidation::SchemaUnusable(_)
+            ) =>
+        {
+            Ok(Cow::Borrowed(content))
+        }
+        _ => Err(shape_refusal(schema, fields)),
+    }
+}
+
+/// What a submission with no answer in either form is told: the fields the
+/// schema requires, and the two places they may go.
+fn shape_refusal(
+    schema: &serde_json::Value,
+    fields: &serde_json::Map<String, serde_json::Value>,
+) -> String {
+    let required: Vec<String> = schema
+        .get("required")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(|name| format!("`{name}`"))
+        .collect();
+    let named = match required.is_empty() {
+        true => format!(
+            "its fields ({})",
+            fields
+                .keys()
+                .map(|name| format!("`{name}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        false => format!("its required fields ({})", required.join(", ")),
+    };
+    format!(
+        "[error] no answer was found: this stage's answer is a JSON object, and {named} go \
+         either as this tool's arguments, one argument per field, or together as one JSON \
+         object written as the text of `content`."
+    )
 }
 
 /// The refusal a validator's `verdict` comes to, if any: its reason when it
@@ -367,15 +458,17 @@ pub(crate) fn record(
 }
 
 /// Whether a `submit_output` call hands back `recorded` again: the same
-/// content, naming the same files, each still holding the bytes recorded for
-/// it. A file rewritten since is a new answer, even under the same path, so a
-/// stage sent back to fix one records the fix.
+/// answer (in either of the forms [`answer`] reads under `spec`), naming the
+/// same files, each still holding the bytes recorded for it. A file
+/// rewritten since is a new answer, even under the same path, so a stage
+/// sent back to fix one records the fix.
 pub(crate) fn repeats(
     args: &serde_json::Value,
     recorded: &FinalOutput,
+    spec: Option<&OutputSpec>,
     workdir: Option<&std::path::Path>,
 ) -> bool {
-    args.get("content").and_then(serde_json::Value::as_str) == Some(recorded.content.as_str())
+    answer(args, spec).is_ok_and(|a| a == recorded.content.as_str())
         && artifacts::unchanged(args, &recorded.artifacts, workdir)
 }
 

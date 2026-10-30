@@ -109,6 +109,9 @@ fn pick<T>(levels: &[Option<&OutputDef>], get: fn(&OutputDef) -> Option<T>) -> O
 /// label, the instructions and an example are what make a model write a
 /// format it has never seen. A stage that declares nothing keeps the tool's
 /// own wording.
+///
+/// A stage whose schema is an object also takes its fields as the tool's
+/// arguments, so they are in its parameters, where a model looks for them.
 pub(super) fn describe_submit(tools: &mut [ToolDef], output: Option<&OutputDef>) {
     let described = output
         .map(|o| leviath_core::describe_spec(&spec_of(o)))
@@ -116,11 +119,17 @@ pub(super) fn describe_submit(tools: &mut [ToolDef], output: Option<&OutputDef>)
     if described.is_empty() {
         return;
     }
+    let schema = output.and_then(|o| o.schema.as_ref());
     for tool in tools
         .iter_mut()
         .filter(|t| t.name.as_str() == leviath_tools::SUBMIT_OUTPUT_TOOL)
     {
         tool.description = leviath_tools::submit_output_description(&described);
+        if let Some(merged) = schema
+            .and_then(|s| leviath_tools::submit_output_parameters(tool.schema.value(), s.value()))
+        {
+            tool.schema = merged.into();
+        }
     }
 }
 

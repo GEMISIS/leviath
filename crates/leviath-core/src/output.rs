@@ -522,6 +522,27 @@ pub fn resolve_output_spec(
     })
 }
 
+/// The properties of an output schema a model may hand back as
+/// `submit_output`'s own arguments, when it is that kind of schema.
+///
+/// A model shown a schema for an object tends to fill its properties in as
+/// the tool's arguments rather than write the object out as text, so a stage
+/// whose schema is an object takes its answer either way. Only an object
+/// schema with properties qualifies: an array, a string or a bare
+/// `{"type": "object"}` has no fields to give one by one. Nor does one that
+/// names a property `content` or `artifacts`, which are the tool's own
+/// arguments and would leave a call meaning two things.
+pub fn argument_fields(
+    schema: &serde_json::Value,
+) -> Option<&serde_json::Map<String, serde_json::Value>> {
+    let object = schema
+        .get("type")
+        .is_none_or(|t| t.as_str() == Some("object"));
+    let fields = schema.get("properties")?.as_object()?;
+    let own = ["content", "artifacts"];
+    (object && !fields.is_empty() && !own.iter().any(|k| fields.contains_key(*k))).then_some(fields)
+}
+
 /// Render a resolved spec as the guidance an agent reads.
 ///
 /// Used twice for the same text: once in the `submit_output` tool description
@@ -550,8 +571,15 @@ pub fn describe_spec(spec: &OutputSpec) -> String {
         parts.push(instructions.clone());
     }
     if let Some(schema) = &spec.schema {
+        let given = match argument_fields(schema) {
+            Some(_) => {
+                "Give its properties as the arguments of `submit_output`, or the whole JSON \
+                 object as the text of `content`."
+            }
+            None => "Give the whole JSON document as the text of `content`.",
+        };
         parts.push(format!(
-            "It must be JSON valid against this schema:\n{schema}"
+            "It must be JSON valid against this schema:\n{schema}\n{given}"
         ));
     }
     if let Some(example) = &spec.example {
@@ -1062,6 +1090,10 @@ mod tests {
         assert!(described.contains("Return it in this format: a2ui."));
         assert!(described.contains("One card per finding."));
         assert!(described.contains("valid against this schema"));
+        assert!(
+            described.contains("as the text of `content`"),
+            "{described}"
+        );
         assert!(described.contains("{\"root\": {}}"));
         let with_files = describe_spec(&OutputSpec {
             artifacts: vec![
@@ -1084,6 +1116,58 @@ mod tests {
             with_files.contains("- final (video/mp4, required): the cut\n- notes (text/*)"),
             "{with_files}"
         );
+    }
+
+    /// An object schema's fields may come as the tool's arguments, and the
+    /// model is told so; any other schema's answer is the text of `content`.
+    #[test]
+    fn a_schema_says_where_its_answer_goes() {
+        let object = describe_spec(&spec(
+            Some("json"),
+            Some(json!({"type": "object", "properties": {"summary": {"type": "string"}}})),
+        ));
+        assert!(
+            object.contains(
+                "Give its properties as the arguments of `submit_output`, or the whole JSON \
+                 object as the text of `content`."
+            ),
+            "{object}"
+        );
+        let array = describe_spec(&spec(Some("json"), Some(json!({"type": "array"}))));
+        assert!(
+            array.contains("Give the whole JSON document as the text of `content`."),
+            "{array}"
+        );
+        assert!(!array.contains("arguments"), "{array}");
+    }
+
+    /// Fields only for an object schema that has some, and none that would
+    /// collide with the tool's own arguments.
+    #[test]
+    fn only_an_object_schema_with_fields_of_its_own_gives_them_as_arguments() {
+        let fields = json!({"summary": {"type": "string"}});
+        for schema in [
+            json!({"type": "object", "properties": fields}),
+            json!({"properties": fields}),
+        ] {
+            assert_eq!(
+                argument_fields(&schema).map(|f| f.len()),
+                Some(1),
+                "{schema}"
+            );
+        }
+        for schema in [
+            json!({"type": "array", "items": {"type": "string"}}),
+            json!({"type": "string"}),
+            json!({"type": "array", "properties": fields}),
+            json!({"type": "object"}),
+            json!({"type": "object", "properties": {}}),
+            json!({"type": "object", "properties": "summary"}),
+            json!({"type": "object", "properties": {"content": {"type": "string"}}}),
+            json!({"type": "object", "properties": {"artifacts": {"type": "array"}}}),
+        ] {
+            assert!(argument_fields(&schema).is_none(), "{schema}");
+        }
     }
 
     /// Without this the spec and the stage's own system prompt are two peer

@@ -31,7 +31,7 @@ pub use context::*;
 pub use defs::{
     BUILTIN_TOOL_NAMES, OUTSIDE_WORKDIR_PERMISSION, SPAWN_RAW_GRAPH_PERMISSION,
     STAGE_CONTROL_TOOLS, SUBAGENT_TOOLS, is_builtin_tool, is_subagent_tool,
-    submit_output_description,
+    submit_output_description, submit_output_parameters,
 };
 pub use install::{
     InstallProbes, InstalledFor, InstalledTool, MAX_TOOL_SOURCE_BYTES, install_script_tool,
@@ -405,6 +405,89 @@ mod tests {
         let shaped = submit_output_description("Return it in this format: a2ui.");
         assert!(shaped.starts_with(&generic), "the generic part is kept");
         assert!(shaped.ends_with("Return it in this format: a2ui."));
+    }
+
+    /// The built-in `submit_output` parameters, as a stage starts from.
+    fn submit_parameters() -> Value {
+        make_tools(&std::env::temp_dir())
+            .tool_defs()
+            .into_iter()
+            .find(|t| t.name == SUBMIT_OUTPUT_TOOL)
+            .expect("submit_output is a built-in")
+            .parameters
+    }
+
+    /// An object schema's fields join the tool's own arguments, none of them
+    /// required, so a model may give them as arguments or write the object
+    /// into `content`, and validation of the call refuses neither.
+    #[test]
+    fn an_object_schema_becomes_the_submit_parameters() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string"},
+                "files": {"type": "array", "items": {"$ref": "#/$defs/File"}}
+            },
+            "required": ["summary", "files"],
+            "$defs": {"File": {"type": "string"}}
+        });
+        let merged =
+            submit_output_parameters(&submit_parameters(), &schema).expect("an object schema");
+        let properties = merged["properties"].as_object().expect("properties");
+        for name in ["content", "artifacts", "summary", "files"] {
+            assert!(properties.contains_key(name), "{name}: {merged}");
+        }
+        assert!(merged.get("required").is_none(), "{merged}");
+        assert_eq!(merged["$defs"], schema["$defs"]);
+        assert!(
+            properties["content"]["description"]
+                .as_str()
+                .is_some_and(|d| d.contains("Leave it out")),
+            "{merged}"
+        );
+        let file = json!({"summary": "done", "files": ["a.rs"]});
+        let text = json!({"content": file.to_string()});
+        for args in [&file, &text] {
+            assert_eq!(
+                validate_tool_args(SUBMIT_OUTPUT_TOOL, &merged, args),
+                ArgValidation::Valid,
+                "{args}"
+            );
+        }
+        // A field of the wrong type is refused as any tool's argument is.
+        assert!(matches!(
+            validate_tool_args(SUBMIT_OUTPUT_TOOL, &merged, &json!({"files": "a.rs"})),
+            ArgValidation::Invalid(_)
+        ));
+    }
+
+    /// `definitions`, the older spelling of `$defs`, travels the same way.
+    #[test]
+    fn a_schema_s_older_definitions_come_along() {
+        let schema = json!({
+            "properties": {"n": {"$ref": "#/definitions/N"}},
+            "definitions": {"N": {"type": "integer"}}
+        });
+        let merged = submit_output_parameters(&submit_parameters(), &schema).expect("merged");
+        assert_eq!(merged["definitions"], schema["definitions"]);
+        assert!(merged.get("$defs").is_none());
+    }
+
+    /// Anything else keeps the tool as it is: a schema with no fields to give
+    /// one by one, and parameters with no properties to give them beside.
+    #[test]
+    fn other_schemas_and_parameters_keep_the_submit_tool_as_it_is() {
+        let object = json!({"type": "object", "properties": {"n": {"type": "integer"}}});
+        for schema in [json!({"type": "array"}), json!({"type": "string"})] {
+            assert!(submit_output_parameters(&submit_parameters(), &schema).is_none());
+        }
+        for parameters in [json!("text"), json!({"type": "object"})] {
+            assert!(submit_output_parameters(&parameters, &object).is_none());
+        }
+        // Parameters with no `content` of their own still gain the fields.
+        let bare = json!({"type": "object", "properties": {}});
+        let merged = submit_output_parameters(&bare, &object).expect("merged");
+        assert_eq!(merged["properties"]["n"], object["properties"]["n"]);
     }
 
     #[tokio::test]

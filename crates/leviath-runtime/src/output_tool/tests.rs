@@ -1665,35 +1665,39 @@ fn a_repeat_is_the_same_content_and_the_same_unchanged_files() {
     let recorded = recorded.expect("accepted");
     let workdir = Some(dir.path());
 
-    assert!(repeats(&args, &recorded, workdir));
+    assert!(repeats(&args, &recorded, None, workdir));
     let other_content = json!({ "content": "another panel", "artifacts": args["artifacts"] });
-    assert!(!repeats(&other_content, &recorded, workdir));
+    assert!(!repeats(&other_content, &recorded, None, workdir));
     assert!(!repeats(
         &json!({ "artifacts": args["artifacts"] }),
         &recorded,
+        None,
         workdir
     ));
     let fewer = json!({ "content": "the panel", "artifacts": ["panel.json"] });
-    assert!(!repeats(&fewer, &recorded, workdir));
+    assert!(!repeats(&fewer, &recorded, None, workdir));
     let moved = json!({ "content": "the panel", "artifacts": ["notes.md", "panel.json"] });
-    assert!(!repeats(&moved, &recorded, workdir));
+    assert!(!repeats(&moved, &recorded, None, workdir));
     let renamed = json!({
         "content": "the panel",
         "artifacts": ["panel.json", { "name": "summary", "path": "notes.md" }],
     });
-    assert!(!repeats(&renamed, &recorded, workdir));
+    assert!(!repeats(&renamed, &recorded, None, workdir));
     assert!(
-        !repeats(&args, &recorded, None),
+        !repeats(&args, &recorded, None, None),
         "nothing to compare the files with"
     );
 
     std::fs::write(dir.path().join("panel.json"), "{\"a\":2}").expect("rewrite");
     assert!(
-        !repeats(&args, &recorded, workdir),
+        !repeats(&args, &recorded, None, workdir),
         "a rewritten file is a new answer"
     );
     std::fs::remove_file(dir.path().join("panel.json")).expect("remove");
-    assert!(!repeats(&args, &recorded, workdir), "so is a missing one");
+    assert!(
+        !repeats(&args, &recorded, None, workdir),
+        "so is a missing one"
+    );
 }
 
 /// An answer with no files repeats on its content alone.
@@ -1716,8 +1720,8 @@ fn an_answer_without_files_repeats_on_its_content() {
         &mut win(),
     );
     let recorded = recorded.expect("accepted");
-    assert!(repeats(&json!({ "content": "42" }), &recorded, None));
-    assert!(!repeats(&json!({ "content": "43" }), &recorded, None));
+    assert!(repeats(&json!({ "content": "42" }), &recorded, None, None));
+    assert!(!repeats(&json!({ "content": "43" }), &recorded, None, None));
 }
 
 /// A spec whose answers `check` judges, under `policy`.
@@ -1820,5 +1824,190 @@ fn the_cheap_checks_come_before_the_tools_verdict() {
     };
     let refused = precheck(&json!({ "content": "not json" }), &ctx).unwrap_err();
     assert!(refused.contains("is not valid json"), "{refused}");
-    assert_eq!(precheck(&json!({ "content": "{}" }), &ctx), Ok("{}"));
+    assert_eq!(precheck(&json!({ "content": "{}" }), &ctx), Ok("{}".into()));
+}
+
+// ── An object schema's fields as arguments ───────────────────────────────────
+
+/// A report's schema: an object with two required fields.
+fn report_spec() -> OutputSpec {
+    spec(
+        Some("json"),
+        Some(json!({
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string"},
+                "files": {"type": "array", "items": {"type": "string"}},
+                "caveats": {"type": "string"}
+            },
+            "required": ["summary", "files"]
+        })),
+    )
+}
+
+/// Submit `args` at a stage asking for `spec`.
+fn submit_under(spec: &OutputSpec, args: serde_json::Value) -> (String, Option<FinalOutput>) {
+    let ctx = OutputContext {
+        write_fence: None,
+        tool_verdict: None,
+        spec: Some(spec),
+        validators: None,
+        stage: "summary",
+        stage_names: &[],
+        workdir: None,
+        sink: None,
+        overwrite_artifacts: false,
+    };
+    handle_output_tool(&args, &ctx, 7, &mut win())
+}
+
+/// A model that fills the schema's fields in as the tool's arguments has its
+/// answer assembled, checked against the schema and recorded exactly as the
+/// same object written into `content` is.
+#[test]
+fn a_schemas_fields_given_as_arguments_are_recorded_as_the_content_form_is() {
+    let spec = report_spec();
+    let fields = json!({"summary": "done", "files": ["a.rs", "b.rs"]});
+    let (ack, by_arguments) = submit_under(&spec, fields.clone());
+    let by_arguments = by_arguments.expect("accepted");
+    assert!(ack.starts_with(ACCEPTED), "{ack}");
+    let (_, by_content) = submit_under(&spec, json!({"content": fields.to_string()}));
+    assert_eq!(Some(by_arguments.clone()), by_content);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&by_arguments.content).unwrap(),
+        fields
+    );
+    // An argument the schema does not name is the tool's business, not the
+    // answer's.
+    let (_, with_files) = submit_under(
+        &spec,
+        json!({"summary": "done", "files": [], "artifacts": []}),
+    );
+    assert_eq!(
+        with_files.expect("accepted").content,
+        json!({"summary": "done", "files": []}).to_string()
+    );
+}
+
+/// Fields given as arguments meet the schema as `content` does: one missing
+/// or of the wrong type is refused with the schema's own words.
+#[test]
+fn fields_given_as_arguments_are_held_to_the_schema() {
+    let (refused, output) = submit_under(&report_spec(), json!({"summary": "done"}));
+    assert!(output.is_none());
+    assert!(
+        refused.contains("does not match the declared schema") && refused.contains("files"),
+        "{refused}"
+    );
+    let (refused, _) = submit_under(&report_spec(), json!({"summary": "done", "files": "a.rs"}));
+    assert!(
+        refused.contains("does not match the declared schema"),
+        "{refused}"
+    );
+}
+
+/// Given both ways, the arguments are the answer when `content` says the same
+/// thing, or nothing at all; when the two differ, neither is guessed at.
+#[test]
+fn an_answer_given_both_ways_must_agree() {
+    let spec = report_spec();
+    let fields = json!({"summary": "done", "files": ["a.rs"]});
+    let pretty = serde_json::to_string_pretty(&fields).unwrap();
+    for content in [pretty.as_str(), "", "  "] {
+        let mut args = fields.clone();
+        args["content"] = json!(content);
+        let (ack, output) = submit_under(&spec, args);
+        assert_eq!(
+            output.expect("accepted").content,
+            fields.to_string(),
+            "{ack}"
+        );
+    }
+    for content in ["Wrote the report.", r#"{"summary": "other", "files": []}"#] {
+        let mut args = fields.clone();
+        args["content"] = json!(content);
+        let (refused, output) = submit_under(&spec, args);
+        assert!(output.is_none());
+        assert!(
+            refused.starts_with("[error] the answer was given twice and the two differ"),
+            "{refused}"
+        );
+        assert!(refused.contains("leave `content` out"), "{refused}");
+    }
+}
+
+/// A submission with the answer in neither place is told where it goes,
+/// naming the fields the schema requires, rather than where a JSON parser
+/// stopped reading prose.
+#[test]
+fn an_answer_in_neither_place_is_told_where_it_goes() {
+    for args in [
+        json!({"content": "I wrote the report and fixed the files."}),
+        json!({"content": ""}),
+        json!({}),
+        json!({"artifacts": ["report.md"]}),
+    ] {
+        let (refused, output) = submit_under(&report_spec(), args.clone());
+        assert!(output.is_none(), "{args}");
+        assert_eq!(
+            refused,
+            "[error] no answer was found: this stage's answer is a JSON object, and its \
+             required fields (`summary`, `files`) go either as this tool's arguments, one \
+             argument per field, or together as one JSON object written as the text of \
+             `content`.",
+            "{args}"
+        );
+    }
+    // A schema that requires nothing names every field it has.
+    let optional = spec(
+        None,
+        Some(json!({"properties": {"note": {"type": "string"}}})),
+    );
+    let (refused, _) = submit_under(&optional, json!({"content": "prose"}));
+    assert!(refused.contains("its fields (`note`) go"), "{refused}");
+}
+
+/// A schema for anything but an object with fields keeps the one form it
+/// always had: the answer is `content`, and its arguments are not read.
+#[test]
+fn a_schema_of_another_kind_takes_content_only() {
+    let list = spec(
+        Some("json"),
+        Some(json!({"type": "array", "items": {"type": "string"}})),
+    );
+    let (_, output) = submit_under(&list, json!({"content": "[\"a\", \"b\"]"}));
+    assert_eq!(output.expect("accepted").content, "[\"a\", \"b\"]");
+    let (refused, output) = submit_under(&list, json!({"items": ["a"]}));
+    assert!(output.is_none());
+    assert_eq!(refused, "[error] missing 'content' argument");
+    let text = spec(None, Some(json!({"type": "string"})));
+    let (_, output) = submit_under(&text, json!({"content": "\"hello\""}));
+    assert!(output.is_some());
+}
+
+/// A schema too broken to check anything does not demand JSON either, as it
+/// never has: the submission is recorded unchecked.
+#[test]
+fn an_object_schema_that_will_not_compile_records_prose_unchecked() {
+    let broken = spec(None, Some(json!({"properties": {"n": {"type": "strng"}}})));
+    let (_, output) = submit_under(&broken, json!({"content": "anything"}));
+    assert_eq!(output.expect("accepted").content, "anything");
+}
+
+/// The same answer handed back in the other form is a repeat of it, so a
+/// stage resubmitting it is not judged again.
+#[test]
+fn an_answer_repeats_in_either_form() {
+    let spec = report_spec();
+    let fields = json!({"summary": "done", "files": ["a.rs"]});
+    let (_, recorded) = submit_under(&spec, json!({"content": fields.to_string()}));
+    let recorded = recorded.expect("accepted");
+    assert!(repeats(&fields, &recorded, Some(&spec), None));
+    assert!(!repeats(
+        &json!({"summary": "other", "files": []}),
+        &recorded,
+        Some(&spec),
+        None
+    ));
+    assert!(!repeats(&json!({}), &recorded, Some(&spec), None));
 }
