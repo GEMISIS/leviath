@@ -322,8 +322,8 @@ pub fn as_layout_8_reads(mut value: serde_json::Value) -> serde_json::Value {
     value
 }
 
-/// `value` with `continue_at` unset on every graph in it and `on_continue`
-/// on every region definition, which is how this build writes them.
+/// `value` with `continue_at` unset on every graph in it, and `on_continue` and
+/// `evict_to` unset on every region definition, which is how this build writes them.
 pub fn with_no_continue_settings(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(map) => {
@@ -334,6 +334,7 @@ pub fn with_no_continue_settings(value: &mut serde_json::Value) {
             }
             if region {
                 map.entry("on_continue").or_insert(serde_json::Value::Null);
+                map.entry("evict_to").or_insert(serde_json::Value::Null);
             }
             map.values_mut().for_each(with_no_continue_settings);
         }

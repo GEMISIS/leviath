@@ -154,6 +154,7 @@ pub(crate) fn region(name: &str, kind: leviath_core::RegionKind, tokens: u32) ->
         seed: None,
         accepts: Vec::new(),
         on_continue: None,
+        evict_to: None,
     }
 }
 

@@ -81,6 +81,11 @@ pub struct RegionDef {
     /// What happens to an entry that does not fit.
     #[serde(default)]
     pub admission: Admission,
+    /// The share of its budget a region that rolls its oldest entries off
+    /// drops back to when a write does not fit, so the prompt's prefix stays
+    /// put for the writes after it. A fraction from 0 to 1; unset is 0.75.
+    #[serde(default)]
+    pub evict_to: Option<f64>,
     /// How often its contents change, for prompt caching.
     #[serde(default)]
     pub volatility: Volatility,

@@ -56,6 +56,51 @@ fn parts(record: RunRecord) -> (String, String, ContextCause, Vec<RegionCommit>,
     }
 }
 
+/// A keyed write is recorded by what the region gained, not as one entry per
+/// write: a replacement under a key the region held adds nothing.
+#[test]
+fn a_keyed_replacement_records_no_entry_added() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut window = window_with_region();
+    let stage = attached(tx);
+    window.attach_journal("run-k", Some(&stage));
+    let keyed = |window: &mut ContextWindow, body: &str| {
+        window
+            .typed_write_keyed(
+                crate::components::TypedWrite {
+                    cause: Some(ContextCause::ToolResult),
+                    origin: crate::components::WriteOrigin::Agent,
+                    region: "plan",
+                    kind: leviath_core::EntryKind::Text,
+                    taint: None,
+                },
+                Some("read_file a.rs"),
+                leviath_core::region::EntryContent::text(body),
+                4,
+            )
+            .expect("the write fits")
+    };
+    assert_eq!(
+        keyed(&mut window, "first"),
+        leviath_core::region::KeyedWrite::Added
+    );
+    let (_, record) = one_transaction(&mut rx);
+    assert_eq!(parts(record).3[0].entries_added, 1);
+
+    assert_eq!(
+        keyed(&mut window, "second"),
+        leviath_core::region::KeyedWrite::Replaced
+    );
+    let (_, record) = one_transaction(&mut rx);
+    let plan = &parts(record).3[0];
+    assert_eq!(plan.entries_before, 1);
+    assert_eq!(plan.entries_after, 1);
+    assert_eq!(
+        plan.entries_added, 0,
+        "a replacement grew the region by nothing"
+    );
+}
+
 /// How many entries a push reports for a region that went from `before` to
 /// `after` entries.
 #[test]

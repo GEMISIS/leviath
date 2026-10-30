@@ -9,8 +9,14 @@ use serde::{Deserialize, Serialize};
 pub mod parts;
 pub mod policy;
 
+pub use keyed::KeyedWrite;
 pub use parts::EntryContent;
 pub use policy::{Admission, EvictionStrategy, Volatility};
+
+/// The share of its budget a region drops back to when it rolls entries off
+/// to admit a write, unless its blueprint says otherwise. See
+/// [`Region::evict_to`].
+pub const DEFAULT_EVICT_TO: f64 = 0.75;
 
 /// The kind of content stored in a region entry.
 ///
@@ -452,6 +458,21 @@ pub struct Region {
     /// What this region does when a write does not fit. See [`Admission`].
     pub admission: Admission,
 
+    /// The fraction of [`max_tokens`](Self::max_tokens) the region drops back
+    /// to when it rolls entries off to admit a write.
+    ///
+    /// Freeing exactly what the write needs, one entry per write, moves the
+    /// prompt from that entry on every time the region is full. A `codebase`
+    /// region fed by `read_file` at its cap did that on every read, and the
+    /// stage re-sent 245K tokens the provider had cached a call earlier.
+    /// Rolling off down to this low-water mark instead leaves the region's
+    /// prefix where it was for as many writes as the freed room takes, so an
+    /// eviction is an occasional event rather than a per-write one, the way a
+    /// sliding window's `eviction = { bulk = N }` makes it. `1.0` frees only
+    /// what the write needs; `0.0` empties the region. The default is
+    /// [`DEFAULT_EVICT_TO`].
+    pub evict_to: f64,
+
     /// How much this region's contents move between requests, which decides
     /// where it sits in the prompt and whether it is chunked. See
     /// [`Volatility`].
@@ -495,6 +516,7 @@ impl Region {
             needs_message_compaction: false,
             summarizable: true,
             admission: Admission::default(),
+            evict_to: DEFAULT_EVICT_TO,
             volatility: Volatility::default(),
             accepts: Vec::new(),
             description: None,
@@ -524,6 +546,21 @@ impl Region {
         {
             Some(p) => Err(p.mime_type.clone()),
             None => Ok(()),
+        }
+    }
+
+    /// [`accepts_content`](Self::accepts_content) as the refusal a write gets:
+    /// the region's list and the type that is not on it.
+    fn refuse_unaccepted(&self, content: &EntryContent) -> crate::error::Result<()> {
+        match self.accepts_content(content) {
+            Ok(()) => Ok(()),
+            Err(mime_type) => Err(crate::error::Error::RegionRefusedWrite {
+                region: self.name.clone(),
+                reason: format!(
+                    "it takes {} and this write carries {mime_type}",
+                    self.accepts.join(", ")
+                ),
+            }),
         }
     }
 
@@ -565,15 +602,7 @@ impl Region {
         taint_level: crate::taint::TaintLevel,
         key: Option<&str>,
     ) -> crate::error::Result<()> {
-        if let Err(mime_type) = self.accepts_content(&content) {
-            return Err(crate::error::Error::RegionRefusedWrite {
-                region: self.name.clone(),
-                reason: format!(
-                    "it takes {} and this write carries {mime_type}",
-                    self.accepts.join(", ")
-                ),
-            });
-        }
+        self.refuse_unaccepted(&content)?;
         if self.current_tokens + tokens > self.max_tokens {
             // Which failure this is depends on whether anything would have been
             // dropped to fit. A region that never evicts reports being full,
@@ -1012,6 +1041,10 @@ mod tests {
         assert_eq!(older.reasoning, None);
     }
 
+    fn held(region: &Region) -> Vec<&str> {
+        region.content.iter().map(|e| e.content.as_str()).collect()
+    }
+
     #[test]
     fn an_evicting_region_rolls_the_oldest_off_to_admit_a_write() {
         let mut region = Region::new("findings".to_string(), RegionKind::Temporary, 100);
@@ -1019,24 +1052,83 @@ mod tests {
         region.add_entry("middle".to_string(), 40).unwrap();
         assert_eq!(region.current_tokens, 80);
 
-        // Needs 40 of the 20 left: one entry has to go, and it is the oldest.
+        // Needs 40 of the 20 left: the oldest goes. Under the 75% low-water
+        // mark the write then has to land at or under 75, so the middle one
+        // goes too - the write is admitted with room to spare, not just room.
         region.add_entry("newest".to_string(), 40).unwrap();
 
-        assert_eq!(region.current_tokens, 80);
-        let held: Vec<&str> = region.content.iter().map(|e| e.content.as_str()).collect();
-        assert_eq!(held, ["middle", "newest"]);
+        assert_eq!(region.current_tokens, 40);
+        assert_eq!(held(&region), ["newest"]);
     }
 
-    /// It rolls off only as far as it must - eviction is admission, not a purge.
+    /// The point of the low-water mark: once a full region has made room, the
+    /// writes after it land without moving anything, so the prompt's prefix
+    /// is byte for byte the same across them. One entry per write would have
+    /// rewritten it on every one - the shape that cost a measured 245K
+    /// uncached tokens in a `codebase` region fed by `read_file`.
     #[test]
-    fn eviction_stops_as_soon_as_the_write_fits() {
+    fn a_full_region_takes_several_writes_before_it_evicts_again() {
+        let mut region = Region::new("codebase".to_string(), RegionKind::Temporary, 100);
+        for i in 0..5 {
+            region.add_entry(format!("entry-{i}"), 20).unwrap();
+        }
+        assert_eq!(region.evict_to, DEFAULT_EVICT_TO);
+        assert_eq!(region.low_water(), 75);
+
+        // Full, so this write evicts: down to 75 including itself, which is
+        // three of the five, not the one it needed.
+        region.add_entry("read-5".to_string(), 20).unwrap();
+        assert_eq!(held(&region), ["entry-3", "entry-4", "read-5"]);
+        let prefix: Vec<String> = held(&region).iter().map(|s| s.to_string()).collect();
+
+        // Two more writes fit in the freed room and evict nothing: the
+        // entries in front of them are exactly where they were.
+        region.add_entry("read-6".to_string(), 20).unwrap();
+        region.add_entry("read-7".to_string(), 20).unwrap();
+        assert_eq!(
+            held(&region)[..3],
+            prefix[..],
+            "the prefix held across the writes after the eviction"
+        );
+        assert_eq!(region.current_tokens, 100);
+
+        // Full again, and the next eviction is another chunk.
+        region.add_entry("read-8".to_string(), 20).unwrap();
+        assert_eq!(held(&region), ["read-6", "read-7", "read-8"]);
+    }
+
+    /// `evict_to = 1.0` is the behaviour the low-water mark replaced: room
+    /// for this write and nothing more, one entry at a time.
+    #[test]
+    fn evict_to_one_frees_only_what_the_write_needs() {
         let mut region = Region::new("findings".to_string(), RegionKind::Temporary, 100);
+        region.evict_to = 1.0;
         for i in 0..5 {
             region.add_entry(format!("entry-{i}"), 20).unwrap();
         }
         region.add_entry("newest".to_string(), 20).unwrap();
-        let held: Vec<&str> = region.content.iter().map(|e| e.content.as_str()).collect();
-        assert_eq!(held, ["entry-1", "entry-2", "entry-3", "entry-4", "newest"]);
+        assert_eq!(
+            held(&region),
+            ["entry-1", "entry-2", "entry-3", "entry-4", "newest"]
+        );
+    }
+
+    /// `evict_to = 0` empties the region when it is full, like a clearable
+    /// one; a fraction outside 0 to 1 is read as the nearer end.
+    #[test]
+    fn evict_to_zero_empties_a_full_region_and_strays_are_clamped() {
+        let mut region = Region::new("scratch".to_string(), RegionKind::Temporary, 100);
+        region.evict_to = 0.0;
+        for i in 0..5 {
+            region.add_entry(format!("entry-{i}"), 20).unwrap();
+        }
+        region.add_entry("newest".to_string(), 20).unwrap();
+        assert_eq!(held(&region), ["newest"]);
+
+        region.evict_to = 1.5;
+        assert_eq!(region.low_water(), 100);
+        region.evict_to = -0.5;
+        assert_eq!(region.low_water(), 0);
     }
 
     /// `Reject` still refuses, which is the entire reason an author sets it:

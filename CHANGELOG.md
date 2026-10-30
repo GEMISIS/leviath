@@ -45,6 +45,18 @@ same list.
 
 ### Fixed
 
+- A full region evicts in chunks, and a re-read replaces its earlier copy, so the prompt
+  cache survives a region at its cap. A region that rolls its oldest entries off to admit a
+  write (temporary, clearable, a sliding window over its token budget, a compacting region
+  with no compaction model) freed one write's worth and was full again on the next, so the
+  prompt was rewritten from that entry on every call: a `codebase` region at 24K, fed by
+  `read_file`, accounted for 245K of a review stage's 913K uncached tokens. It now drops
+  back to `evict_to` of its budget, 0.75 by default, and the writes after that move
+  nothing. A tool result routed into a region is filed under its call, so reading a path
+  the region already holds leaves one entry: untouched when the output is the same bytes,
+  replaced when the file changed. The same files had been read about seven times each
+  into a region keeping every copy. `evict_to` is a new region key; `lev validate` refuses
+  one outside 0 to 1, and `evict_to = 1.0` is the old one-entry-per-write behaviour.
 - A stage that declares output beyond text (`output_routing = { "audio/mpeg" = ... }`,
   or a mime `output` format) starts on a route whose model can produce it. A bare
   model name went to the first provider in `provider_order` listing it, even when

@@ -254,6 +254,7 @@ impl ContextWindow {
             region_name,
             before,
             tokens,
+            false,
             &mut |region, tokens| match key {
                 Some(k) => region.add_keyed_entry(k, content.clone(), tokens),
                 None => region.add_entry(content.clone(), tokens),
@@ -298,6 +299,7 @@ impl ContextWindow {
             region_name,
             before,
             tokens,
+            false,
             &mut |region, tokens| match key {
                 Some(k) => region.add_keyed_entry(k, content.clone(), tokens),
                 None => region.add_entry(content.clone(), tokens),
@@ -475,13 +477,16 @@ impl ContextWindow {
     ///
     /// `before` is the caller's measurement rather than one taken here, because
     /// a replacement has already cleared the region by the time it arrives and
-    /// the record has to describe the clear too.
+    /// the record has to describe the clear too. `keyed` says the insert may
+    /// replace an entry where it stands rather than push one, so the record
+    /// counts what the region gained rather than one entry per write.
     pub(super) fn write_to_region(
         &mut self,
         cause: Option<ContextCause>,
         region_name: &str,
         before: ContextTxn,
         tokens: usize,
+        keyed: bool,
         insert: &mut dyn FnMut(&mut Region, usize) -> leviath_core::Result<()>,
     ) -> leviath_core::Result<()> {
         if self.get_region(region_name).is_none() {
@@ -507,7 +512,11 @@ impl ContextWindow {
             Err(e) => Err(e),
         };
         if let Some(cause) = cause {
-            self.commit_change(cause, before, Pushed::Into(usize::from(stored.is_ok())));
+            let added = match keyed {
+                true => Pushed::Upsert,
+                false => Pushed::Into(usize::from(stored.is_ok())),
+            };
+            self.commit_change(cause, before, added);
         }
         stored
     }

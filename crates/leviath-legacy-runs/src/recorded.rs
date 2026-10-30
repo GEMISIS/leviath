@@ -219,6 +219,7 @@ fn region(name: RegionName, r: &RegionSnapshot) -> RegionDef {
         seed: None,
         accepts: Vec::new(),
         on_continue: None,
+        evict_to: None,
     }
 }
 

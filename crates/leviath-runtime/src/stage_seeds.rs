@@ -228,6 +228,7 @@ mod tests {
                     seed,
                     accepts: vec![],
                     on_continue: None,
+                    evict_to: None,
                 })
                 .collect(),
             total_budget_tokens: 10_000,

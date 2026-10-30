@@ -61,6 +61,7 @@ pub(crate) fn region(name: &str) -> RegionDef {
         seed: None,
         accepts: vec![],
         on_continue: None,
+        evict_to: None,
     }
 }
 
@@ -306,6 +307,10 @@ fn fan_out_gates_carry_and_layout_refs_are_checked() {
         min: Some(10),
         max: Some(5),
     };
+    // A low-water mark is a fraction of the budget: this one is fine, the
+    // next is not.
+    g.layout.regions[0].evict_to = Some(0.5);
+    g.layout.regions[1].evict_to = Some(1.5);
     g.file_tracking = Some(FileTrackingDef {
         region: RegionName::new("ghost").unwrap(),
         track_reads: true,
@@ -344,6 +349,7 @@ fn fan_out_gates_carry_and_layout_refs_are_checked() {
             "graph.edges[0].gate Dangling",
             "graph.edges[0].stuck Missing",
             "graph.layout.regions[0].kind.source Dangling",
+            "graph.layout.regions[1].evict_to OutOfRange",
             "graph.layout.regions[1].budget OutOfRange",
             "graph.layout.regions[1].budget Conflict",
             "graph.file_tracking.region Dangling",

@@ -119,6 +119,54 @@ pub fn per_tool<'m, V: ?Sized>(
         .map(|(_, v)| v)
 }
 
+/// The key a routed result is stored under, so the same call again replaces
+/// its earlier result rather than adding a copy: the tool's canonical name
+/// and its `path`, then any other arguments in name order.
+///
+/// A call with no `path` gets `None` and its results are appended as they
+/// always were. The path is what makes a call the same call: a `read_file` of
+/// one file, a `list_dir` of one directory. The other arguments keep two
+/// different reads of one path apart, so a ranged read does not replace a
+/// whole one.
+///
+/// ```
+/// use leviath_core::tool_routing::result_key;
+///
+/// let args = serde_json::json!({ "path": "src/main.rs" });
+/// assert_eq!(result_key("read_file", &args, |n| n).as_deref(), Some("read_file src/main.rs"));
+/// let ranged = serde_json::json!({ "path": "src/main.rs", "offset": 10, "limit": 5 });
+/// assert_eq!(
+///     result_key("read_file", &ranged, |n| n).as_deref(),
+///     Some(r#"read_file src/main.rs {"limit":5,"offset":10}"#)
+/// );
+/// assert_eq!(result_key("bash", &serde_json::json!({ "command": "ls" }), |n| n), None);
+/// ```
+pub fn result_key(
+    tool: &str,
+    arguments: &serde_json::Value,
+    canonical: impl Fn(&str) -> &str,
+) -> Option<String> {
+    let args = arguments.as_object()?;
+    let path = args.get("path")?.as_str()?;
+    let mut key = format!("{} {path}", canonical(tool));
+    // Sorted by name whatever order the model wrote them in, so the same
+    // call spelled twice is one key.
+    let rest: BTreeMap<&str, &serde_json::Value> = args
+        .iter()
+        .filter(|(name, _)| name.as_str() != "path")
+        .map(|(name, value)| (name.as_str(), value))
+        .collect();
+    if !rest.is_empty() {
+        let mut sorted = serde_json::Map::new();
+        for (name, value) in rest {
+            sorted.insert(name.to_string(), value.clone());
+        }
+        key.push(' ');
+        key.push_str(&serde_json::Value::Object(sorted).to_string());
+    }
+    Some(key)
+}
+
 /// The region a result is stored in, given the region it is routed to:
 /// [`SCRATCH`] when results are not kept and there is one, else `routed`.
 pub fn route_target(routed: &str, keep_results: bool, has_scratch: bool) -> &str {

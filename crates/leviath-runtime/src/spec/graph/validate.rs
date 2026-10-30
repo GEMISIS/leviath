@@ -396,6 +396,15 @@ impl<'a> Validator<'a> {
                 )
                 .hint = Some("declare it with kind = \"keyed\"".to_string());
             }
+            if let Some(evict_to) = region.evict_to
+                && !(0.0..=1.0).contains(&evict_to)
+            {
+                self.issue(
+                    at.field("evict_to"),
+                    IssueCode::OutOfRange,
+                    format!("{evict_to} is not a fraction from 0 to 1"),
+                );
+            }
             if let Budget::Percent { percent, min, max } = &region.budget {
                 if !(*percent > 0.0 && *percent <= 1.0) {
                     self.issue(

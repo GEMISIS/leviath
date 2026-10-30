@@ -349,6 +349,13 @@ impl Region {
         self.region().compact_at
     }
 
+    /// The share of its budget a region that rolls its oldest entries off
+    /// drops back to when a write does not fit, when the blueprint sets one.
+    /// Null is the runtime's default, 0.75.
+    async fn evict_to(&self) -> Option<f64> {
+        self.region().evict_to
+    }
+
     /// The mime patterns this region takes as parts. Empty means anything.
     async fn accepts(&self) -> Vec<String> {
         super::manifest::texts(&self.region().accepts)

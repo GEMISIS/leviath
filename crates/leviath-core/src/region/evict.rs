@@ -18,15 +18,21 @@ impl Region {
             )
     }
 
-    /// Roll off the oldest entries until `tokens` more would fit, and report
-    /// how many were dropped.
+    /// Roll off the oldest entries until `tokens` more would fit under the
+    /// [low-water mark](Self::low_water), and report how many were dropped.
     ///
-    /// This is what [`Admission::Evict`] has always claimed to do. Stops as
-    /// soon as the write fits, and does not start at all when it never can:
-    /// an entry larger than `max_tokens` does not fit an *empty* region either,
-    /// so evicting for it would destroy everything held and still fail. The
-    /// caller truncates instead, which is the right answer and needs the region
-    /// intact to have anywhere to put the truncation.
+    /// This is what [`Admission::Evict`] has always claimed to do. It rolls
+    /// off in a chunk rather than stopping the moment the write fits: a region
+    /// that frees exactly one write's worth is full again on the next write
+    /// and rewrites its prefix every time, which is what the prompt cache
+    /// cannot keep. Freed down to [`evict_to`](Self::evict_to) of the budget,
+    /// the region takes the writes after this one without moving anything.
+    ///
+    /// Does not start at all when the write never fits: an entry larger than
+    /// `max_tokens` does not fit an *empty* region either, so evicting for it
+    /// would destroy everything held and still fail. The caller truncates
+    /// instead, which is the right answer and needs the region intact to have
+    /// anywhere to put the truncation.
     ///
     /// Goes through [`remove_oldest`](Self::remove_oldest) rather than touching
     /// `content` directly because that method is turn-group aware: an
@@ -39,11 +45,22 @@ impl Region {
         if tokens + self.sticky_tokens() > self.max_tokens {
             return 0;
         }
+        let floor = self.low_water();
         let mut evicted = 0;
-        while self.current_tokens + tokens > self.max_tokens && self.remove_oldest().is_some() {
+        while self.current_tokens + tokens > floor && self.remove_oldest().is_some() {
             evicted += 1;
         }
         evicted
+    }
+
+    /// The tokens the region holds after it makes room for a write:
+    /// [`evict_to`](Self::evict_to) of its budget, to the nearest token.
+    ///
+    /// A fraction outside 0 to 1 is read as the nearer end, so a region built
+    /// by hand with a stray value frees something sensible rather than
+    /// nothing or a negative amount.
+    pub fn low_water(&self) -> usize {
+        (self.max_tokens as f64 * self.evict_to.clamp(0.0, 1.0)).round() as usize
     }
 
     /// Whether one more entry would push a sliding window past its item cap.

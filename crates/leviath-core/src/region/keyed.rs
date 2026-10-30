@@ -13,7 +13,68 @@
 
 use super::*;
 
+/// What [`Region::replace_keyed_entry`] did with a write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyedWrite {
+    /// Nothing held the key: the entry went in at the end.
+    Added,
+    /// The entry under the key left and this one went in at the end, so the
+    /// key's content is what was written last and is the newest the region
+    /// holds.
+    Replaced,
+    /// The entry under the key already held exactly this: nothing moved, so
+    /// the prompt is byte for byte what it was.
+    Unchanged,
+}
+
 impl Region {
+    /// Write `content` under `key` in a region that keeps its entries in
+    /// write order, for a result the same call produces again.
+    ///
+    /// A tool result routed into a region is keyed by the call that produced
+    /// it, so a second `read_file` of one path does not stack a second copy on
+    /// the first. What happens depends on what the key already holds: an
+    /// identical entry stays exactly where it is, which keeps the prompt's
+    /// cached prefix intact, and a different one is dropped before this one
+    /// goes in at the end as the region's newest. A new key is an ordinary
+    /// [`add_typed_tainted_entry`](Self::add_typed_tainted_entry).
+    ///
+    /// Distinct from [`upsert_by_key`](Self::upsert_by_key), which replaces an
+    /// entry in place and evicts by recency: that is a keyed region's
+    /// discipline, and a region that rolls its oldest entries off wants a
+    /// re-read to count as recent. Content the region does not take is
+    /// refused with the earlier entry still there; a replacement that fits
+    /// nowhere, even with the earlier one gone, leaves the key empty for the
+    /// caller's truncated copy, which is what a fresh write would get.
+    pub fn replace_keyed_entry(
+        &mut self,
+        key: &str,
+        content: EntryContent,
+        tokens: usize,
+        kind: EntryKind,
+        taint_level: crate::taint::TaintLevel,
+    ) -> crate::error::Result<KeyedWrite> {
+        self.refuse_unaccepted(&content)?;
+        let outcome = match self.position_of(key) {
+            Some(pos) if self.content[pos].content == content && self.content[pos].kind == kind => {
+                // Still the most recently written, so a keyed region's LRU
+                // sees the re-read; the entry's bytes and place do not move.
+                let seq = self.next_seq();
+                let entry = &mut self.content[pos];
+                entry.seq = seq;
+                entry.timestamp = chrono::Utc::now().timestamp();
+                return Ok(KeyedWrite::Unchanged);
+            }
+            Some(_) => {
+                self.remove_by_key(key);
+                KeyedWrite::Replaced
+            }
+            None => KeyedWrite::Added,
+        };
+        self.push_entry(content, tokens, None, kind, taint_level, Some(key))?;
+        Ok(outcome)
+    }
+
     /// Add an entry under `key`, so the agent can name it again to release it.
     ///
     /// Distinct from [`upsert_by_key`](Self::upsert_by_key), which replaces:

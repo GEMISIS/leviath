@@ -10990,6 +10990,14 @@ input RegionInput {
 	"""
 	compactAt: FloatFilter
 	"""
+	Filter on `RegionOutput.evictTo`.
+	
+	The share of its budget a region that rolls its oldest entries off
+	drops back to when a write does not fit, when the blueprint sets one.
+	Null is the runtime's default, 0.75.
+	"""
+	evictTo: FloatFilter
+	"""
 	Filter on `RegionOutput.accepts`.
 	
 	The mime patterns this region takes as parts. Empty means anything.
@@ -11296,6 +11304,12 @@ type RegionOutput {
 	onContinue: RegionContinuePolicy!
 	"The fraction of the budget at which a compacting region compacts."
 	compactAt: Float
+	"""
+	The share of its budget a region that rolls its oldest entries off
+	drops back to when a write does not fit, when the blueprint sets one.
+	Null is the runtime's default, 0.75.
+	"""
+	evictTo: Float
 	"The mime patterns this region takes as parts. Empty means anything."
 	accepts: [String!]!
 	"""
