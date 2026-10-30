@@ -300,31 +300,35 @@ that is absolute, starts with `~`, or has a `.` or `..` part, and so does a spaw
 | `context_export` | Yes. |
 | A part `submit_output` writes to disk as an artifact | Yes, at the path it lands on. |
 | A `shell` redirect (`>`, `>>`, `>&file`, `&>`) | Yes, after a plain `cd <dir>` on the line too. |
-| A relative redirect on a line that changes directory any other way | Refused. |
-| A redirect to a variable, or on a line that does not parse | Refused. |
+| The path operands of `rm`, `rmdir`, `mkdir`, `touch`, `truncate`, `tee`, `mv`, the destination of `cp`, `ln` and `install`, `dd of=`, and the repository `git -C`, `init`, `clone` and `worktree` write to | Yes, the same way as a redirect. |
+| A relative write on a line that changes directory any other way | Refused. |
+| A write to a variable or substitution, to `~user`, through a glob or brace list that could climb, or on a line that does not parse | Refused. |
 | An existing file with another hard link | Refused on Unix; not detected on Windows. |
-| A script tool's `write_file`, and redirects in its `shell()` | Yes. |
-| `cp`, `mv`, `tee`, `sed -i` and any other program `shell` or `shell()` runs | No. |
+| A script tool's `write_file`, and the writes in its `shell()` | Yes. |
+| `sed -i`, `sh -c`, `xargs`, `find -delete` and any other program `shell` or `shell()` runs | No. |
 | MCP tools | No. They write wherever their server lets them. |
 | `install_self_tool` and `install_global_tool` | No. They write outside the workdir by design. |
 
-Only the plainest move is followed: a command that is exactly `cd <dir>` or `pushd <dir>`. That
-`cd` may fail, so a redirect after it has to land inside the write paths from where the line
-started and from where it moved. `cd src && echo x > docs/a.md` is refused, since it may write
-`src/docs/a.md`, and the refusal names the path from the workdir to use instead. Any other way a
-line can change directory makes its relative redirects refused: a `cd` behind `{`, `!`, `then`,
-`command`, `builtin` or an assignment, `cd ~-` or `cd ~user`, `popd`, `chdir`, any `CDPATH`, `.`,
-`source`, `eval`, or a program that is itself an expansion. An absolute redirect is still judged
-where it says. In a stage without write paths such a line is not refused; it asks every time.
+Only the plainest move is followed: a command that is exactly `cd <dir>` or `pushd <dir>`,
+anywhere on a line joined by `&&`, `||`, `;` or `|`. That `cd` may fail, so a write after it has
+to land inside the write paths from where the line started and from where it moved.
+`cd src && echo x > docs/a.md` is refused, since it may write `src/docs/a.md`, and the refusal
+names the path from the workdir to use instead; `cd /tmp && rm -rf x && mkdir x` is refused for
+`/tmp/x`. Any other way a line can change directory makes its relative writes refused: a `cd`
+behind `{`, `!`, `then`, `command`, `builtin` or an assignment, `cd ~-` or `cd ~user`, `cd $DIR`,
+`popd`, `chdir`, any `CDPATH`, `.`, `source`, `eval`, or a program that is itself an expansion.
+An absolute write is still judged where it says. A write the fence cannot place is refused
+whether or not the stage has write paths: the workdir is a fence too, and "this cannot be
+checked" is not a reason to let it through.
 
-> [!WARNING]
-> Under `--yolo`, or a policy that allows the write, that question is answered yes, so such a line
-> runs. An unattended stage without write paths has no protection against a redirect after a
-> `cd` it cannot follow, and that redirect can land outside the workdir. Give the stage write
-> paths, or run it in a [sandbox](#sandboxes).
+> [!NOTE]
+> The check reads the line, not the kernel. A program the table does not know (`sed -i`), or one
+> that runs a command of its own (`sh -c`, `xargs`, `find -exec`, a script), can still write
+> anywhere the shell's user can. For a hard limit, run the stage in a [sandbox](#sandboxes).
 
 `shell` stays governed by the shell's own permissions, and a program it runs can write anywhere
-in the workdir. Only the redirects on its line are checked, never what the programs do.
+in the workdir. Only the redirects and the known writing programs on its line are checked, never
+what any other program does.
 `lev validate` warns about a stage that sets write paths and can still run shell
 (`write-paths-shell`), whose script tools may call `shell()` (`write-paths-script-shell`), or that
 can call MCP tools (`write-paths-mcp`). For a hard limit, give such a stage no `shell`, set

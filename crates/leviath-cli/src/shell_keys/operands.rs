@@ -320,7 +320,7 @@ impl Walk<'_> {
 /// directory listing never shows but the shell does, or more matches than
 /// [`MAX_GLOB_MATCHES`]. A glob that matches nothing is passed on as written,
 /// as the shell does.
-fn expansions(base: &Path, word: &Path) -> Option<Vec<PathBuf>> {
+pub(super) fn expansions(base: &Path, word: &Path) -> Option<Vec<PathBuf>> {
     let path = base.join(word);
     if !word.to_string_lossy().contains(['*', '?', '[']) {
         return Some(vec![path]);
@@ -375,7 +375,7 @@ fn split_verbatim(path: &str) -> (&str, &str) {
 }
 
 /// The program's own name, without the directory it was named from.
-fn program_name(program: &str) -> &str {
+pub(super) fn program_name(program: &str) -> &str {
     program.rsplit(['/', '\\']).next().unwrap_or(program)
 }
 

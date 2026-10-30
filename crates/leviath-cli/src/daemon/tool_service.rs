@@ -682,10 +682,9 @@ pub(crate) fn decide_call(
             state.builtins.workdir(),
         ));
     }
-    // A redirect after a move this cannot follow could land anywhere: like a
-    // line naming somewhere outside, it is covered by nothing below.
-    let placed = outside.is_empty()
-        && !crate::tools::unplaced_redirect(&tc.name, &tc.arguments, state.builtins.workdir());
+    // A write after a move this cannot follow is refused by the fence above,
+    // so every call that reaches here has its writes placed.
+    let placed = outside.is_empty();
     let policy = resolve(&tc.name, is_builtin);
     // A shell redirect writes a file, and no tool name says so. Clamping by
     // the write tool's own policy is what stops `echo x > f` being a spelling
@@ -2863,24 +2862,25 @@ pub(crate) mod tests {
         assert!(wrote, "{unlimited}");
     }
 
-    /// A relative redirect after a move that is not followed: a stage with
-    /// write paths refuses it; one without asks about it, offering no grant
-    /// and covered by none, and an allowing policy lets it run.
+    /// A write after a move that is not followed, or through a program that
+    /// writes outside the workdir, is refused by the fence before any policy
+    /// is asked: an allowing policy (what an autonomous run resolves to) does
+    /// not let it run, a grant covering every key on the line does not
+    /// either, and a stage with write paths refuses it the same way. The
+    /// live case: `cd /tmp && rm -rf uidtest && mkdir uidtest` ran under an
+    /// allowing policy because the unfollowed `cd` was left to it.
     #[test]
-    fn an_unplaced_redirect_asks_without_write_paths_and_is_refused_with_them() {
+    fn an_unplaced_or_escaping_write_is_refused_before_policy() {
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
-        let line = call(
-            "c1",
-            "shell",
-            serde_json::json!({ "command": "cd $DIR && make > log" }),
-        );
         let mut grants = leviath_runtime::pipeline::ToolGrants::default();
         grants.grant(
             Some(ApprovalScope::Run),
             &[
                 "shell:cd".to_string(),
                 "shell:make".to_string(),
+                "shell:rm".to_string(),
+                "shell:mkdir".to_string(),
                 ">log".to_string(),
             ],
         );
@@ -2895,29 +2895,41 @@ pub(crate) mod tests {
             unlimited_writes(),
             HashMap::new(),
         );
-        assert_eq!(
-            decide_call(&asking, &line, &ctx),
-            ToolVerdict::Ask {
-                keys: Vec::new(),
-                charge: 0
-            },
-            "asked once, with nothing a grant could cover"
-        );
         let allowing = state_with_writes(&root, unlimited_writes());
-        assert_eq!(
-            decide_call(&allowing, &line, &ctx),
-            ToolVerdict::Run { charge: 0 },
-            "an allowing policy lets it run"
-        );
         let mut fenced = (*allowing).clone();
         fenced.stage_write_fences = Arc::new(vec![leviath_core::write_paths::WriteFence::new(&[
             vec!["docs/**".to_string()],
         ])]);
-        let refused = matches!(
-            decide_call(&Arc::new(fenced), &line, &ctx),
-            ToolVerdict::Refuse(text) if text.contains("may change directory")
+        let fenced = Arc::new(fenced);
+        for (command, why) in [
+            (
+                "cd $DIR && make > log",
+                "after a move that cannot be followed",
+            ),
+            (
+                "cd /tmp && rm -rf uidtest && mkdir uidtest",
+                "outside the working directory",
+            ),
+        ] {
+            let line = call("c1", "shell", serde_json::json!({ "command": command }));
+            for state in [&asking, &allowing, &fenced] {
+                let refused = matches!(
+                    decide_call(state, &line, &ctx),
+                    ToolVerdict::Refuse(text) if text.contains(why)
+                );
+                assert!(refused, "{command}: refused before policy");
+            }
+        }
+        // The control: the same programs inside the workdir answer to policy.
+        let inside = call(
+            "c2",
+            "shell",
+            serde_json::json!({ "command": "mkdir -p build && make > build/log" }),
         );
-        assert!(refused, "refused where write paths are set");
+        assert_eq!(
+            decide_call(&allowing, &inside, &ctx),
+            ToolVerdict::Run { charge: 0 }
+        );
     }
 
     // ─── Write ceilings ──────────────────────────────────────────────────────
