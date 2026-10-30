@@ -455,10 +455,10 @@ mod tests {
             );
         }
         // A field of the wrong type is refused as any tool's argument is.
-        assert!(matches!(
+        assert_ne!(
             validate_tool_args(SUBMIT_OUTPUT_TOOL, &merged, &json!({"files": "a.rs"})),
-            ArgValidation::Invalid(_)
-        ));
+            ArgValidation::Valid
+        );
     }
 
     /// `definitions`, the older spelling of `$defs`, travels the same way.
@@ -481,7 +481,11 @@ mod tests {
         for schema in [json!({"type": "array"}), json!({"type": "string"})] {
             assert!(submit_output_parameters(&submit_parameters(), &schema).is_none());
         }
-        for parameters in [json!("text"), json!({"type": "object"})] {
+        for parameters in [
+            json!("text"),
+            json!({"type": "object"}),
+            json!({"type": "object", "properties": "content"}),
+        ] {
             assert!(submit_output_parameters(&parameters, &object).is_none());
         }
         // Parameters with no `content` of their own still gain the fields.
