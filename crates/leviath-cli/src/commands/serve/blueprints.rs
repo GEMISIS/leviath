@@ -2010,9 +2010,14 @@ layout = { total_budget_tokens = 1000, regions = [{ name = "system", kind = "pin
         );
 
         // The same manifest judged from somewhere that has no such tools/ is
-        // exactly the failure users hit.
+        // exactly the failure users hit. Under an empty `LEVIATH_HOME`, so a
+        // `web_search` the developer running this has installed globally
+        // cannot resolve the grant either.
         let elsewhere = tempfile::tempdir().unwrap();
-        let unrooted = validate_manifest_text(manifest, elsewhere.path());
+        let home = tempfile::tempdir().unwrap();
+        let unrooted = temp_env::with_var("LEVIATH_HOME", Some(home.path()), || {
+            validate_manifest_text(manifest, elsewhere.path())
+        });
         assert!(!unrooted.valid);
         let errors = unrooted.errors.expect("the grant resolves to nothing");
         assert!(errors[0].contains("unknown-tool"), "{errors:?}");

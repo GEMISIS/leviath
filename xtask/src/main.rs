@@ -5,6 +5,7 @@
 //! Subcommands:
 //!   `coverage`                  Gate every workspace package at a hard 100%.
 //!   `coverage --package <pkg>`  Gate just one package (the CI per-package fan-out).
+//!   `coverage --skip <test>`    Skip a test the machine can't run (repeatable; not for CI).
 //!   `version <X.Y.Z>`           Move the workspace version and roll the changelog.
 //!   `version --check`           Verify the version declarations agree (CI runs this).
 //!   `docs`                      Check `docs/content/` for dead links and bad frontmatter.
@@ -120,6 +121,7 @@ pub fn dispatch_with(
             println!("Subcommands:");
             println!("  coverage                  Gate every workspace package at 100%%");
             println!("  coverage --package <pkg>  Gate one package (CI per-package fan-out)");
+            println!("  coverage --skip <test>    Skip a test the machine can't run (repeatable)");
             println!("  version <X.Y.Z>           Move the workspace version, roll the changelog");
             println!("  version --check           Verify the version declarations agree");
             println!("  structure                 Hold every file to the production-line limit");
@@ -201,7 +203,7 @@ mod tests {
     /// this single coverage hit.
     #[test]
     fn stub_returns_ok() {
-        assert!(cov_ok(CoverageMode::All).is_ok());
+        assert!(cov_ok(CoverageMode::default()).is_ok());
         assert!(ver_ok(VersionMode::Check).is_ok());
         assert!(docs_ok(docs::DocsMode::Check).is_ok());
         assert!(struct_ok(structure::StructureMode::Check).is_ok());
@@ -273,7 +275,7 @@ mod tests {
             (prices_ok, mod_ok, windows_ok),
         )
         .unwrap();
-        assert_eq!(got, Some(CoverageMode::All));
+        assert_eq!(got, Some(CoverageMode::default()));
     }
 
     #[test]
@@ -291,7 +293,13 @@ mod tests {
             (prices_ok, mod_ok, windows_ok),
         )
         .unwrap();
-        assert_eq!(got, Some(CoverageMode::Package("leviath-core".to_owned())));
+        assert_eq!(
+            got,
+            Some(CoverageMode {
+                package: Some("leviath-core".to_owned()),
+                skips: Vec::new(),
+            })
+        );
     }
 
     #[test]

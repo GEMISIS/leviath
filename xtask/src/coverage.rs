@@ -75,34 +75,47 @@ impl Runner for RealRunner {
 
 // ── Coverage mode (CLI argument parsing) ──────────────────────────────────────
 
-/// Which packages to gate, parsed from the arguments following
-/// `cargo xtask coverage`.
-#[derive(Debug, PartialEq, Eq)]
-pub enum CoverageMode {
-    /// No arguments: gate every workspace package (local-dev full check).
-    All,
+/// What to gate, parsed from the arguments following `cargo xtask coverage`.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct CoverageMode {
     /// `--package <pkg>`: gate exactly one package (the CI per-package fan-out -
-    /// each package runs on its own runner, in parallel).
-    Package(String),
+    /// each package runs on its own runner, in parallel). `None` gates every
+    /// workspace package (the local-dev full check).
+    pub package: Option<String>,
+    /// `--skip <name>`, repeatable: handed to the test binary as `--skip
+    /// <name>`, for a test a machine cannot run. A skipped test leaves its code
+    /// uncovered, so a skip is for diagnosis, never for CI.
+    pub skips: Vec<String>,
 }
 
 impl CoverageMode {
     /// Parse the arguments that follow the `coverage` subcommand.
     pub fn parse(args: &[String]) -> Result<Self> {
-        match args.first().map(String::as_str) {
-            None => Ok(Self::All),
-            Some("--package") => {
-                let pkg = args.get(1).context(
-                    "`--package` requires a package name, e.g. \
-                     `cargo xtask coverage --package leviath-core`",
-                )?;
-                Ok(Self::Package(pkg.clone()))
+        let mut mode = Self::default();
+        let mut rest = args.iter();
+        while let Some(arg) = rest.next() {
+            match arg.as_str() {
+                "--package" => {
+                    let pkg = rest.next().context(
+                        "`--package` requires a package name, e.g. \
+                         `cargo xtask coverage --package leviath-core`",
+                    )?;
+                    mode.package = Some(pkg.clone());
+                }
+                "--skip" => {
+                    let name = rest.next().context(
+                        "`--skip` requires a test name, e.g. \
+                         `cargo xtask coverage --skip daemon::starter::tests::some_test`",
+                    )?;
+                    mode.skips.push(name.clone());
+                }
+                other => anyhow::bail!(
+                    "unknown `coverage` argument `{other}` (expected `--package <pkg>` \
+                     and/or `--skip <test>`)"
+                ),
             }
-            Some(other) => anyhow::bail!(
-                "unknown `coverage` argument `{other}` (expected no arguments or \
-                 `--package <pkg>`)"
-            ),
         }
+        Ok(mode)
     }
 }
 
@@ -113,19 +126,19 @@ pub fn run(mode: CoverageMode) -> Result<()> {
 }
 
 pub fn run_with(runner: &dyn Runner, mode: CoverageMode) -> Result<()> {
-    match mode {
-        CoverageMode::All => run_all(runner),
-        CoverageMode::Package(pkg) => gate_package(runner, &pkg),
+    match &mode.package {
+        None => run_all(runner, &mode.skips),
+        Some(pkg) => gate_package(runner, pkg, &mode.skips),
     }
 }
 
 /// Gate every workspace package in turn (local-dev convenience). CI gates each
 /// package on its own runner via `--package` instead.
-fn run_all(runner: &dyn Runner) -> Result<()> {
+fn run_all(runner: &dyn Runner, skips: &[String]) -> Result<()> {
     let meta = runner.cargo_metadata()?;
     let packages = parse_workspace_packages(&meta);
     for pkg in &packages {
-        gate_package(runner, pkg)?;
+        gate_package(runner, pkg, skips)?;
     }
     println!("[coverage] All {} package(s) at 100%. ✓", packages.len());
     Ok(())
@@ -135,10 +148,10 @@ fn run_all(runner: &dyn Runner) -> Result<()> {
 /// own `--fail-under-*` thresholds, writing its browsable HTML to
 /// `coverage/html/<pkg>`. Returns an error if the package is below 100% (or its
 /// build/tests fail).
-fn gate_package(runner: &dyn Runner, pkg: &str) -> Result<()> {
+fn gate_package(runner: &dyn Runner, pkg: &str, skips: &[String]) -> Result<()> {
     println!("[coverage] Gating {pkg} at 100%…");
     let html_dir = format!("coverage/html/{pkg}");
-    let args = [
+    let mut args = vec![
         "llvm-cov",
         "--package",
         pkg,
@@ -155,6 +168,14 @@ fn gate_package(runner: &dyn Runner, pkg: &str) -> Result<()> {
         "--output-dir",
         &html_dir,
     ];
+    if !skips.is_empty() {
+        // Everything after `--` goes to the test binary.
+        args.push("--");
+        for name in skips {
+            args.push("--skip");
+            args.push(name);
+        }
+    }
     if !runner.cargo(&args)? {
         // Say *what* is uncovered, not just that something is. "Open the HTML
         // report" is useless on a CI runner, whose filesystem nobody will ever
@@ -408,15 +429,37 @@ mod tests {
 
     #[test]
     fn parse_no_args_is_all() {
-        assert_eq!(CoverageMode::parse(&[]).unwrap(), CoverageMode::All);
+        assert_eq!(CoverageMode::parse(&[]).unwrap(), CoverageMode::default());
     }
 
     #[test]
     fn parse_package_captures_name() {
         assert_eq!(
             CoverageMode::parse(&["--package".to_owned(), "leviath-core".to_owned()]).unwrap(),
-            CoverageMode::Package("leviath-core".to_owned())
+            CoverageMode {
+                package: Some("leviath-core".to_owned()),
+                skips: Vec::new(),
+            }
         );
+    }
+
+    #[test]
+    fn parse_skip_collects_every_name_beside_a_package() {
+        let args: Vec<String> = ["--skip", "a::b", "--package", "leviath-cli", "--skip", "c"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(
+            CoverageMode::parse(&args).unwrap(),
+            CoverageMode {
+                package: Some("leviath-cli".to_owned()),
+                skips: vec!["a::b".to_owned(), "c".to_owned()],
+            }
+        );
+    }
+
+    #[test]
+    fn parse_skip_without_name_errs() {
+        assert!(CoverageMode::parse(&["--skip".to_owned()]).is_err());
     }
 
     #[test]
@@ -434,7 +477,7 @@ mod tests {
     #[test]
     fn gate_package_builds_native_fail_under_invocation() {
         let m = MockRunner::new(true, meta_with(&[]));
-        gate_package(&m, "leviath-core").unwrap();
+        gate_package(&m, "leviath-core", &[]).unwrap();
         let calls = m.calls.borrow();
         assert_eq!(calls.len(), 1);
         let a = &calls[0];
@@ -448,9 +491,26 @@ mod tests {
     }
 
     #[test]
+    fn gate_package_passes_skips_through_to_the_test_binary() {
+        let m = MockRunner::new(true, meta_with(&[]));
+        gate_package(&m, "leviath-cli", &["a::b".to_owned(), "c".to_owned()]).unwrap();
+        let calls = m.calls.borrow();
+        let a = &calls[0];
+        let at = a.iter().position(|x| x == "--").expect("a separator");
+        assert_eq!(a[at..], ["--", "--skip", "a::b", "--skip", "c"]);
+    }
+
+    #[test]
+    fn gate_package_without_skips_has_no_separator() {
+        let m = MockRunner::new(true, meta_with(&[]));
+        gate_package(&m, "leviath-cli", &[]).unwrap();
+        assert!(!m.calls.borrow()[0].iter().any(|x| x == "--"));
+    }
+
+    #[test]
     fn gate_package_bails_when_below_100() {
         let m = MockRunner::new(false, meta_with(&[]));
-        let err = gate_package(&m, "leviath-core").unwrap_err();
+        let err = gate_package(&m, "leviath-core", &[]).unwrap_err();
         assert!(err.to_string().contains("leviath-core"));
     }
 
@@ -468,7 +528,7 @@ mod tests {
                 "leviath",
             ]),
         );
-        run_with(&m, CoverageMode::All).unwrap();
+        run_with(&m, CoverageMode::default()).unwrap();
         let calls = m.calls.borrow();
         assert_eq!(calls.len(), 2, "one gate call per gated package");
         assert!(
@@ -493,7 +553,7 @@ mod tests {
     #[test]
     fn run_all_propagates_a_failing_package() {
         let m = MockRunner::new(false, meta_with(&["leviath-core"]));
-        assert!(run_with(&m, CoverageMode::All).is_err());
+        assert!(run_with(&m, CoverageMode::default()).is_err());
     }
 
     // ── parse_workspace_packages ───────────────────────────────────────────────
