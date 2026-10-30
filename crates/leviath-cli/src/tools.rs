@@ -1588,8 +1588,10 @@ mod policy_tests {
         };
         let live = refused("cd /tmp && rm -rf uidtest && mkdir uidtest && echo x > project.godot");
         assert!(
-            live.contains("Shell `rm` writes to 'uidtest', which may land at '/tmp/uidtest'")
-                && live.contains("outside the working directory"),
+            // `/tmp` is a rooted path with no drive on Windows, where `cd`
+            // lands it at `C:\tmp`; the spelling differs, the escape does not.
+            live.contains("Shell `rm` writes to 'uidtest', which may land at '")
+                && live.contains("uidtest', outside the working directory"),
             "{live}"
         );
         let later = refused("cd /tmp/uidtest && echo x > bad.log");
