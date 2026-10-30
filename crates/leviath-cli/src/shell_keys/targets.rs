@@ -325,8 +325,7 @@ impl Placer<'_> {
 /// Whether a brace list could expand to somewhere other than under the word's
 /// own prefix: `{a,b}` stays put, `{..,x}/y`, `{/tmp,x}` and `{~,x}` do not.
 fn brace_escapes(text: &str) -> bool {
-    let brace = text.contains('{') && (text.contains(',') || text.contains(".."));
-    brace
+    text.contains('{')
         && (text.contains("..") || text.contains("{/") || text.contains(",/") || text.contains('~'))
 }
 
