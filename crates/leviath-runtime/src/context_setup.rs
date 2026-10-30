@@ -21,6 +21,9 @@ pub fn region_from_def(def: &RegionDef, budget: usize) -> Region {
     );
     region.summarizable = def.summarizable;
     region.admission = def.admission;
+    region.evict_to = def
+        .evict_to
+        .unwrap_or(leviath_core::region::DEFAULT_EVICT_TO);
     region.volatility = def.volatility;
     region.accepts = def.accepts.iter().map(|m| m.to_string()).collect();
     region.description = def.description.clone();
@@ -164,6 +167,7 @@ fn swap_layout(window: &mut ContextWindow, declared: Vec<Region>) {
         );
         carried.summarizable = existing.summarizable;
         carried.admission = existing.admission;
+        carried.evict_to = existing.evict_to;
         carried.volatility = existing.volatility;
         carried.description = existing.description.clone();
         carried.describe_in_prompt = existing.describe_in_prompt;
@@ -715,6 +719,7 @@ mod tests {
             seed: None,
             accepts: vec![crate::spec::names::MimePattern::new("image/*").unwrap()],
             on_continue: None,
+            evict_to: None,
         }
     }
 
@@ -811,7 +816,25 @@ mod tests {
             assert!(!region.summarizable && region.describe_in_prompt);
             assert_eq!(region.accepts, vec!["image/*".to_string()]);
             assert_eq!(region.description.as_deref(), Some("d"));
+            assert_eq!(region.evict_to, leviath_core::region::DEFAULT_EVICT_TO);
         }
+    }
+
+    /// A declared `evict_to` reaches the window's region, and travels with it
+    /// across a layout swap like every other setting the declaration made.
+    #[test]
+    fn a_regions_low_water_mark_reaches_the_window_and_survives_a_swap() {
+        let mut declared = def(Kind::Temporary);
+        declared.evict_to = Some(0.5);
+        let resolved = region_from_def(&declared, 1000);
+        assert_eq!(resolved.evict_to, 0.5);
+        assert_eq!(resolved.low_water(), 500);
+
+        let bp = graph_with(vec![region("task", RegionKind::Pinned, 5000)]);
+        let mut window = seeded_window(bp, "the task");
+        window.get_region_mut("conversation").unwrap().evict_to = 0.5;
+        swap_to(&mut window, vec![region("task", RegionKind::Pinned, 5000)]);
+        assert_eq!(window.get_region("conversation").unwrap().evict_to, 0.5);
     }
 
     #[test]

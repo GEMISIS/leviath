@@ -2257,6 +2257,15 @@
             "null"
           ]
         },
+        "evict_to": {
+          "default": null,
+          "description": "The share of its budget a region that rolls its oldest entries off\ndrops back to when a write does not fit, so the prompt's prefix stays\nput for the writes after it. A fraction from 0 to 1; unset is 0.75.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
         "kind": {
           "$ref": "#/$defs/RegionKind",
           "description": "How it keeps and drops entries."

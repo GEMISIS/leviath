@@ -120,7 +120,7 @@ pub(crate) use compaction::{
 };
 pub use compaction::{CompactionSettings, is_stage_specific};
 mod tool_results;
-pub(crate) use tool_results::{ToolResults, apply_one_tool_result, collect_tools};
+pub(crate) use tool_results::{RoutedCall, ToolResults, apply_one_tool_result, collect_tools};
 #[cfg(test)]
 pub(crate) use tool_results::{
     annotate_path_errors, apply_file_tracking, apply_tool_results, stage_modifying_tools,

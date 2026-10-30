@@ -190,21 +190,36 @@ pub(crate) fn apply_tool_results_with_parts(
     super::part_routing::store_routed(window, &routed);
 
     for (tool_call_id, result) in tool_results {
-        let tool_name = tool_calls
-            .iter()
-            .find(|tc| tc.tool_id == *tool_call_id)
-            .map(|tc| tc.name.clone())
-            .unwrap_or_default();
+        let call = tool_calls.iter().find(|tc| tc.tool_id == *tool_call_id);
         apply_one_tool_result(
             window,
-            &tool_name,
-            tool_call_id,
+            RoutedCall {
+                name: call.map(|tc| tc.name.as_str()).unwrap_or_default(),
+                id: tool_call_id,
+                arguments: call.map(|tc| &tc.arguments),
+            },
             result.clone(),
             routing,
             sensitivities,
             reply.sink,
         );
     }
+}
+
+/// The call a landing tool result answers.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RoutedCall<'a> {
+    /// The tool's name as the model called it.
+    pub name: &'a str,
+    /// The call's id, which the `tool_result` left in the conversation pairs
+    /// with its `tool_use`.
+    pub id: &'a str,
+    /// The call's arguments, when the caller has them. They key the result
+    /// in the region it is routed to (see
+    /// [`result_key`](leviath_core::tool_routing::result_key)), so the same
+    /// call again replaces its earlier result. `None` appends, as a result
+    /// with no arguments to be keyed by always did.
+    pub arguments: Option<&'a serde_json::Value>,
 }
 
 /// Land one tool result: cap it, route it, and leave the pointer that says where
@@ -217,8 +232,7 @@ pub(crate) fn apply_tool_results_with_parts(
 /// equal to the first.
 pub(crate) fn apply_one_tool_result(
     window: &mut ContextWindow,
-    tool_name: &str,
-    tool_call_id: &str,
+    call: RoutedCall<'_>,
     result: leviath_core::region::EntryContent,
     routing: Option<&crate::spec::graph::ToolRoutingDef>,
     sensitivities: Option<&std::collections::HashMap<String, leviath_core::TaintLevel>>,
@@ -232,13 +246,20 @@ pub(crate) fn apply_one_tool_result(
         true => result.into_string(),
         false => result.inline_text(),
     };
-    let tool_name = tool_name.to_string();
-    let tool_call_id = tool_call_id.to_string();
+    let tool_name = call.name.to_string();
+    let tool_call_id = call.id.to_string();
 
     // The tool's own ceiling when it has one, else the stage's. Both sides
     // canonicalized: the author writes `bash`, the model calls `shell`, and a
     // literal comparison would silently miss in either direction.
     let canon = leviath_tools::canonical_tool_name;
+    // What the result is filed under in its region, when the call has a path
+    // to file it by: a second read of one file replaces the first rather than
+    // joining it, which is what keeps a full region from rewriting its prefix
+    // for a read whose bytes it already holds.
+    let key = call
+        .arguments
+        .and_then(|args| leviath_core::tool_routing::result_key(&tool_name, args, canon));
     let tool_cap = routing.and_then(|r| {
         leviath_core::tool_routing::per_tool(
             r.tool_max_result_tokens
@@ -325,6 +346,7 @@ pub(crate) fn apply_one_tool_result(
                 kind: leviath_core::EntryKind::Text,
                 taint,
                 origin: crate::components::WriteOrigin::Agent,
+                key: key.as_deref(),
             },
             target_region,
             result_content,
@@ -348,6 +370,11 @@ struct WindowSink<'w> {
     kind: leviath_core::EntryKind,
     taint: Option<leviath_core::TaintLevel>,
     origin: crate::components::WriteOrigin,
+    /// The key the result is filed under, so a write replaces what the same
+    /// call stored before. The truncated copy and the `[result omitted]`
+    /// marker a full region falls back to go under it too: they are the
+    /// same result, however much of it survived.
+    key: Option<&'w str>,
 }
 
 impl<'w> WindowSink<'w> {
@@ -365,6 +392,7 @@ impl<'w> WindowSink<'w> {
             kind,
             taint,
             origin: crate::components::WriteOrigin::System,
+            key: None,
         }
     }
 }
@@ -375,17 +403,20 @@ impl leviath_core::tool_routing::ResultSink for WindowSink<'_> {
         content: leviath_core::region::EntryContent,
         tokens: usize,
     ) -> leviath_core::Result<()> {
-        self.window.typed_write_content(
-            crate::components::TypedWrite {
-                cause: Some(leviath_core::ContextCause::ToolResult),
-                origin: self.origin,
-                region: self.region,
-                kind: self.kind.clone(),
-                taint: self.taint,
-            },
-            content,
-            tokens,
-        )
+        self.window
+            .typed_write_keyed(
+                crate::components::TypedWrite {
+                    cause: Some(leviath_core::ContextCause::ToolResult),
+                    origin: self.origin,
+                    region: self.region,
+                    kind: self.kind.clone(),
+                    taint: self.taint,
+                },
+                self.key,
+                content,
+                tokens,
+            )
+            .map(|_| ())
     }
 
     fn room(&self) -> usize {

@@ -13,7 +13,7 @@
 
 use leviath_core::context::PartBlock;
 use leviath_core::mime::Part;
-use leviath_core::region::EntryContent;
+use leviath_core::region::{EntryContent, KeyedWrite};
 use leviath_providers::ContentBlock;
 
 impl super::ContextWindow {
@@ -342,6 +342,28 @@ impl super::ContextWindow {
         content: EntryContent,
         tokens: usize,
     ) -> leviath_core::Result<()> {
+        self.typed_write_keyed(write, None, content, tokens)
+            .map(|_| ())
+    }
+
+    /// [`typed_write_content`](Self::typed_write_content), filing the entry
+    /// under `key` when there is one: the entry the key already holds is
+    /// replaced, or left exactly as it is when this write is the same
+    /// content, the way
+    /// [`Region::replace_keyed_entry`](leviath_core::Region::replace_keyed_entry)
+    /// says. A write with no key is appended, and reports itself as
+    /// [`KeyedWrite::Added`].
+    ///
+    /// Shared core of every typed write: run the `on_write` seam with the
+    /// caller's origin, then insert the entry with its kind and its taint
+    /// level when given, honouring a key override from the hook.
+    pub(crate) fn typed_write_keyed(
+        &mut self,
+        write: super::TypedWrite<'_>,
+        key: Option<&str>,
+        content: EntryContent,
+        tokens: usize,
+    ) -> leviath_core::Result<KeyedWrite> {
         let super::TypedWrite {
             cause,
             origin,
@@ -364,21 +386,49 @@ impl super::ContextWindow {
         } else {
             rewritten(content, text)
         };
-        self.write_to_region(cause, region_name, before, tokens, &mut |region, tokens| {
-            match taint {
-                Some(level) => {
-                    region.add_typed_tainted_entry(content.clone(), tokens, kind.clone(), level)?;
+        let mut written = KeyedWrite::Added;
+        self.write_to_region(
+            cause,
+            region_name,
+            before,
+            tokens,
+            key.is_some(),
+            &mut |region, tokens| {
+                // A region with taint tracking off ignores the level, so
+                // `Public` stands in for "none given" on the keyed path.
+                let level = taint.unwrap_or(leviath_core::TaintLevel::Public);
+                match (key, taint) {
+                    (Some(key), _) => {
+                        written = region.replace_keyed_entry(
+                            key,
+                            content.clone(),
+                            tokens,
+                            kind.clone(),
+                            level,
+                        )?;
+                    }
+                    (None, Some(level)) => {
+                        region.add_typed_tainted_entry(
+                            content.clone(),
+                            tokens,
+                            kind.clone(),
+                            level,
+                        )?;
+                    }
+                    (None, None) => {
+                        region.add_typed_entry(content.clone(), tokens, kind.clone())?;
+                    }
                 }
-                None => region.add_typed_entry(content.clone(), tokens, kind.clone())?,
-            }
-            // A key override from the hook names the entry just pushed.
-            if let Some(key) = key_override.as_deref()
-                && let Some(entry) = region.content.last_mut()
-            {
-                entry.key = Some(key.to_string());
-            }
-            Ok(())
-        })
+                // A key override from the hook names the entry just pushed.
+                if let Some(key) = key_override.as_deref()
+                    && let Some(entry) = region.content.last_mut()
+                {
+                    entry.key = Some(key.to_string());
+                }
+                Ok(())
+            },
+        )?;
+        Ok(written)
     }
 }
 
@@ -394,7 +444,7 @@ mod writer_tests {
     use super::super::ContextWindow;
     use leviath_core::EntryKind;
     use leviath_core::mime::{Blob, BlobStore, MemoryBlobStore, MimeRegistry, MimeType, Part};
-    use leviath_core::region::{EntryContent, Region, RegionKind};
+    use leviath_core::region::{EntryContent, KeyedWrite, Region, RegionKind};
     use std::sync::Arc;
 
     fn stored_png() -> Part {
@@ -402,6 +452,37 @@ mod writer_tests {
         let blob = Blob::new(MimeType::parse("image/png").unwrap(), vec![1, 2, 3]).named("a.png");
         let r = MemoryBlobStore::new().put("r", &blob, &reg).unwrap();
         Part::stored(r).named("a.png")
+    }
+
+    /// A keyed write through the window is the region's own
+    /// `replace_keyed_entry`: a repeat of the same bytes leaves the window
+    /// exactly as it was, revision included.
+    #[test]
+    fn a_keyed_write_of_the_same_bytes_changes_nothing() {
+        let mut window = ContextWindow::new(10_000);
+        window.add_region(Region::new("codebase".into(), RegionKind::Temporary, 1_000));
+        let write = |window: &mut ContextWindow, body: &str| {
+            window.typed_write_keyed(
+                super::super::TypedWrite {
+                    cause: Some(leviath_core::ContextCause::ToolResult),
+                    origin: super::super::WriteOrigin::Agent,
+                    region: "codebase",
+                    kind: EntryKind::Text,
+                    taint: Some(leviath_core::TaintLevel::Public),
+                },
+                Some("read_file a.rs"),
+                EntryContent::text(body),
+                3,
+            )
+        };
+        assert_eq!(write(&mut window, "fn a()").unwrap(), KeyedWrite::Added);
+        let before = window.get_region("codebase").unwrap().clone();
+        assert_eq!(write(&mut window, "fn a()").unwrap(), KeyedWrite::Unchanged);
+        let after = window.get_region("codebase").unwrap();
+        assert_eq!(after.content.len(), 1);
+        assert_eq!(after.content[0].content, before.content[0].content);
+        assert_eq!(after.current_tokens, before.current_tokens);
+        assert_eq!(window.current_tokens, 3);
     }
 
     fn custom_window(src: &str) -> ContextWindow {

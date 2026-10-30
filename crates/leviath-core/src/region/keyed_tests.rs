@@ -360,3 +360,159 @@ fn a_temporary_region_renders_its_description_when_asked() {
     crate::context::push_region_blocks(&mut described, &region);
     assert_eq!(described[0].text, "[scratch]:\nThrowaway notes.\n\nworking");
 }
+
+// ─── replace_keyed_entry: a result the same call produced again ─────────────
+
+fn growing(max_tokens: usize) -> Region {
+    Region::new(
+        "codebase".to_string(),
+        RegionKind::Compacting {
+            threshold_tokens: max_tokens,
+        },
+        max_tokens,
+    )
+}
+
+fn replace(region: &mut Region, key: &str, body: &str, tokens: usize) -> KeyedWrite {
+    region
+        .replace_keyed_entry(
+            key,
+            EntryContent::text(body),
+            tokens,
+            EntryKind::Text,
+            crate::taint::TaintLevel::Public,
+        )
+        .unwrap()
+}
+
+fn held(region: &Region) -> Vec<&str> {
+    region.content.iter().map(|e| e.content.as_str()).collect()
+}
+
+/// Re-reading a path leaves one entry, not two: the same content stays
+/// exactly where it was, and changed content replaces it as the newest.
+#[test]
+fn a_repeated_read_leaves_one_entry_under_its_key() {
+    let mut region = growing(100);
+    assert_eq!(
+        replace(&mut region, "read_file a.rs", "fn a() {}", 10),
+        KeyedWrite::Added
+    );
+    assert_eq!(
+        replace(&mut region, "read_file b.rs", "fn b() {}", 10),
+        KeyedWrite::Added
+    );
+    let first_seq = region.get_by_key("read_file a.rs").unwrap().seq;
+
+    // The same bytes again: nothing moves, so the prompt is what it was, but
+    // the entry counts as the most recently written.
+    assert_eq!(
+        replace(&mut region, "read_file a.rs", "fn a() {}", 10),
+        KeyedWrite::Unchanged
+    );
+    assert_eq!(held(&region), ["fn a() {}", "fn b() {}"]);
+    assert_eq!(region.current_tokens, 20);
+    assert!(region.get_by_key("read_file a.rs").unwrap().seq > first_seq);
+
+    // The file changed: the earlier copy goes and the new one is the newest.
+    assert_eq!(
+        replace(&mut region, "read_file a.rs", "fn a() { 1 }", 12),
+        KeyedWrite::Replaced
+    );
+    assert_eq!(held(&region), ["fn b() {}", "fn a() { 1 }"]);
+    assert_eq!(region.current_tokens, 22);
+    assert_eq!(region.keys(), ["read_file b.rs", "read_file a.rs"]);
+}
+
+/// The same text under a different kind is a different entry: a tool result
+/// and a plain note are not interchangeable to the assembler.
+#[test]
+fn the_same_text_with_another_kind_replaces_rather_than_matches() {
+    let mut region = growing(100);
+    replace(&mut region, "k", "body", 4);
+    let written = region
+        .replace_keyed_entry(
+            "k",
+            EntryContent::text("body"),
+            4,
+            EntryKind::UserMessage,
+            crate::taint::TaintLevel::Public,
+        )
+        .unwrap();
+    assert_eq!(written, KeyedWrite::Replaced);
+    assert_eq!(region.content.len(), 1);
+    assert_eq!(region.content[0].kind, EntryKind::UserMessage);
+}
+
+/// The freed tokens of the replaced entry count as room, and the taint vector
+/// follows the entries so a tracked region stays aligned with its content.
+#[test]
+fn a_replacement_reuses_the_room_its_predecessor_held() {
+    let mut region = growing(100);
+    region.enable_taint_tracking();
+    replace(&mut region, "old", "o", 30);
+    replace(&mut region, "k", "first", 60);
+    // 90 held; a 50-token replacement of `k` fits once `first` (60) is gone
+    // without evicting `old`.
+    assert_eq!(
+        replace(&mut region, "k", "second", 50),
+        KeyedWrite::Replaced
+    );
+    assert_eq!(held(&region), ["o", "second"]);
+    assert_eq!(region.current_tokens, 80);
+    assert_eq!(region.taint.as_ref().unwrap().entry_count(), 2);
+}
+
+/// Content the region does not take is refused before anything goes, so the
+/// earlier copy under the key is still there.
+#[test]
+fn a_refused_replacement_keeps_the_earlier_entry() {
+    use crate::mime::{Blob, BlobStore, MemoryBlobStore, MimeRegistry, MimeType, Part};
+
+    let mut region = growing(100);
+    region.accepts = vec!["text/*".to_string()];
+    replace(&mut region, "k", "text", 4);
+    let blob = Blob::new(MimeType::parse("image/png").unwrap(), vec![1, 2, 3]);
+    let stored = MemoryBlobStore::new()
+        .put("r", &blob, &MimeRegistry::builtin())
+        .unwrap();
+    let png = EntryContent::from_parts(vec![Part::text("caption"), Part::stored(stored)]);
+    let err = region
+        .replace_keyed_entry(
+            "k",
+            png,
+            4,
+            EntryKind::Text,
+            crate::taint::TaintLevel::Public,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, crate::error::Error::RegionRefusedWrite { .. }),
+        "{err}"
+    );
+    assert_eq!(held(&region), ["text"]);
+}
+
+/// A replacement larger than the whole region fits nowhere even with the
+/// earlier copy gone: the key is left empty for the caller's truncated copy,
+/// which is exactly what a first write that size would get.
+#[test]
+fn a_replacement_that_fits_nowhere_leaves_the_key_empty() {
+    let mut region = growing(100);
+    replace(&mut region, "k", "small", 10);
+    let err = region
+        .replace_keyed_entry(
+            "k",
+            EntryContent::text("enormous"),
+            500,
+            EntryKind::Text,
+            crate::taint::TaintLevel::Public,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, crate::error::Error::TokenBudgetExceeded { .. }),
+        "{err}"
+    );
+    assert!(region.get_by_key("k").is_none());
+    assert!(region.content.is_empty());
+}

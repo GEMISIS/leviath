@@ -267,6 +267,7 @@ Each `[[graph.layout.regions]]` entry:
 | `accepts` | any | Mime types a part in it may carry, such as `["image/*"]`. |
 | `volatility` | `"rewritten"` | How often it changes, for prompt caching. |
 | `admission` | `"evict"` | What happens to an entry that does not fit. |
+| `evict_to` | `0.75` | The share of its budget a region that evicts drops back to when full. |
 | `compact_at` | 80% of the budget | The share of its budget at which a compacting region is summarized. |
 | `summarizable` | `true` | Whether compaction may summarize it. |
 | `description`, `describe_in_prompt` | none, `false` | What it is for, and whether the model is told. |

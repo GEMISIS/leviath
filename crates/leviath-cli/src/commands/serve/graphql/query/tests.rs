@@ -1493,6 +1493,7 @@ async fn every_mirrored_input_is_one_a_client_can_write() {
                        volatility: { ne: STABLE }
                        admission: { in: [EVICT] }
                        compactAt: { isNull: true }
+                       evictTo: { isNull: true }
                        accepts: { has: "text/plain" }
                        maxItems: { isNull: true }
                        strategy: { isNull: true }

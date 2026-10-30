@@ -9218,6 +9218,104 @@ fn a_per_tool_ceiling_is_matched_by_canonical_name() {
     );
 }
 
+// ── Re-reads replace rather than append ──
+
+/// A tool call with arguments, which is what keys its routed result.
+fn tc_with(id: &str, name: &str, arguments: serde_json::Value) -> crate::components::ToolCall {
+    crate::components::ToolCall {
+        tool_id: id.to_string(),
+        name: name.to_string(),
+        arguments,
+        thought_signature: None,
+    }
+}
+
+/// A window whose `codebase` is the issue's region: compacting, routed to by
+/// `read_file`, with no compaction model behind it.
+fn codebase_window() -> ContextWindow {
+    let mut w = ctx(&[("conversation", 1_000_000)]);
+    w.add_region(Region::new(
+        "codebase".to_string(),
+        RegionKind::Compacting {
+            threshold_tokens: 1_000_000,
+        },
+        1_000_000,
+    ));
+    w
+}
+
+fn land(w: &mut ContextWindow, call: crate::components::ToolCall, body: &str) {
+    let routing = routing("conversation", &[("read_file", "codebase")], true, None);
+    apply_tool_results(
+        w,
+        "resp",
+        std::slice::from_ref(&call),
+        &[(call.tool_id.clone(), body.to_string().into())],
+        Some(&routing),
+        None,
+        None,
+    );
+}
+
+fn codebase_bodies(w: &ContextWindow) -> Vec<String> {
+    w.get_region("codebase")
+        .unwrap()
+        .content
+        .iter()
+        .map(|e| e.content.to_string())
+        .collect()
+}
+
+/// The same files were read about seven times each in the measured run, and
+/// each read stored another copy. Now a read of a path the region already
+/// holds leaves one entry: untouched when the bytes are the same, replaced
+/// when the file changed. A call that reads nothing in particular still
+/// appends, as it always did.
+#[test]
+fn re_reading_a_path_leaves_one_entry_in_the_routed_region() {
+    let mut w = codebase_window();
+    let read = |id: &str, path: &str| tc_with(id, "read_file", serde_json::json!({ "path": path }));
+
+    land(&mut w, read("c1", "src/a.rs"), "fn a() {}");
+    land(&mut w, read("c2", "src/b.rs"), "fn b() {}");
+    land(&mut w, read("c3", "src/a.rs"), "fn a() {}");
+    assert_eq!(codebase_bodies(&w), ["fn a() {}", "fn b() {}"]);
+    let keys: Vec<&str> = w.get_region("codebase").unwrap().keys();
+    assert_eq!(keys, ["read_file src/a.rs", "read_file src/b.rs"]);
+
+    // The file changed between reads: the stale copy goes, the new one is
+    // the newest the region holds.
+    land(&mut w, read("c4", "src/a.rs"), "fn a() { 1 }");
+    assert_eq!(codebase_bodies(&w), ["fn b() {}", "fn a() { 1 }"]);
+
+    // Every call still has its tool_result in the conversation, pointing at
+    // the region: the pairing a provider checks is untouched by the keying.
+    let pointers = w
+        .get_region("conversation")
+        .unwrap()
+        .content
+        .iter()
+        .filter(|e| matches!(e.kind, leviath_core::EntryKind::ToolResult { .. }))
+        .count();
+    assert_eq!(pointers, 4);
+
+    // No path, no key: two identical greps are two entries.
+    let grep = |id: &str| tc_with(id, "grep", serde_json::json!({ "pattern": "fn" }));
+    let routing = routing("codebase", &[], true, None);
+    for id in ["g1", "g2"] {
+        apply_tool_results(
+            &mut w,
+            "resp",
+            &[grep(id)],
+            &[(id.to_string(), "src/a.rs:1".to_string().into())],
+            Some(&routing),
+            None,
+            None,
+        );
+    }
+    assert_eq!(codebase_bodies(&w).len(), 4);
+}
+
 #[test]
 fn apply_adds_assistant_turn_and_result_to_conversation() {
     let mut w = ctx(&[("conversation", 10_000)]);

@@ -805,3 +805,46 @@ fn an_outputs_validator_tool_keeps_the_binary_shape() {
         "unknown field",
     );
 }
+
+/// A region's binary frame carries `evict_to` in the admission slot, in a
+/// variant added after the three a run file could already hold, so every
+/// combination of admission, `on_continue` and `evict_to` round-trips and a
+/// region that sets neither still writes the frame it always did.
+#[test]
+fn a_regions_low_water_mark_rides_the_admission_slot() {
+    use crate::spec::graph::OnContinue;
+    use leviath_core::region::Admission;
+    let plain = crate::test_graph::region("r", leviath_core::RegionKind::Pinned, 100);
+    let mut cases = Vec::new();
+    for admission in [Admission::Evict, Admission::Reject] {
+        for on_continue in [None, Some(OnContinue::Compact)] {
+            for evict_to in [None, Some(0.5)] {
+                let mut def = plain.clone();
+                def.admission = admission;
+                def.on_continue = on_continue;
+                def.evict_to = evict_to;
+                cases.push(def);
+            }
+        }
+    }
+    for def in &cases {
+        let bin = postcard::to_stdvec(def).unwrap();
+        assert_eq!(
+            &postcard::from_bytes::<crate::spec::graph::RegionDef>(&bin).unwrap(),
+            def
+        );
+        let json = serde_json::to_value(def).unwrap();
+        assert_eq!(json["evict_to"], serde_json::json!(def.evict_to));
+        assert_eq!(
+            serde_json::from_value::<crate::spec::graph::RegionDef>(json).unwrap(),
+            *def
+        );
+    }
+    // The frame of a region with neither setting is the frame it was before
+    // `evict_to` existed: the slot is the admission's own variant index.
+    let evict = postcard::to_stdvec(&cases[0]).unwrap();
+    let reject = postcard::to_stdvec(&cases[4]).unwrap();
+    assert_ne!(evict, reject);
+    let position = evict.iter().zip(&reject).position(|(a, b)| a != b).unwrap();
+    assert_eq!((evict[position], reject[position]), (0, 1));
+}

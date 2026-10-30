@@ -170,3 +170,43 @@ fn a_region_reports_its_room() {
     assert_eq!(ResultSink::room(&region), 6);
     assert_eq!(route_target(CONVERSATION, true, true), CONVERSATION);
 }
+
+/// A call is keyed by its canonical tool and its path, with the other
+/// arguments after them in name order, so the same call spelled twice is one
+/// key and a ranged read of a path is not the whole read of it.
+#[test]
+fn a_result_is_keyed_by_its_tool_and_path_whatever_the_argument_order() {
+    use serde_json::json;
+    let plain = result_key("read_file", &json!({ "path": "src/a.rs" }), canon);
+    assert_eq!(plain.as_deref(), Some("read_file src/a.rs"));
+
+    let one = json!({ "path": "src/a.rs", "offset": 10, "limit": 5 });
+    let other = json!({ "limit": 5, "path": "src/a.rs", "offset": 10 });
+    let ranged = result_key("read_file", &one, canon);
+    assert_eq!(
+        ranged.as_deref(),
+        Some(r#"read_file src/a.rs {"limit":5,"offset":10}"#)
+    );
+    assert_eq!(result_key("read_file", &other, canon), ranged);
+    assert_ne!(ranged, plain, "a ranged read is not the whole file");
+
+    // The alias resolves, so `bash` and `shell` of one path share a key.
+    assert_eq!(
+        result_key("bash", &json!({ "path": "." }), canon).as_deref(),
+        Some("shell .")
+    );
+}
+
+/// Nothing keys a call with no path: no arguments, a path that is not a
+/// string, or arguments that are not an object at all.
+#[test]
+fn a_call_without_a_path_is_not_keyed() {
+    use serde_json::json;
+    assert_eq!(result_key("bash", &json!({ "command": "ls" }), canon), None);
+    assert_eq!(result_key("read_file", &json!({ "path": 7 }), canon), None);
+    assert_eq!(result_key("read_file", &json!("src/a.rs"), canon), None);
+    assert_eq!(
+        result_key("read_file", &serde_json::Value::Null, canon),
+        None
+    );
+}

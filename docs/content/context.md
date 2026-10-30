@@ -210,6 +210,7 @@ and pass on the first attempt, which looks exactly like a stage that finished it
 | `describe_in_prompt` | `false` | Also show the `description` to the model, above the region's contents. See [what the model sees](#what-the-model-sees) |
 | `volatility` | `"rewritten"` | How much the region's contents move between requests. See [what caching costs](#what-caching-costs) |
 | `admission` | `"evict"` | What happens when a write does not fit. See [letting the agent decide what to forget](#letting-the-agent-decide-what-to-forget) |
+| `evict_to` | `0.75` | For a region that drops its oldest entries to make room, the share of its budget it drops back to, as `0.75`. See [evicting in chunks](#evicting-in-chunks) |
 | `accepts` | unset | Mime types the region takes, as `type/subtype` or `type/*`. See [More than text](/docs/mime) |
 | `required_message` | generated | What the model is told when a required region is empty. Supports `{region}` |
 | `on_continue` | by kind | What the region keeps when its finished run is continued: `keep`, `clear`, `compact` or `reseed`. See [continuing a finished run](#continuing-a-finished-run) |
@@ -721,6 +722,33 @@ their kind. Those others take turns, one entry each. Naming a region that is nev
 nothing, and `lev validate` warns about it. A stage with its own `layout` uses that layout's order;
 every other stage uses the graph's.
 
+### Evicting in chunks
+
+A region that is full when a write arrives makes room by dropping its oldest entries: a `temporary`
+or `clearable` region, a `sliding_window` past its token budget, and a `compacting` region in a
+blueprint with no `compaction` model to summarize it. How *much* it drops decides whether the prompt
+cache survives. Dropping exactly one write's worth leaves the region full again for the next write,
+which drops the next entry, and the prompt is rewritten from that entry on every call. A `codebase`
+region at its 24K cap, fed by `read_file`, did that for a whole review stage: 245K of the stage's
+913K uncached tokens were this region alone, re-sent on every read.
+
+So a full region drops back to a low-water mark, `evict_to` of its budget, and the writes after
+that land without moving anything in front of them:
+
+```toml
+[[graph.layout.regions]]
+name = "codebase"
+kind = "compacting"
+budget = "20%"
+evict_to = 0.6       # when full, drop the oldest entries until 60% remains
+```
+
+The default is `0.75`. `evict_to = 1.0` is one entry per write, which was the behaviour before the
+mark existed; `evict_to = 0` empties the region, like a `clearable` one. It is the same idea as a
+sliding window's `eviction = { bulk = N }`, which counts entries over the cap where `evict_to`
+counts tokens; a sliding window has both, and each applies to its own limit. Nothing sticky leaves,
+and a region under `admission = "reject"` never evicts at all.
+
 A summary is text. When a compacting region's entries carried stored [parts](/docs/mime) (an
 attached image, a file a tool stored), the summary is written from their stand-ins and the parts
 leave the window with the entries they sat on. The bytes stay in the run's store, `lev blobs`
@@ -902,6 +930,15 @@ so in its error.
 The pointer also says what actually happened rather than what was meant. A region too full to take
 the result whole reports the truncation or the refusal, instead of promising a full result that is
 not there.
+
+A routed result is filed under the call that produced it, when the call names a `path`: a
+`read_file` of `src/main.rs`, a `list_dir` of `src/`. The same call again replaces its earlier
+result instead of adding a copy. When the output is byte for byte the same, nothing in the region
+moves, so the prompt the cache already holds is unchanged; when the file changed, the stale copy
+goes and the new one lands as the region's newest entry. A measured review stage read the same
+files about seven times each into a region that kept every copy; it keeps one. The other arguments
+are part of the key, so a ranged read of a file is not the whole read of it, and a call with no
+`path` (a shell command, a search) is appended as before.
 
 The two maps are independent, which is usually what you mean when a tool needs its own region *and*
 its own ceiling:

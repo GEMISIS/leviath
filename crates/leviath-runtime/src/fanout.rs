@@ -990,8 +990,12 @@ fn answer_call(world: &mut World, parent: Entity, call_id: &str, text: String) {
     if let Some(mut window) = world.get_mut::<ContextWindow>(parent) {
         crate::pipeline::apply_one_tool_result(
             &mut window,
-            leviath_core::stage_tools::FAN_OUT_TOOL,
-            call_id,
+            crate::pipeline::RoutedCall {
+                name: leviath_core::stage_tools::FAN_OUT_TOOL,
+                id: call_id,
+                // A fan-out report is not a read of anything: nothing keys it.
+                arguments: None,
+            },
             text.into(),
             routing.as_ref(),
             sensitivities.as_ref(),

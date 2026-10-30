@@ -68,7 +68,11 @@ impl RescanSlot {
 }
 
 /// The `admission` slot of a region's binary frame: `Admission`'s two
-/// variants in their order, and the one carrying `on_continue` at the end.
+/// variants in their order, the one carrying `on_continue` after them, and
+/// the one carrying `evict_to` (with whatever `on_continue` says) last.
+///
+/// Each later variant was added at the end, so a run file written before it
+/// existed still reads: a frame's variant index is its wire form.
 #[derive(Serialize, Deserialize)]
 enum AdmissionSlot {
     Evict,
@@ -77,41 +81,56 @@ enum AdmissionSlot {
         admission: Admission,
         on_continue: OnContinue,
     },
+    EvictTo {
+        admission: Admission,
+        on_continue: Option<OnContinue>,
+        evict_to: f64,
+    },
 }
 
 impl AdmissionSlot {
-    fn of(admission: Admission, on_continue: Option<OnContinue>) -> Self {
-        match (admission, on_continue) {
-            (admission, Some(on_continue)) => Self::Continue {
+    fn of(admission: Admission, on_continue: Option<OnContinue>, evict_to: Option<f64>) -> Self {
+        match (admission, on_continue, evict_to) {
+            (admission, on_continue, Some(evict_to)) => Self::EvictTo {
+                admission,
+                on_continue,
+                evict_to,
+            },
+            (admission, Some(on_continue), None) => Self::Continue {
                 admission,
                 on_continue,
             },
-            (Admission::Evict, None) => Self::Evict,
-            (Admission::Reject, None) => Self::Reject,
+            (Admission::Evict, None, None) => Self::Evict,
+            (Admission::Reject, None, None) => Self::Reject,
         }
     }
 
-    fn split(self) -> (Admission, Option<OnContinue>) {
+    fn split(self) -> (Admission, Option<OnContinue>, Option<f64>) {
         match self {
-            Self::Evict => (Admission::Evict, None),
-            Self::Reject => (Admission::Reject, None),
+            Self::Evict => (Admission::Evict, None, None),
+            Self::Reject => (Admission::Reject, None, None),
             Self::Continue {
                 admission,
                 on_continue,
-            } => (admission, Some(on_continue)),
+            } => (admission, Some(on_continue), None),
+            Self::EvictTo {
+                admission,
+                on_continue,
+                evict_to,
+            } => (admission, on_continue, Some(evict_to)),
         }
     }
 }
 
 /// A binary frame for `$ty`: the fields named in `before` and `after`, in
-/// that order, with `$slot` between them carrying the setting the frame
-/// leaves out. `$to_slot` builds the slot from the value; `$from_slot` gives
-/// back the two fields it carries.
+/// that order, with `$slot` between them carrying the settings the frame
+/// leaves out. `$to_slot` builds the slot from the value; its `split` gives
+/// back the fields it carries, named in order.
 macro_rules! frame {
     (
         $ty:ident, $frame:ident, $frame_ref:ident,
         before { $($b:ident: $bt:ty),* $(,)? }
-        $slot:ident: $slot_ty:ty = $to_slot:expr, ($s1:ident, $s2:ident),
+        $slot:ident: $slot_ty:ty = $to_slot:expr, ($($s:ident),+ $(,)?),
         after { $($a:ident: $at:ty),* $(,)? }
     ) => {
         #[derive(Serialize)]
@@ -141,11 +160,10 @@ macro_rules! frame {
 
         impl From<$frame> for $ty {
             fn from(f: $frame) -> Self {
-                let ($s1, $s2) = f.$slot.split();
+                let ($($s,)+) = f.$slot.split();
                 Self {
                     $($b: f.$b,)*
-                    $s1,
-                    $s2,
+                    $($s,)+
                     $($a: f.$a,)*
                 }
             }
@@ -220,8 +238,8 @@ frame!(
         required_message: Option<String>,
         summarizable: bool,
     }
-    admission: AdmissionSlot = |r| AdmissionSlot::of(r.admission, r.on_continue),
-        (admission, on_continue),
+    admission: AdmissionSlot = |r| AdmissionSlot::of(r.admission, r.on_continue, r.evict_to),
+        (admission, on_continue, evict_to),
     after {
         volatility: Volatility,
         seed: Option<Seed>,
