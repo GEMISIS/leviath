@@ -1026,10 +1026,16 @@ budget = 10000
 
 #[tokio::test]
 async fn starting_errors_when_sandbox_runtime_unavailable() {
-    // A container sandbox naming a nonexistent engine fails to start on every
+    // A container sandbox whose engine does not exist fails to start on every
     // platform (no runtime needed), so the start surfaces the error - this
     // covers the `?` on `SandboxManager::build` uniformly across OSes,
     // independent of which container runtimes happen to be installed.
+    //
+    // The engine is the operator's to name: a manifest never chooses it (see
+    // `resolve_sandbox`), so one naming `engine` would be ignored and the
+    // auto-detected docker or podman would run instead - on a machine with
+    // Docker Desktop that is a real `docker rm` that can block on its socket
+    // for ever. The nonexistent engine is therefore set in the config.
     let dir = tempfile::tempdir().unwrap();
     let manifest = dir.path().join("agent.toml");
     std::fs::write(
@@ -1040,7 +1046,7 @@ version = "0.1.0"
 description = "d"
 
 [graph]
-sandbox = { kind = "container", image = "x", engine = "leviath-no-such-engine" }
+sandbox = { kind = "container", image = "x" }
 
 [[graph.stages]]
 name = "main"
@@ -1061,6 +1067,14 @@ budget = 10000
 "#,
     )
     .unwrap();
+    let config = Config {
+        sandbox: Some(leviath_core::ToolSandboxConfig {
+            kind: leviath_core::sandbox::SandboxKind::Container,
+            engine: Some("leviath-no-such-engine".to_string()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
     let (mut world, cli) = test_world();
     let hub = InteractionHub::new();
     let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
@@ -1068,7 +1082,7 @@ budget = 10000
         world.world_mut(),
         TestDeps {
             tool_service: &cli,
-            config: &Config::default(),
+            config: &config,
             shared_mcp: mcp,
             mcp_tool_defs: &[],
             mcp_tool_owners: &Default::default(),
