@@ -212,7 +212,7 @@ jsonschema = { version = "0.60", default-features = false }
 # conformance is JSON Schema (above) or an agent's own Rhai validator, so none
 # of these needs its format's schema language.
 quick-xml = "0.42"
-saphyr-parser = "0.2"
+saphyr-parser = "0.3"
 csv = "1.4"
 async-trait = "0.1"
 futures-util = "0.3"
