@@ -305,14 +305,22 @@ fn an_expanded_target_is_unnamed() {
 /// `~user` are somewhere this cannot list.
 #[test]
 fn a_glob_or_brace_target_is_placed_or_lost() {
-    assert_eq!(
-        landed("rm -f *.tmp"),
-        written(&[("rm", "*.tmp", &["/w/*.tmp"])])
-    );
-    assert_eq!(
-        landed("mkdir -p src/{a,b}"),
-        written(&[("mkdir", "src/{a,b}", &["/w/src/{a,b}"])])
-    );
+    // A glob is matched against the directory it is relative to, which has to
+    // be absolute on the platform: `/w` is not one on Windows.
+    let root = PathBuf::from(match cfg!(windows) {
+        true => "C:/w",
+        false => "/w",
+    });
+    let placed = |by: &str, name: &str| {
+        Landing::Known(vec![Target {
+            written: name.to_string(),
+            lands: vec![root.join(name)],
+            by: by.to_string(),
+        }])
+    };
+    let at_root = |line: &str| landing_for(line, true, &root, Some(Path::new("/home/me")));
+    assert_eq!(at_root("rm -f *.tmp"), placed("rm", "*.tmp"));
+    assert_eq!(at_root("mkdir -p src/{a,b}"), placed("mkdir", "src/{a,b}"));
     for line in [
         "rm -rf .*",
         "rm -rf ../*",
