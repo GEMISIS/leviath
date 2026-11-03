@@ -304,7 +304,8 @@ pub fn dotenv_var_allowed(name: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ShellEnvMode {
-    /// Withhold credential-shaped names, but hand over `SSH_AUTH_SOCK`.
+    /// Withhold credential-shaped names, but hand over `SSH_AUTH_SOCK`. Git's
+    /// `GIT_CONFIG_*` command-line config set is withheld as a unit.
     ///
     /// The carve-out is deliberate and is why this can be the default: the
     /// agent socket is on the credential-name list, and withholding it breaks
@@ -315,7 +316,8 @@ pub enum ShellEnvMode {
     /// The full name-shape denylist, `SSH_AUTH_SOCK` included - and with it
     /// `AWS_PROFILE`, `AWS_REGION`, `KUBECONFIG`, `NETRC`. Breaks `git push`,
     /// `aws` and `kubectl` in a shell tool until those names are listed in
-    /// `[security] allow_env_vars`.
+    /// `[security] allow_env_vars`. Git's `GIT_CONFIG_*` command-line config
+    /// set is withheld as a unit, as under `Filtered`.
     Strict,
     /// Ignore the shape heuristic entirely: withhold exactly what
     /// `[security] shell_env_withhold` names, and nothing else. For an
@@ -332,9 +334,18 @@ pub enum ShellEnvMode {
 /// function testable without spawning anything - which is what keeps its tests
 /// deterministic on Windows.
 ///
-/// `allow_env_vars` wins under every mode. It already means "yes, this agent is
-/// meant to have that" for a Rhai `env_var` read, and one list with one meaning
-/// is worth more than a second list that means almost the same thing.
+/// `allow_env_vars` wins under every mode, with one exception: git's config
+/// set, below. It already means "yes, this agent is meant to have that" for a
+/// Rhai `env_var` read, and one list with one meaning is worth more than a
+/// second list that means almost the same thing.
+///
+/// The exception is git's `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` /
+/// `GIT_CONFIG_VALUE_n` set, decided as a set rather than name by name. Under
+/// `filtered` and `strict` the set is withheld as a whole, and it passes only
+/// when `allow_env_vars` names every `KEY_n` and `VALUE_n` present. A partial
+/// listing cannot be honoured name by name: it either hands git a broken set
+/// or releases a `VALUE_n` the user never named. `custom` and `inherit` infer
+/// nothing, so the set rule does not apply to them.
 pub fn withheld_child_vars<'a>(
     names: impl Iterator<Item = &'a str>,
     mode: ShellEnvMode,
@@ -342,17 +353,87 @@ pub fn withheld_child_vars<'a>(
     custom_withhold: &[String],
 ) -> Vec<String> {
     let listed = |list: &[String], name: &str| list.iter().any(|e| e.eq_ignore_ascii_case(name));
-    names
-        .filter(|name| match mode {
-            ShellEnvMode::Inherit => false,
-            ShellEnvMode::Custom => listed(custom_withhold, name) && !listed(allow_env_vars, name),
-            ShellEnvMode::Filtered if name.eq_ignore_ascii_case("SSH_AUTH_SOCK") => false,
-            ShellEnvMode::Filtered | ShellEnvMode::Strict => {
-                !script_env_allowed(name, allow_env_vars)
-            }
+    let set_rule = matches!(mode, ShellEnvMode::Filtered | ShellEnvMode::Strict);
+    let decided: Vec<(&str, bool, Option<GitConfigMember>)> = names
+        .map(|name| {
+            let withhold = match mode {
+                ShellEnvMode::Inherit => false,
+                ShellEnvMode::Custom => {
+                    listed(custom_withhold, name) && !listed(allow_env_vars, name)
+                }
+                ShellEnvMode::Filtered if name.eq_ignore_ascii_case("SSH_AUTH_SOCK") => false,
+                ShellEnvMode::Filtered | ShellEnvMode::Strict => {
+                    !script_env_allowed(name, allow_env_vars)
+                }
+            };
+            let member = match set_rule {
+                true => git_config_member(name, cfg!(windows)),
+                false => None,
+            };
+            (name, withhold, member)
         })
-        .map(str::to_string)
+        .collect();
+    let set_withheld = set_rule
+        && decided.iter().any(|(name, _, member)| {
+            *member == Some(GitConfigMember::Entry) && !listed(allow_env_vars, name)
+        });
+    decided
+        .into_iter()
+        .filter(|(_, withhold, member)| *withhold || (set_withheld && member.is_some()))
+        .map(|(name, _, _)| name.to_string())
         .collect()
+}
+
+/// Which part of git's command-line config set a variable name is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GitConfigMember {
+    /// `GIT_CONFIG_COUNT`, which says how many entries to read.
+    Count,
+    /// A `GIT_CONFIG_KEY_n` or `GIT_CONFIG_VALUE_n`.
+    Entry,
+}
+
+/// Where `name` sits in the set git reads as one, if it is in it at all.
+///
+/// `GIT_CONFIG_COUNT=n` tells git to apply `GIT_CONFIG_KEY_0..n` /
+/// `GIT_CONFIG_VALUE_0..n` as command-line config. A set with a member missing
+/// is an error, not a smaller set: every git command fails with `missing config
+/// key GIT_CONFIG_KEY_0`. The bare `KEY` hint catches `KEY_n` and nothing else,
+/// so a per-name decision alone would hand git exactly that broken shape.
+///
+/// The set is withheld whole rather than `KEY_n` exempted, because this is how
+/// `actions/checkout` passes the repository token to git: as an
+/// `http.extraheader` in `VALUE_n`. On a GitHub Actions runner `VALUE_n` is the
+/// credential and `KEY_n` only its label.
+///
+/// Only the names git reads count: `GIT_CONFIG_COUNT` exactly, and `KEY_` or
+/// `VALUE_` followed by an index as git writes it (`%d`: digits, no leading
+/// zero unless the index is `0`). Git matches them case-sensitively, except on
+/// Windows (`windows`, `cfg!(windows)` in production), whose environment is
+/// case-insensitive.
+fn git_config_member(name: &str, windows: bool) -> Option<GitConfigMember> {
+    let after = |prefix: &str| {
+        let head = name.get(..prefix.len())?;
+        let same = if windows {
+            head.eq_ignore_ascii_case(prefix)
+        } else {
+            head == prefix
+        };
+        same.then(|| name.get(prefix.len()..)).flatten()
+    };
+    let entry = |prefix: &str| {
+        after(prefix).is_some_and(|index| {
+            matches!(index.as_bytes(), [b'0'] | [b'1'..=b'9', ..])
+                && index.bytes().all(|b| b.is_ascii_digit())
+        })
+    };
+    if after("GIT_CONFIG_COUNT") == Some("") {
+        Some(GitConfigMember::Count)
+    } else if entry("GIT_CONFIG_KEY_") || entry("GIT_CONFIG_VALUE_") {
+        Some(GitConfigMember::Entry)
+    } else {
+        None
+    }
 }
 
 /// Whether `name` looks like it holds a credential.
@@ -508,10 +589,42 @@ mod tests {
     ];
 
     fn withheld(mode: ShellEnvMode, allow: &[&str], custom: &[&str]) -> Vec<String> {
+        withheld_from(SAMPLE_ENV, mode, allow, custom)
+    }
+
+    fn withheld_from(
+        env: &[&str],
+        mode: ShellEnvMode,
+        allow: &[&str],
+        custom: &[&str],
+    ) -> Vec<String> {
         let allow: Vec<String> = allow.iter().map(|s| s.to_string()).collect();
         let custom: Vec<String> = custom.iter().map(|s| s.to_string()).collect();
-        withheld_child_vars(SAMPLE_ENV.iter().copied(), mode, &allow, &custom)
+        withheld_child_vars(env.iter().copied(), mode, &allow, &custom)
     }
+
+    /// What `actions/checkout` leaves in the environment of every later step:
+    /// the repository token as an `http.extraheader`, handed to git through
+    /// the `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n` set.
+    /// Interleaved with ordinary names so the set's members are not adjacent.
+    const GIT_CONFIG_ENV: &[&str] = &[
+        "GIT_CONFIG_COUNT",
+        "PATH",
+        "GIT_CONFIG_KEY_0",
+        "HOME",
+        "GIT_CONFIG_VALUE_0",
+        "GIT_CONFIG_KEY_1",
+        "GIT_CONFIG_VALUE_1",
+        "TERM",
+    ];
+
+    const GIT_CONFIG_SET: &[&str] = &[
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0",
+        "GIT_CONFIG_KEY_1",
+        "GIT_CONFIG_VALUE_1",
+    ];
 
     /// The default. Credentials are withheld, every toolchain variable passes,
     /// and `SSH_AUTH_SOCK` is the deliberate carve-out that lets this be the
@@ -577,8 +690,9 @@ mod tests {
         assert!(withheld(ShellEnvMode::Inherit, &[], &["PATH"]).is_empty());
     }
 
-    /// `allow_env_vars` wins under every mode. One list with one meaning is
-    /// worth more than a second list that means almost the same thing.
+    /// `allow_env_vars` wins under every mode for a name outside git's config
+    /// set. One list with one meaning is worth more than a second list that
+    /// means almost the same thing.
     #[test]
     fn an_allowlisted_name_is_handed_over_under_every_mode() {
         for mode in [
@@ -593,6 +707,178 @@ mod tests {
             );
             assert!(!out.iter().any(|n| n == "HOME"), "{mode:?}");
         }
+    }
+
+    /// Git reads `GIT_CONFIG_COUNT` and every `GIT_CONFIG_KEY_n` /
+    /// `GIT_CONFIG_VALUE_n` as one set, and fails every command with `missing
+    /// config key GIT_CONFIG_KEY_0` when a member is missing. The bare `KEY`
+    /// hint catches only `KEY_n`, so the set goes together. Passing `KEY_n`
+    /// instead would be the wrong repair: in GitHub Actions `VALUE_n` is an
+    /// `http.extraheader` carrying the repository token.
+    #[test]
+    fn the_git_config_set_is_withheld_as_one() {
+        for mode in [ShellEnvMode::Filtered, ShellEnvMode::Strict] {
+            let out = withheld_from(GIT_CONFIG_ENV, mode, &[], &[]);
+            assert_eq!(out, GIT_CONFIG_SET, "{mode:?}");
+        }
+    }
+
+    /// `custom` withholds exactly the names it lists, git's set included: the
+    /// set rule is an inference, and `custom` infers nothing.
+    #[test]
+    fn custom_withholds_only_the_named_git_config_member() {
+        let out = withheld_from(
+            GIT_CONFIG_ENV,
+            ShellEnvMode::Custom,
+            &[],
+            &["git_config_value_1"],
+        );
+        assert_eq!(out, ["GIT_CONFIG_VALUE_1"]);
+    }
+
+    /// `inherit` hands everything over, git's set included.
+    #[test]
+    fn inherit_hands_the_git_config_set_over() {
+        let out = withheld_from(GIT_CONFIG_ENV, ShellEnvMode::Inherit, &[], &[]);
+        assert!(out.is_empty(), "{out:?}");
+    }
+
+    /// `GIT_CONFIG_COUNT=0` is a complete set on its own, with no entry to
+    /// carry a credential, so it passes.
+    #[test]
+    fn a_git_config_count_with_no_entries_passes() {
+        let out = withheld_from(
+            &["GIT_CONFIG_COUNT", "PATH"],
+            ShellEnvMode::Filtered,
+            &[],
+            &[],
+        );
+        assert!(out.is_empty(), "{out:?}");
+    }
+
+    /// Listing every `KEY_n` and `VALUE_n` present hands the set over, in any
+    /// case. `COUNT` carries nothing and follows the entries.
+    #[test]
+    fn allowlisting_every_git_config_entry_hands_the_set_over() {
+        for mode in [ShellEnvMode::Filtered, ShellEnvMode::Strict] {
+            let out = withheld_from(
+                GIT_CONFIG_ENV,
+                mode,
+                &[
+                    "GIT_CONFIG_KEY_0",
+                    "git_config_value_0",
+                    "GIT_CONFIG_KEY_1",
+                    "GIT_CONFIG_VALUE_1",
+                ],
+                &[],
+            );
+            assert!(out.is_empty(), "{mode:?}: {out:?}");
+        }
+    }
+
+    /// Listing the `KEY_n` labels does not release the `VALUE_n` they label:
+    /// the value is the credential, and the user did not name it.
+    #[test]
+    fn allowlisting_only_the_git_config_keys_withholds_the_set() {
+        let out = withheld_from(
+            GIT_CONFIG_ENV,
+            ShellEnvMode::Filtered,
+            &["GIT_CONFIG_KEY_0", "GIT_CONFIG_KEY_1"],
+            &[],
+        );
+        assert_eq!(out, GIT_CONFIG_SET);
+    }
+
+    /// Listing only a `VALUE_n` while its `KEY_n` is not listed hands nothing
+    /// over: a `VALUE_n` on its own is the partial set the rule prevents.
+    #[test]
+    fn allowlisting_a_lone_git_config_value_does_not_split_the_set() {
+        let out = withheld_from(
+            GIT_CONFIG_ENV,
+            ShellEnvMode::Filtered,
+            &["GIT_CONFIG_VALUE_0"],
+            &[],
+        );
+        assert_eq!(out, GIT_CONFIG_SET);
+    }
+
+    /// One whole pair listed while another pair is not still withholds the set,
+    /// the listed pair included: passing it alone would leave git a `COUNT`
+    /// naming entries it cannot find.
+    #[test]
+    fn allowlisting_one_git_config_pair_of_two_withholds_the_set() {
+        let out = withheld_from(
+            GIT_CONFIG_ENV,
+            ShellEnvMode::Filtered,
+            &["GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"],
+            &[],
+        );
+        assert_eq!(out, GIT_CONFIG_SET);
+    }
+
+    /// A name that only looks like a member is decided on its own and does not
+    /// pull a fully listed set down with it.
+    #[test]
+    fn a_lookalike_name_does_not_withhold_a_listed_git_config_set() {
+        let env = [
+            "GIT_CONFIG_COUNT",
+            "GIT_CONFIG_KEY_0",
+            "GIT_CONFIG_VALUE_0",
+            "GIT_CONFIG_KEY_FILE",
+            "GIT_CONFIG_KEY_",
+            "GIT_CONFIG_KEY_00",
+            "GIT_CONFIG_VALUE_01",
+        ];
+        let out = withheld_from(
+            &env,
+            ShellEnvMode::Filtered,
+            &["GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"],
+            &[],
+        );
+        // The two `KEY` lookalikes are credential-shaped on their own; the
+        // zero-padded `VALUE_01` is not, and passes.
+        assert_eq!(
+            out,
+            [
+                "GIT_CONFIG_KEY_FILE",
+                "GIT_CONFIG_KEY_",
+                "GIT_CONFIG_KEY_00"
+            ]
+        );
+    }
+
+    /// Only the names git reads are members: `COUNT` exactly, and `KEY_` or
+    /// `VALUE_` followed by a `%d` index. Case matters except on Windows.
+    #[test]
+    fn git_config_membership_matches_only_what_git_reads() {
+        use GitConfigMember::{Count, Entry};
+        for windows in [false, true] {
+            assert_eq!(git_config_member("GIT_CONFIG_COUNT", windows), Some(Count));
+            assert_eq!(git_config_member("GIT_CONFIG_KEY_0", windows), Some(Entry));
+            assert_eq!(
+                git_config_member("GIT_CONFIG_VALUE_12", windows),
+                Some(Entry)
+            );
+            for name in [
+                "GIT_CONFIG_KEY_FILE",
+                "GIT_CONFIG_KEY_",
+                "GIT_CONFIG_VALUE_1x",
+                "GIT_CONFIG_KEY_00",
+                "GIT_CONFIG_VALUE_01",
+                "GIT_CONFIG_KEY_-1",
+                "GIT_CONFIG_COUNTS",
+                "GIT_CONFIG_KEYé",
+                "GIT_CONFIG",
+                "GIT_CONFIG_PARAMETERS",
+                "",
+            ] {
+                assert_eq!(git_config_member(name, windows), None, "{name:?}");
+            }
+        }
+        assert_eq!(git_config_member("git_config_key_0", false), None);
+        assert_eq!(git_config_member("git_config_count", false), None);
+        assert_eq!(git_config_member("git_config_key_0", true), Some(Entry));
+        assert_eq!(git_config_member("Git_Config_Count", true), Some(Count));
     }
 
     /// The names a cloned repository must not be able to set. Each one decides

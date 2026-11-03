@@ -45,6 +45,19 @@ same list.
 
 ### Fixed
 
+- Under the default `shell_env = "filtered"`, every git command in a shell tool
+  failed with `missing config key GIT_CONFIG_KEY_0` when the daemon's
+  environment carried git's `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` /
+  `GIT_CONFIG_VALUE_n` set (which `actions/checkout` leaves behind): the bare
+  `KEY` hint withheld `KEY_n` and let `COUNT` and `VALUE_n` through, and git
+  reads the three as one set. Under `filtered` and `strict` a shell child no
+  longer gets a half set: the set is withheld together rather than `KEY_n`
+  exempted, since on a GitHub Actions runner `VALUE_n` is the `http.extraheader`
+  carrying the repository token. It passes only when `allow_env_vars` lists
+  every `GIT_CONFIG_KEY_n` and `GIT_CONFIG_VALUE_n`. `custom` and `inherit`
+  apply no set rule. This covers shell children only: `environment_info`, a
+  Rhai `env_var` read and MCP header resolution still treat `VALUE_n` as an
+  ordinary name.
 - A full region evicts in chunks, and a re-read replaces its earlier copy, so the prompt
   cache survives a region at its cap. A region that rolls its oldest entries off to admit a
   write (temporary, clearable, a sliding window over its token budget, a compacting region

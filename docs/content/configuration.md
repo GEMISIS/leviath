@@ -675,15 +675,23 @@ inherit. All three answer to the same setting, so a script with `shell` is not a
 
 | Mode | What it withholds |
 |---|---|
-| `filtered` (default) | Credential-shaped names, **except `SSH_AUTH_SOCK`**, so `git push` over agent keys still works |
-| `strict` | The same, plus `SSH_AUTH_SOCK`, `AWS_PROFILE`, `AWS_REGION`, `KUBECONFIG`, `NETRC`. See below |
+| `filtered` (default) | Credential-shaped names, **except `SSH_AUTH_SOCK`**, so `git push` over agent keys still works. Git's `GIT_CONFIG_*` set goes as a unit |
+| `strict` | The same, plus `SSH_AUTH_SOCK`, `AWS_PROFILE`, `AWS_REGION`, `KUBECONFIG`, `NETRC`. Git's `GIT_CONFIG_*` set goes as a unit. See below |
 | `custom` | Exactly the names in `shell_env_withhold`, and nothing inferred |
 | `inherit` | Nothing |
 
 `strict` breaks `git push`, `aws` and `kubectl` inside a shell tool until you list the names those
 commands need. Toolchain variables pass through under every mode: `PATH`, `HOME`, `CARGO_HOME`,
 `JAVA_HOME`, `VIRTUAL_ENV`, `NVM_DIR`, `GOPATH`, `DOCKER_HOST`, `TERM`. `allow_env_vars` hands a
-specific name over under every mode too, so one list means one thing whichever surface asks.
+specific name over under every mode too, so one list means one thing whichever surface asks. The
+one exception is git's config set, below.
+
+Under `filtered` and `strict`, git's `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_n` and `GIT_CONFIG_VALUE_n`
+are withheld together, because git reads them as one set and fails on a partial one. A `VALUE_n`
+can also be an `http.extraheader` carrying a token, which is how `actions/checkout` hands git its
+credential. To hand the set over, list every `GIT_CONFIG_KEY_n` and every `GIT_CONFIG_VALUE_n` in
+`allow_env_vars`. A partial list withholds the whole set, the listed names included. `custom` and
+`inherit` apply no set rule.
 
 ```toml
 [security]
