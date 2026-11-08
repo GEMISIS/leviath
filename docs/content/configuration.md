@@ -675,8 +675,8 @@ inherit. All three answer to the same setting, so a script with `shell` is not a
 
 | Mode | What it withholds |
 |---|---|
-| `filtered` (default) | Credential-shaped names, **except `SSH_AUTH_SOCK`**, so `git push` over agent keys still works. Git's `GIT_CONFIG_*` set goes as a unit |
-| `strict` | The same, plus `SSH_AUTH_SOCK`, `AWS_PROFILE`, `AWS_REGION`, `KUBECONFIG`, `NETRC`. Git's `GIT_CONFIG_*` set goes as a unit. See below |
+| `filtered` (default) | Credential-shaped names, **except `SSH_AUTH_SOCK`**, so `git push` over agent keys still works. Git's `GIT_CONFIG_COUNT` / `KEY_n` / `VALUE_n` set goes as a unit |
+| `strict` | The same, plus `SSH_AUTH_SOCK`, `AWS_PROFILE`, `AWS_REGION`, `KUBECONFIG`, `NETRC`. Git's `GIT_CONFIG_COUNT` / `KEY_n` / `VALUE_n` set goes as a unit. See below |
 | `custom` | Exactly the names in `shell_env_withhold`, and nothing inferred |
 | `inherit` | Nothing |
 
