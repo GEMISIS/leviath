@@ -1642,3 +1642,7 @@ mod tests {
         });
     }
 }
+
+#[cfg(test)]
+#[path = "user_creds_parity_tests.rs"]
+mod user_creds_parity_tests;
