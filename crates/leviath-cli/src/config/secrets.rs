@@ -272,6 +272,8 @@ pub(super) fn forget_tool_credentials_with(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     /// The provider directory in `leviath-providers` and this table are one
     /// list of keys: each key's variable is the directory's, and every
     /// API-key row in the directory has a slot here.
@@ -293,8 +295,6 @@ mod tests {
             );
         }
     }
-
-    use super::*;
 
     /// Every `*_api_key` field in the two structs, as a dotted path.
     fn api_key_fields(value: &serde_json::Value, prefix: &str, out: &mut Vec<String>) {

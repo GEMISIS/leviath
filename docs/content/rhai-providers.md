@@ -466,7 +466,9 @@ fn list_models(state) {
 
 The three optional functions each carry their own shape. `stream(state, request, on_chunk)` calls
 `on_chunk.call(#{...})` per delta, where each chunk map is
-`{ delta, tool_calls: [{index, id, name, arguments_delta}], tokens: {...}, finish_reason }`.
+`{ delta, reasoning_delta, tool_calls: [{index, id, name, arguments_delta}], tokens: {...}, finish_reason }`.
+`reasoning_delta` is optional text from the model's reasoning summary, shown as it arrives and
+joined onto the response's `reasoning_summary`.
 `count_tokens(state, text, model)` returns an int (Leviath falls back to a local heuristic without
 it). `list_models(state)` returns an array of
 `{ id, display_name, max_context_tokens, max_output_tokens }`. What it answers is treated as a

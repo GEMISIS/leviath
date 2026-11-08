@@ -10,20 +10,18 @@
 //! `models = [{ provider = ... }]` names. A row is listed whether or not this
 //! build compiled the provider in; see [`crate::compiled`] for that.
 
-/// What a provider needs from the user.
+/// The shape of credential a provider takes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Credential {
-    /// An API key, entered masked.
+    /// A secret API key.
     ApiKey,
-    /// A browser sign-in. Nothing is typed and nothing lands in `config.toml`:
-    /// the grant is taken by `lev auth login <id>` and stored outside the
-    /// config entirely.
+    /// An interactive sign-in, usually in a browser. There is nothing to
+    /// type; the grant is held by the sign-in flow, not by a setting.
     Signin,
-    /// A base URL, with a working default.
+    /// A base URL of a server that needs no key, with a working default.
     BaseUrl,
-    /// One or more `[model_providers.<name>]` endpoints of kind
-    /// `openai-compatible`, each with a name, an address and an optional key.
-    /// The row is a preset; the entries under it are the front end's own.
+    /// One or more user-named endpoints, each with an address and an
+    /// optional key. The row is a preset the endpoints are filed under.
     Endpoint,
 }
 
@@ -186,6 +184,17 @@ mod tests {
             .filter(|p| p.credential == Credential::Signin)
         {
             assert!(p.env_var.is_none(), "{}", p.id);
+        }
+    }
+
+    /// The provider kinds this crate can build and the directory cannot
+    /// drift apart: every kind a build can carry is listed. The directory
+    /// also lists endpoint presets, which are no kind of their own.
+    #[test]
+    fn every_buildable_kind_has_a_directory_row() {
+        for (kind, _feature) in crate::compiled::KNOWN {
+            let row = meta(kind).unwrap_or_else(|| panic!("{kind} has no directory row"));
+            assert_ne!(row.credential, Credential::Endpoint, "{kind}");
         }
     }
 

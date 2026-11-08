@@ -159,6 +159,7 @@ pub(crate) mod fixtures {
     /// [`token_usage`].
     pub(crate) fn inference_response(content: &str) -> InferenceResponse {
         InferenceResponse {
+            reasoning_summary: None,
             parts: Vec::new(),
             content: content.to_string(),
             tool_calls: vec![],

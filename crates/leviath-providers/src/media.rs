@@ -641,6 +641,7 @@ pub(crate) fn response(
     cost_usd: Option<f64>,
 ) -> InferenceResponse {
     InferenceResponse {
+        reasoning_summary: None,
         content: summary,
         tool_calls: Vec::new(),
         tokens_used: TokenUsage::new(0, 0, 0, 0).with_reported_cost(cost_usd),

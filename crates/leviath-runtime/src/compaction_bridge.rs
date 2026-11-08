@@ -253,6 +253,7 @@ mod tests {
         ) -> leviath_providers::Result<InferenceResponse> {
             match self.out.lock().unwrap().pop_front() {
                 Some(Ok(text)) => Ok(InferenceResponse {
+                    reasoning_summary: None,
                     parts: Vec::new(),
                     content: text,
                     tool_calls: vec![],
@@ -644,6 +645,7 @@ mod tests {
             self.inferred
                 .store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(InferenceResponse {
+                reasoning_summary: None,
                 content: "summary".to_string(),
                 tool_calls: vec![],
                 tokens_used: TokenUsage::new(1, 0, 0, 1),

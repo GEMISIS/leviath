@@ -48,6 +48,7 @@ impl Provider for AnswersOnce {
         _request: &InferenceRequest,
     ) -> leviath_providers::Result<InferenceResponse> {
         Ok(InferenceResponse {
+            reasoning_summary: None,
             content: "done".to_string(),
             tool_calls: Vec::new(),
             // Non-zero on purpose: a `tokens` frame only fires when the totals

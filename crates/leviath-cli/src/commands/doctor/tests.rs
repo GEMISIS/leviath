@@ -111,6 +111,7 @@ impl Provider for StubProvider {
     ) -> leviath_providers::Result<InferenceResponse> {
         match &self.reply {
             Ok(content) => Ok(InferenceResponse {
+                reasoning_summary: None,
                 parts: Vec::new(),
                 content: content.clone(),
                 tool_calls: Vec::new(),

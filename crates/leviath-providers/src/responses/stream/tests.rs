@@ -82,6 +82,23 @@ fn reasoning_summary_deltas_surface_as_reasoning_delta() {
 }
 
 #[test]
+fn a_later_summary_part_opens_a_paragraph_and_the_first_does_not() {
+    let part = |index: u64| {
+        parse_one(serde_json::json!({
+            "type": "response.reasoning_summary_part.added",
+            "summary_index": index,
+        }))
+    };
+    assert!(part(0).is_none(), "the first part needs no separator");
+    let c = part(1).unwrap().unwrap().unwrap();
+    assert_eq!(c.reasoning_delta.as_deref(), Some("\n\n"));
+    // No index at all is not a boundary either.
+    assert!(
+        parse_one(serde_json::json!({"type": "response.reasoning_summary_part.added"})).is_none()
+    );
+}
+
+#[test]
 fn a_reasoning_summary_delta_with_no_text_yields_nothing() {
     assert!(
         parse_one(serde_json::json!({"type": "response.reasoning_summary_text.delta"})).is_none()
@@ -416,7 +433,6 @@ fn the_bookkeeping_events_are_ignored() {
         "response.content_part.added",
         "response.content_part.done",
         "response.output_text.done",
-        "response.reasoning_summary_part.added",
         "response.reasoning_summary_part.done",
         "response.reasoning_summary_text.done",
         "response.function_call_arguments.done",

@@ -14,6 +14,12 @@ use crate::config::Config;
 
 /// What a provider needs from the user. Defined with the provider directory
 /// in `leviath-providers`, which owns the purpose-neutral half of every row.
+///
+/// In `lev`: an `ApiKey` is entered masked and stored in the credential
+/// store; a `Signin` types nothing and writes nothing to `config.toml`, the
+/// grant being taken by `lev auth login <id>`; a `BaseUrl` has a working
+/// default; an `Endpoint` row is a preset for `[model_providers.<name>]`
+/// entries of kind `openai-compatible`.
 pub use leviath_providers::directory::Credential;
 
 /// Where a provider's choice lives in a [`Config`], as the row itself
@@ -86,11 +92,12 @@ pub struct Provider {
 
 impl Provider {
     /// The row for `id` with what the directory knows filled in and the
-    /// wizard's own fields left blank, to be overridden by the caller.
+    /// wizard's own fields at their defaults, for a row to override.
     ///
-    /// The directory owns `display`, `credential`, `env_var` and
+    /// The directory owns `id`, `display`, `credential`, `env_var` and
     /// `signup_url`; this table owns the wording, the placeholder and where
-    /// the choice is stored. A test holds the two to the same set of ids.
+    /// the choice is stored. Tests hold the two to the same ids and each
+    /// row's `setting` to its credential.
     fn from_directory(id: &'static str) -> Self {
         let meta = leviath_providers::directory::meta(id).expect("every row is in the directory");
         Self {
@@ -143,10 +150,8 @@ pub(crate) const KIND_3D: &str = "3D models and textures";
 pub(crate) fn providers() -> Vec<Provider> {
     vec![
         Provider {
-            id: "anthropic",
             blurb: "Claude models. The default for every shipped blueprint.",
             hint: "sk-ant-...",
-            preset_url: None,
             setting: Setting::Text {
                 read: |c| c.providers.anthropic_api_key.clone(),
                 write: |c, v| c.providers.anthropic_api_key = v,
@@ -155,11 +160,9 @@ pub(crate) fn providers() -> Vec<Provider> {
             ..Provider::from_directory("anthropic")
         },
         Provider {
-            id: "openai",
             blurb: "GPT chat models, GPT Image, Sora video, speech and Whisper \
                     transcription.",
             hint: "sk-...",
-            preset_url: None,
             setting: Setting::Text {
                 read: |c| c.providers.openai_api_key.clone(),
                 write: |c, v| c.providers.openai_api_key = v,
@@ -168,11 +171,9 @@ pub(crate) fn providers() -> Vec<Provider> {
             ..Provider::from_directory("openai")
         },
         Provider {
-            id: "google",
             blurb: "Gemini chat and image models, Veo video, Gemini speech and Lyria \
                     music.",
             hint: "AIza...",
-            preset_url: None,
             setting: Setting::Text {
                 read: |c| c.providers.google_api_key.clone(),
                 write: |c, v| c.providers.google_api_key = v,
@@ -181,11 +182,9 @@ pub(crate) fn providers() -> Vec<Provider> {
             ..Provider::from_directory("google")
         },
         Provider {
-            id: "xai",
             blurb: "Grok chat, image, video and speech models, billed to an xAI API \
                     balance.",
             hint: "xai-...",
-            preset_url: None,
             setting: Setting::Text {
                 read: |c| c.providers.xai_api_key.clone(),
                 write: |c, v| c.providers.xai_api_key = v,
@@ -194,12 +193,10 @@ pub(crate) fn providers() -> Vec<Provider> {
             ..Provider::from_directory("xai")
         },
         Provider {
-            id: "meta",
             blurb: "Muse Spark chat, Muse Image and Muse Voice Transcribe, billed to a \
                     Meta developer account.",
             // Meta publishes no key prefix; Verify is the check.
             hint: "your Meta Model API key",
-            preset_url: None,
             setting: Setting::Text {
                 read: |c| c.providers.meta_api_key.clone(),
                 write: |c, v| c.providers.meta_api_key = v,
@@ -208,10 +205,8 @@ pub(crate) fn providers() -> Vec<Provider> {
             ..Provider::from_directory("meta")
         },
         Provider {
-            id: "openrouter",
             blurb: "One key, many vendors' models.",
             hint: "sk-or-...",
-            preset_url: None,
             setting: Setting::Text {
                 read: |c| c.openrouter_api_key.clone(),
                 write: |c, v| c.openrouter_api_key = v,
@@ -220,11 +215,9 @@ pub(crate) fn providers() -> Vec<Provider> {
             ..Provider::from_directory("openrouter")
         },
         Provider {
-            id: "meshy",
             blurb: "Generative 3D: reference images or a mesh in, a textured \
                     model out.",
             hint: "msy_...",
-            preset_url: None,
             setting: Setting::Text {
                 read: |c| c.providers.meshy_api_key.clone(),
                 write: |c, v| c.providers.meshy_api_key = v,
@@ -233,11 +226,9 @@ pub(crate) fn providers() -> Vec<Provider> {
             ..Provider::from_directory("meshy")
         },
         Provider {
-            id: "bedrock",
             blurb: "Claude, Nova, Llama, Mistral and more, billed to an AWS account. \
                     Takes a Bedrock API key; the region defaults to us-east-1.",
             hint: "ABSK...",
-            preset_url: None,
             setting: Setting::Text {
                 read: |c| c.providers.bedrock_api_key.clone(),
                 write: |c, v| c.providers.bedrock_api_key = v,
@@ -246,11 +237,9 @@ pub(crate) fn providers() -> Vec<Provider> {
             ..Provider::from_directory("bedrock")
         },
         Provider {
-            id: "codex",
             blurb: "GPT-5.x billed to a ChatGPT plan instead of an API balance. \
                     Signs in with a browser.",
             hint: "",
-            preset_url: None,
             setting: Setting::Switch {
                 read: |c| c.providers.codex_enabled,
                 write: |c, v| c.providers.codex_enabled = v,
@@ -259,11 +248,9 @@ pub(crate) fn providers() -> Vec<Provider> {
             ..Provider::from_directory("codex")
         },
         Provider {
-            id: "grok",
             blurb: "Grok billed to a SuperGrok or X Premium+ plan instead of an API \
                     balance. Signs in with a browser.",
             hint: "",
-            preset_url: None,
             setting: Setting::Switch {
                 read: |c| c.providers.grok_enabled,
                 write: |c, v| c.providers.grok_enabled = v,
@@ -272,10 +259,8 @@ pub(crate) fn providers() -> Vec<Provider> {
             ..Provider::from_directory("grok")
         },
         Provider {
-            id: "ollama",
             blurb: "Models running on this machine. No key needed.",
             hint: DEFAULT_OLLAMA_URL,
-            preset_url: None,
             // Two config fields, one setting. `ollama_enabled` is "I chose
             // Ollama" and the URL is "and it is not at the default address",
             // so a config that names a URL counts as chosen even if it
@@ -297,7 +282,6 @@ pub(crate) fn providers() -> Vec<Provider> {
             ..Provider::from_directory("ollama")
         },
         Provider {
-            id: "llama-cpp",
             blurb: "A llama.cpp server on this machine, over its OpenAI-compatible API. \
                     No key needed.",
             hint: LLAMA_CPP_URL,
@@ -307,7 +291,6 @@ pub(crate) fn providers() -> Vec<Provider> {
             ..Provider::from_directory("llama-cpp")
         },
         Provider {
-            id: "lm-studio",
             blurb: "LM Studio's local server, over its OpenAI-compatible API. No key \
                     needed.",
             hint: LM_STUDIO_URL,
@@ -317,11 +300,9 @@ pub(crate) fn providers() -> Vec<Provider> {
             ..Provider::from_directory("lm-studio")
         },
         Provider {
-            id: "openai-compatible",
             blurb: "vLLM, BionicGPT, a gateway, or any server that speaks the OpenAI \
                     chat API: a name, a base URL, and a key or headers if it wants them.",
             hint: "http://host:port/v1",
-            preset_url: None,
             setting: Setting::Endpoints,
 
             ..Provider::from_directory("openai-compatible")
@@ -512,16 +493,9 @@ mod tests {
     }
 
     #[test]
-    fn every_provider_has_a_distinct_id_and_is_described() {
+    fn every_provider_is_described_and_filed() {
         let all = providers();
-        let mut ids: Vec<&str> = all.iter().map(|p| p.id).collect();
-        ids.sort_unstable();
-        let total = ids.len();
-        ids.dedup();
-        assert_eq!(total, ids.len(), "duplicate provider ids");
-
         for p in &all {
-            assert!(!p.display.is_empty(), "provider {} has no label", p.id);
             assert!(!p.blurb.is_empty(), "provider {} has no blurb", p.id);
             // Every provider files under an auth kind and a modality, the two
             // headings the wizard groups by.
@@ -532,12 +506,12 @@ mod tests {
                 "provider {id} has an unknown auth kind {auth}"
             );
             assert!(!p.kinds().is_empty(), "provider {id} makes nothing");
+            // The placeholder is the wizard's own, and an empty field with no
+            // hint is a field with no explanation.
+            if p.credential == Credential::ApiKey {
+                assert!(!p.hint.is_empty(), "{id} has no placeholder");
+            }
         }
-        // The catalog carries all four auth kinds and every kind in use, so
-        // the classifier's arms are all exercised.
-        assert!(all.iter().any(|p| p.credential == Credential::Signin));
-        assert!(all.iter().any(|p| p.credential == Credential::BaseUrl));
-        assert!(all.iter().any(|p| p.credential == Credential::Endpoint));
         for kind in [KIND_TEXT, KIND_VIDEO, KIND_AUDIO, KIND_3D] {
             assert!(
                 all.iter().any(|p| p.kinds().contains(&kind)),
@@ -548,44 +522,37 @@ mod tests {
         assert_eq!(meta.kinds(), [KIND_TEXT, KIND_AUDIO]);
     }
 
-    /// The two tables are one set of providers, and the wizard's rows say
-    /// what the directory says: a row cannot drift from its directory entry.
+    /// Every wizard row has a directory row and the other way round, in the
+    /// same order, so neither table can gain a provider without the other.
     #[test]
     fn the_table_and_the_directory_list_the_same_providers() {
-        use leviath_providers::directory::PROVIDERS;
         let ours: Vec<&str> = providers().iter().map(|p| p.id).collect();
-        let theirs: Vec<&str> = PROVIDERS.iter().map(|p| p.id).collect();
-        assert_eq!(ours, theirs, "same ids in the same order");
-        for p in providers() {
-            let m = leviath_providers::directory::meta(p.id).expect("in the directory");
-            assert_eq!(p.display, m.display);
-            assert_eq!(p.credential, m.credential);
-            assert_eq!(p.env_var, m.env_var);
-            assert_eq!(p.signup_url, m.signup_url);
-        }
-    }
-
-    #[test]
-    fn every_api_key_provider_names_its_env_var_and_a_place_to_get_one() {
-        // Both drive real behaviour: the env var lets the wizard say "already
-        // in your environment" instead of asking again, and the URL backs the
-        // "open the signup page" key.
-        for p in providers()
+        let theirs: Vec<&str> = leviath_providers::directory::PROVIDERS
             .iter()
-            .filter(|p| p.credential == Credential::ApiKey)
-        {
-            assert!(p.env_var.is_some(), "{} has no env var", p.id);
-            assert!(p.signup_url.is_some(), "{} has no signup URL", p.id);
-            assert!(!p.hint.is_empty(), "{} has no placeholder", p.id);
-        }
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(ours, theirs);
     }
 
+    /// `from_directory` leaves `setting` as a placeholder, so a row that
+    /// forgot to set it would be silently inert. The setting kind is fixed by
+    /// the credential.
     #[test]
-    fn the_table_covers_every_credential_kind() {
-        let all = providers();
-        assert!(all.iter().any(|p| p.credential == Credential::ApiKey));
-        assert!(all.iter().any(|p| p.credential == Credential::BaseUrl));
-        assert!(all.iter().any(|p| p.credential == Credential::Endpoint));
+    fn every_row_stores_its_choice_the_way_its_credential_implies() {
+        for p in providers() {
+            let ok = match p.credential {
+                Credential::ApiKey | Credential::BaseUrl => {
+                    matches!(p.setting, Setting::Text { .. })
+                }
+                Credential::Signin => matches!(p.setting, Setting::Switch { .. }),
+                Credential::Endpoint => matches!(p.setting, Setting::Endpoints),
+            };
+            assert!(
+                ok,
+                "{} has setting {:?} for {:?}",
+                p.id, p.setting, p.credential
+            );
+        }
     }
 
     /// The two local presets start at their server's own default port and

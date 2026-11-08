@@ -574,6 +574,7 @@ mod tests {
                 return Err(ProviderError::Other("boom".to_string()));
             }
             Ok(InferenceResponse {
+                reasoning_summary: None,
                 content: self.reply.clone(),
                 tool_calls: vec![],
                 tokens_used: TokenUsage {

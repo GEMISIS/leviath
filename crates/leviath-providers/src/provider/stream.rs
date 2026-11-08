@@ -199,6 +199,8 @@ pub async fn collect_stream(
     // Whichever chunk carried the provider's reasoning item, which is not
     // necessarily the last one.
     let mut reasoning = None;
+    // The readable summary, which arrives in pieces across the stream.
+    let mut summary: Option<String> = None;
     let mut parts = Vec::new();
 
     while let Some(chunk) = stream.next().await {
@@ -230,6 +232,9 @@ pub async fn collect_stream(
         if chunk.reasoning.is_some() {
             reasoning = chunk.reasoning;
         }
+        if let Some(text) = chunk.reasoning_delta {
+            summary.get_or_insert_with(String::new).push_str(&text);
+        }
     }
 
     let Some(finish_reason) = finish_reason else {
@@ -249,6 +254,7 @@ pub async fn collect_stream(
         tokens_used: tokens,
         finish_reason,
         reasoning,
+        reasoning_summary: summary,
         parts,
         content_is_reasoning: false,
     })
@@ -621,6 +627,30 @@ mod tests {
     /// count on `message_delta`, so keeping only the last chunk would report
     /// every streamed turn's prompt as zero - and with the three input counts
     /// disjoint and priced differently, that is a bill, not a display bug.
+    #[tokio::test]
+    async fn collect_stream_joins_reasoning_summary_deltas() {
+        let summary = |text: &str| StreamChunk {
+            reasoning_delta: Some(text.to_string()),
+            ..text_chunk("")
+        };
+        let done = StreamChunk {
+            finish_reason: Some(FinishReason::Complete),
+            ..text_chunk("")
+        };
+        let response = collect_stream(chunks(vec![summary("Weighing "), summary("it"), done]))
+            .await
+            .unwrap();
+        assert_eq!(response.reasoning_summary.as_deref(), Some("Weighing it"));
+
+        // A stream that carried none leaves it unset rather than empty.
+        let plain = StreamChunk {
+            finish_reason: Some(FinishReason::Complete),
+            ..text_chunk("hi")
+        };
+        let response = collect_stream(chunks(vec![plain])).await.unwrap();
+        assert!(response.reasoning_summary.is_none());
+    }
+
     #[tokio::test]
     async fn collect_stream_adds_usage_across_chunks() {
         let stream = chunks(vec![

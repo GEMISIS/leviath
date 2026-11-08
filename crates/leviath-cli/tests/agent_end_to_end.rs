@@ -119,6 +119,7 @@ impl Provider for WritesThenAnswers {
             }],
         };
         Ok(InferenceResponse {
+            reasoning_summary: None,
             content: match tool_calls.is_empty() {
                 true => "done".to_string(),
                 false => String::new(),
@@ -308,6 +309,7 @@ impl Provider for AlwaysDone {
         _request: &InferenceRequest,
     ) -> leviath_providers::Result<InferenceResponse> {
         Ok(InferenceResponse {
+            reasoning_summary: None,
             content: "done".to_string(),
             tool_calls: Vec::new(),
             tokens_used: TokenUsage {

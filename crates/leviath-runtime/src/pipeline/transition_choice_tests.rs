@@ -298,6 +298,7 @@ fn openrouter_turns_reasoning_down_for_the_models_that_must_reason() {
 fn a_cut_off_or_reasoning_reply_gives_no_routing_answer() {
     use leviath_providers::FinishReason::{Complete, Stop, TokenLimit};
     let reply = |finish: leviath_providers::FinishReason, from_reasoning: bool| InferenceResponse {
+        reasoning_summary: None,
         content: "  summary\n".to_string(),
         tool_calls: vec![],
         tokens_used: leviath_providers::TokenUsage::new(1, 0, 0, 1),

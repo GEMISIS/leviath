@@ -36,6 +36,7 @@ impl Provider for Vendor {
             ));
         }
         Ok(InferenceResponse {
+            reasoning_summary: None,
             parts: Vec::new(),
             content: "read it".into(),
             tool_calls: vec![],

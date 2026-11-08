@@ -848,6 +848,7 @@ impl AnthropicProvider {
             .unwrap_or(0) as usize;
 
         Ok(InferenceResponse {
+            reasoning_summary: None,
             content,
             tool_calls,
             // `input_tokens` is already exclusive of both cache counts here, so

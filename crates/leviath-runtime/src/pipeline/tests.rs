@@ -239,6 +239,7 @@ impl Provider for Cfg {
         _r: &InferenceRequest,
     ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
         Ok(leviath_providers::InferenceResponse {
+            reasoning_summary: None,
             content: "ok".to_string(),
             tool_calls: vec![],
             tokens_used: leviath_providers::TokenUsage {
@@ -1702,6 +1703,7 @@ fn agent_state() -> AgentState {
 
 fn resp(text: &str) -> leviath_providers::InferenceResponse {
     leviath_providers::InferenceResponse {
+        reasoning_summary: None,
         parts: Vec::new(),
         content: text.to_string(),
         tool_calls: vec![],
@@ -5010,6 +5012,7 @@ impl Provider for FixedWindow {
         _r: &InferenceRequest,
     ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
         Ok(leviath_providers::InferenceResponse {
+            reasoning_summary: None,
             content: "ok".to_string(),
             tool_calls: vec![],
             tokens_used: leviath_providers::TokenUsage {
@@ -16776,6 +16779,7 @@ impl Provider for EchoesExtras {
         r: &InferenceRequest,
     ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
         Ok(leviath_providers::InferenceResponse {
+            reasoning_summary: None,
             content: r.extra.to_string(),
             tool_calls: vec![],
             tokens_used: leviath_providers::TokenUsage {
