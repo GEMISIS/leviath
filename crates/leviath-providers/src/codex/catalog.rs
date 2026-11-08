@@ -57,6 +57,12 @@ pub(crate) const CATALOG: &[(&str, &str)] = &[
     ("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark"),
 ];
 
+/// The ids in the compiled catalog, for the live probe and anything else outside this
+/// crate that has to agree with what is compiled in.
+pub fn ids() -> Vec<&'static str> {
+    CATALOG.iter().map(|(id, _)| *id).collect()
+}
+
 /// Models a plan tier cannot reach, by the exact string the tier reports.
 ///
 /// An allowlist would be the obvious shape and is the wrong one: a model added
@@ -80,21 +86,27 @@ const PLAN_EXCLUSIONS: &[(&str, &[&str])] = &[
 /// temperature` for every model it serves.
 pub(crate) const MODELS: &[Row] = &[
     Row {
-        // The route's own `max_context_window` for every gpt-6 model, read
-        // from `GET /models` on a Plus account on 2026-11-08 (OpenRouter's
-        // 1,050,000 is the API's window; this route reports less). Output
-        // keeps the 128,000 allowance of the 5.x rows.
+        // The route's `GET /models` reports `max_context_window: 872000` for
+        // every gpt-6 and gpt-5.6 model (Plus account, 2026-11-08), against
+        // 1,050,000 on OpenRouter. Codex CLI counts everything in the
+        // conversation against that figure, so it is the *whole* window, while
+        // `max_context_tokens` is the input window: the 128,000 output
+        // allowance comes off, 872,000 - 128,000 = 744,000. A live listing is
+        // read the same way (`CodexProvider::capabilities`), so online and
+        // offline runs agree. `cargo xtask prices` knows this row as a
+        // measured exception to the published 922,000.
         matches: &[Match::Prefix("gpt-6")],
         temperature: false,
         tools: true,
-        context: 872_000,
+        context: 744_000,
         output: 128_000,
     },
     Row {
+        // Same route figure and reading as the gpt-6 row above.
         matches: &[Match::Prefix("gpt-5.6")],
         temperature: false,
         tools: true,
-        context: 922_000,
+        context: 744_000,
         output: 128_000,
     },
     Row {
@@ -167,8 +179,11 @@ pub(crate) fn served(plan: Option<&str>) -> Vec<String> {
 }
 
 /// The remedy for a model the account's plan does not include.
-pub(crate) fn gated_remedy(plan: Option<&str>, model: &str) -> String {
-    let available = served(plan).join(", ");
+///
+/// `offered` is what the account can use: the route's own listing when it has
+/// been read, [`served`] otherwise.
+pub(crate) fn remedy(plan: Option<&str>, model: &str, offered: &[String]) -> String {
+    let available = offered.join(", ");
     match plan {
         Some(plan) => format!(
             "your ChatGPT {plan} plan does not include '{model}'. Available on this plan: \
@@ -208,7 +223,7 @@ mod tests {
         // The published `max_input_tokens`, not a round number: these were
         // 400,000 for both, which no vendor publishes for either, and the
         // weekly window check is what now holds them to the source.
-        assert_eq!(capabilities("gpt-5.6-sol").max_context_tokens, 922_000);
+        assert_eq!(capabilities("gpt-5.6-sol").max_context_tokens, 744_000);
         assert_eq!(capabilities("gpt-5.5").max_context_tokens, 922_000);
     }
 
@@ -252,7 +267,7 @@ mod tests {
     #[test]
     fn gpt_6_takes_the_windows_the_route_reports() {
         let caps = capabilities("gpt-6.1-sol");
-        assert_eq!(caps.max_context_tokens, 872_000);
+        assert_eq!(caps.max_context_tokens, 744_000);
         assert_eq!(caps.max_output_tokens, 128_000);
         assert!(!caps.supports_temperature);
     }
@@ -273,13 +288,21 @@ mod tests {
     }
 
     #[test]
+    fn the_public_id_list_is_the_compiled_catalog() {
+        let ids = ids();
+        assert_eq!(ids.len(), CATALOG.len());
+        assert!(ids.contains(&"gpt-6.1-sol"));
+    }
+
+    #[test]
     fn the_plan_comparison_ignores_case() {
         assert!(!plan_allows(Some("PLUS"), "gpt-5.3-codex-spark"));
     }
 
     #[test]
     fn the_gated_remedy_names_the_plan_and_what_is_left() {
-        let message = gated_remedy(Some("plus"), "gpt-5.3-codex-spark");
+        let offered = served(Some("plus"));
+        let message = remedy(Some("plus"), "gpt-5.3-codex-spark", &offered);
         assert!(message.contains("plus plan"), "{message}");
         assert!(message.contains("gpt-5.6-sol"), "{message}");
         assert!(!message.contains("Available on this plan: gpt-5.3-codex-spark"));
@@ -287,7 +310,7 @@ mod tests {
 
     #[test]
     fn the_gated_remedy_still_helps_without_a_known_plan() {
-        let message = gated_remedy(None, "some-model");
+        let message = remedy(None, "some-model", &served(None));
         assert!(message.contains("some-model"), "{message}");
         assert!(message.contains("gpt-5.6-sol"), "{message}");
     }

@@ -138,6 +138,18 @@ fn number(chunk: &str, field: &str) -> Option<u64> {
     digits.parse().ok()
 }
 
+/// Context windows measured against the route itself, which the vendor's
+/// published figure does not describe: `(label, prefix, context)`.
+///
+/// The Codex route's `GET /models` reports `max_context_window: 872000` for the
+/// gpt-6 and gpt-5.6 models (Plus account, 2026-11-08), where the API publishes
+/// a 922,000 input window. That is the whole window, so the row carries
+/// 872,000 - 128,000 = 744,000 input tokens. Without this entry the weekly
+/// check would report the row as drifted for ever; with it, the check still
+/// speaks the day the row stops matching the measurement.
+const MEASURED: &[(&str, &str, u64)] =
+    &[("codex", "gpt-5.6", 744_000), ("codex", "gpt-6", 744_000)];
+
 /// Where `rows` disagrees with what the vendor publishes.
 ///
 /// A row is judged against the *most specific* published model it answers
@@ -157,7 +169,10 @@ pub fn drift(label: &str, rows: &[Row], published: &Windows) -> Vec<String> {
             else {
                 continue;
             };
-            if row.context != *context {
+            let measured = MEASURED
+                .iter()
+                .any(|(l, p, c)| *l == label && *p == prefix && *c == row.context);
+            if row.context != *context && !measured {
                 report.push(format!(
                     "{label}: '{prefix}' has context {} and {id} publishes {context}",
                     row.context
@@ -288,6 +303,27 @@ mod tests {
         assert_eq!(report.len(), 1, "{report:?}");
         assert!(report[0].contains("context 400000"), "{report:?}");
         assert!(report[0].contains("922000"), "{report:?}");
+    }
+
+    /// A window measured against the route is not reported against the
+    /// published one, but only for the label and the number it was measured
+    /// at: the same prefix on another provider, or at another number, still is.
+    #[test]
+    fn a_measured_window_is_an_exception_only_where_it_was_measured() {
+        let rows = vec![Row {
+            prefixes: vec!["gpt-6".to_string()],
+            context: 744_000,
+            output: 128_000,
+        }];
+        let sources = published(&[("gpt-6-sol", 922_000, 128_000)]);
+        assert!(drift("codex", &rows, &sources).is_empty());
+        assert_eq!(drift("openai", &rows, &sources).len(), 1);
+
+        let moved = vec![Row {
+            context: 700_000,
+            ..rows.into_iter().next().expect("one row")
+        }];
+        assert_eq!(drift("codex", &moved, &sources).len(), 1);
     }
 
     /// The output cap is checked too, and separately: the two are different

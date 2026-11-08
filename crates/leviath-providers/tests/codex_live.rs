@@ -19,28 +19,12 @@ use std::sync::Arc;
 use leviath_providers::codex::{DEFAULT_BASE_URL, DEFAULT_ORIGINATOR, PROFILE, PROVIDER_NAME};
 use leviath_providers::oauth::{HttpRefresh, OAuthTokenSource, TokenSource};
 
-/// A Codex CLI version string for the `client_version` query parameter.
-const CLIENT_VERSION: &str = "0.162.1";
+use leviath_providers::codex::catalog;
+use leviath_providers::codex::listing::CLIENT_VERSION;
 
-/// Ids compiled into the catalog when this probe was written.
-const CATALOG_IDS: &[&str] = &[
-    "gpt-5.6-sol",
-    "gpt-5.6-terra",
-    "gpt-5.6-luna",
-    "gpt-5.5",
-    "gpt-5.3-codex-spark",
-];
-
-/// Ids OpenRouter lists, plus guesses at pro variants.
-const CANDIDATES: &[&str] = &[
-    "gpt-6.1-sol",
-    "gpt-6.1-terra",
-    "gpt-6-sol",
-    "gpt-6-astra",
-    "gpt-6-luna",
-    "gpt-6-astra-pro",
-    "gpt-6.1-sol-pro",
-];
+/// Ids that are not in the catalog and worth asking about: guesses at pro
+/// variants of the compiled gpt-6 ids.
+const CANDIDATES: &[&str] = &["gpt-6-astra-pro", "gpt-6.1-sol-pro"];
 
 fn home() -> PathBuf {
     let home = std::env::var("LEVIATH_HOME").unwrap_or_default();
@@ -97,7 +81,8 @@ async fn probe_the_live_codex_route() {
     println!("GET /models -> {status}\n{body}\n");
 
     // (b) one minimal request per id.
-    for id in CATALOG_IDS.iter().chain(CANDIDATES) {
+    let compiled = catalog::ids();
+    for id in compiled.iter().chain(CANDIDATES) {
         let body = serde_json::json!({
             "model": id,
             "instructions": "Reply with the single word ok.",
