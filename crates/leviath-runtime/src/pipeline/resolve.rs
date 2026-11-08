@@ -101,7 +101,7 @@ impl ModelDefaults {
 /// One place a stage's requests may go: a provider and a model on it, as
 /// the resolver weighs them.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Candidate {
+pub struct Candidate {
     /// The provider's name. Empty only for a stage that names no provider
     /// and nothing else could be found for it.
     pub provider: String,
@@ -180,7 +180,7 @@ pub fn model_key(model: &str) -> &str {
 /// list twice would spend a failover step going nowhere. Never empty: with
 /// nothing registered it yields the blueprint's own first entry, and
 /// `resolve_stage_route` rejects that unusable case with a clear error.
-pub(crate) fn resolve_stage_candidates(
+pub fn resolve_stage_candidates(
     model_cfg: &ModelChoice,
     model_override: Option<&str>,
     defaults: &ModelDefaults,
@@ -233,7 +233,7 @@ impl Resolving<'_> {
 /// stable order, so a stage reading a storyboard lands on the model that
 /// can see it when the blueprint lists such a model anywhere. A pinned
 /// `provider/model` override is never reordered: the caller asked for it.
-pub(crate) fn resolve_stage_candidates_for(
+pub fn resolve_stage_candidates_for(
     model_cfg: &ModelChoice,
     model_override: Option<&str>,
     defaults: &ModelDefaults,

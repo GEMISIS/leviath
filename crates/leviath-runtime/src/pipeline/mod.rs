@@ -180,14 +180,14 @@ pub(crate) use inference::{
     BATCH_TOOL_HINT, WINDOWS_SHELL_HINT, build_request, effective_parameters, hint_blocks,
     shell_guidance_for, source_context_digest, tool_catalog_version,
 };
-pub use inference::{CaptureModelInput, MODEL_INPUT_ASSEMBLY_VERSION};
+pub use inference::{CaptureModelInput, MODEL_INPUT_ASSEMBLY_VERSION, with_effort};
 pub(crate) use inference::{
     InFlightWork, abort_terminal_work, dispatch_inference, retry_policy_for, track_in_flight,
 };
 mod resolve;
 pub use resolve::{
-    HeadSource, ModelDefaults, bare_user_model, is_unread_catalog_refusal, model_key,
-    providers_tried, resolve_stage_model,
+    Candidate, HeadSource, ModelDefaults, bare_user_model, is_unread_catalog_refusal, model_key,
+    providers_tried, resolve_stage_candidates, resolve_stage_candidates_for, resolve_stage_model,
 };
 pub(crate) use resolve::{
     Resolving, StageMimes, made_beyond_text, resolve_candidates, resolve_stage_route,

@@ -526,7 +526,7 @@ pub(crate) fn build_request(
 /// provider gets that provider's field, or none when its model takes no
 /// effort, never the first provider's. A key the stage set itself in its
 /// parameters is left as the stage wrote it.
-pub(crate) fn with_effort(
+pub fn with_effort(
     mut extra: serde_json::Map<String, serde_json::Value>,
     provider: &dyn Provider,
     model: &str,

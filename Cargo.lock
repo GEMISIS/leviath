@@ -3004,6 +3004,7 @@ dependencies = [
  "crc32fast",
  "futures-core",
  "hex",
+ "keyring-core",
  "leviath-core",
  "leviath-providers",
  "leviath-scripting",
