@@ -25,10 +25,12 @@ same list.
   environment and, under `credential_store = "keychain"`, the OS store, and returns the
   `ProviderCreds` list `build_provider_registry` takes, the `ModelDefaults` a stage
   resolves against, and where each key came from. The host chooses the data directory
-  and whether the environment and the keychain are read. `[model_providers]` entries are
-  not covered. The stage resolver's ranked list (`resolve_stage_candidates_for`,
-  `Candidate`) and `with_effort` are public too, so a host can rank models as a stage
-  does.
+  and whether the environment and the keychain are read; the keychain is asked only for
+  keys still missing. `[model_providers]` entries are not covered. `KEYED_PROVIDERS` is
+  the one table of keyed providers and their variables, looked up by name, and `lev`
+  reads it too. The stage resolver's ranked list (`resolve_stage_candidates_for`,
+  `resolve_stage_candidates_named`, `Candidate`) and `with_effort` are public too, so a
+  host can rank models as a stage does.
 
 - A provider script can call an API that answers with raw audio or image bytes:
   `http_get_bytes(url [, headers])` and `http_post_bytes(url, body [, headers])` return

@@ -9,13 +9,13 @@
 
 use super::Config;
 
-/// One provider API key: where it sits in [`Config`], the variable that
-/// stands in for it, and the account the credential store files it under.
+/// One provider API key: where it sits in [`Config`], and the provider it
+/// belongs to. The variable that stands in for it and the account the
+/// credential store files it under are looked up by that name.
 pub(crate) struct ProviderKey {
-    /// The provider, as the credential store's account names it.
+    /// The provider, as the credential store's account and the runtime's
+    /// [`leviath_runtime::KEYED_PROVIDERS`] name it.
     provider: &'static str,
-    /// The environment variable read when the file leaves the key unset.
-    pub(crate) env: &'static str,
     /// The key, as the config holds it.
     get: fn(&Config) -> Option<&str>,
     /// The key's field, to fill or clear.
@@ -27,67 +27,65 @@ impl ProviderKey {
     pub(crate) fn account(&self) -> String {
         leviath_core::provider_account(self.provider)
     }
+
+    /// The environment variable read when the file leaves the key unset,
+    /// from the runtime's table, which is the one place it is spelled: an
+    /// embedder loading the same keys reads it there too.
+    pub(crate) fn env(&self) -> &'static str {
+        leviath_runtime::keyed_provider(self.provider)
+            .expect("every config key names a provider the runtime's table lists")
+            .key_env
+    }
 }
 
-// The runtime's table of provider names and variables, the one place either
-// is spelled: an embedder loading the same keys reads it too.
-use leviath_runtime::user_creds::PROVIDER_KEYS as NAMES;
-
-/// Every provider API key the config holds, in the runtime table's order.
+/// Every provider API key the config holds.
 ///
 /// Fixed, because the OS stores offer no portable "list everything under this
 /// service" operation: the accounts to look for have to come from somewhere,
 /// and for provider keys it is this table. A test holds it to every
-/// `*_api_key` field of [`Config`] and [`super::ProviderConfig`], and each
-/// entry to the field named for its provider.
+/// `*_api_key` field of [`Config`] and [`super::ProviderConfig`], to the
+/// runtime's table by name, and each entry to the field named for its
+/// provider.
 pub(crate) const PROVIDER_KEYS: &[ProviderKey] = &[
     ProviderKey {
-        provider: NAMES[0].0,
-        env: NAMES[0].1,
+        provider: "anthropic",
         get: |c| c.providers.anthropic_api_key.as_deref(),
         slot: |c| &mut c.providers.anthropic_api_key,
     },
     ProviderKey {
-        provider: NAMES[1].0,
-        env: NAMES[1].1,
+        provider: "openai",
         get: |c| c.providers.openai_api_key.as_deref(),
         slot: |c| &mut c.providers.openai_api_key,
     },
     ProviderKey {
-        provider: NAMES[2].0,
-        env: NAMES[2].1,
+        provider: "google",
         get: |c| c.providers.google_api_key.as_deref(),
         slot: |c| &mut c.providers.google_api_key,
     },
     // The one key at the top level of the file rather than under
     // `[providers]`.
     ProviderKey {
-        provider: NAMES[3].0,
-        env: NAMES[3].1,
+        provider: "openrouter",
         get: |c| c.openrouter_api_key.as_deref(),
         slot: |c| &mut c.openrouter_api_key,
     },
     ProviderKey {
-        provider: NAMES[4].0,
-        env: NAMES[4].1,
+        provider: "meshy",
         get: |c| c.providers.meshy_api_key.as_deref(),
         slot: |c| &mut c.providers.meshy_api_key,
     },
     ProviderKey {
-        provider: NAMES[5].0,
-        env: NAMES[5].1,
+        provider: leviath_providers::bedrock::PROVIDER_NAME,
         get: |c| c.providers.bedrock_api_key.as_deref(),
         slot: |c| &mut c.providers.bedrock_api_key,
     },
     ProviderKey {
-        provider: NAMES[6].0,
-        env: NAMES[6].1,
+        provider: leviath_providers::xai::PROVIDER_NAME,
         get: |c| c.providers.xai_api_key.as_deref(),
         slot: |c| &mut c.providers.xai_api_key,
     },
     ProviderKey {
-        provider: NAMES[7].0,
-        env: NAMES[7].1,
+        provider: leviath_providers::meta::PROVIDER_NAME,
         get: |c| c.providers.meta_api_key.as_deref(),
         slot: |c| &mut c.providers.meta_api_key,
     },
@@ -100,7 +98,7 @@ impl Config {
         for key in PROVIDER_KEYS {
             let slot = (key.slot)(self);
             if slot.is_none() {
-                *slot = std::env::var(key.env).ok();
+                *slot = std::env::var(key.env()).ok();
             }
         }
     }
@@ -350,18 +348,30 @@ mod tests {
         );
     }
 
-    /// The table is the runtime's, entry for entry, and each entry's slot is
-    /// the field named for its provider: `<provider>_api_key`.
+    /// The table and the runtime's list the same providers, matched by name
+    /// rather than position, and each entry's slot is the field named for its
+    /// provider (`<provider>_api_key`), so an entry inserted or moved in
+    /// either table cannot bind one provider's key to another's variable.
     #[test]
-    fn the_table_is_the_runtimes_and_each_slot_is_named_for_its_provider() {
-        let runtime = leviath_runtime::user_creds::PROVIDER_KEYS;
-        assert_eq!(PROVIDER_KEYS.len(), runtime.len());
-        for (key, (provider, env)) in PROVIDER_KEYS.iter().zip(runtime) {
-            assert_eq!((key.provider, key.env), (*provider, *env));
+    fn the_table_matches_the_runtimes_by_name_and_each_slot_is_named_for_its_provider() {
+        let mut ours: Vec<&str> = PROVIDER_KEYS.iter().map(|k| k.provider).collect();
+        let mut runtime: Vec<&str> = leviath_runtime::KEYED_PROVIDERS
+            .iter()
+            .map(|k| k.provider)
+            .collect();
+        ours.sort_unstable();
+        runtime.sort_unstable();
+        assert_eq!(ours, runtime);
+        for key in PROVIDER_KEYS {
+            let provider = key.provider;
+            assert_eq!(
+                key.env(),
+                leviath_runtime::keyed_provider(provider).unwrap().key_env
+            );
             let mut config = Config::default();
             *(key.slot)(&mut config) = Some("set".to_string());
             let value = serde_json::to_value(&config).unwrap();
-            let holder = match *provider {
+            let holder = match provider {
                 "openrouter" => &value,
                 _ => &value["providers"],
             };
@@ -375,14 +385,14 @@ mod tests {
     fn a_key_the_file_left_unset_comes_from_its_variable() {
         let vars: Vec<(&str, Option<&str>)> = PROVIDER_KEYS
             .iter()
-            .map(|key| (key.env, Some(key.provider)))
+            .map(|key| (key.env(), Some(key.provider)))
             .collect();
         temp_env::with_vars(vars, || {
             let mut config = Config::default();
             config.providers.openai_api_key = Some("from-file".to_string());
             config.keys_from_env();
             for key in PROVIDER_KEYS.iter().filter(|key| key.provider != "openai") {
-                assert_eq!((key.get)(&config), Some(key.provider), "{}", key.env);
+                assert_eq!((key.get)(&config), Some(key.provider), "{}", key.env());
             }
             assert_eq!(
                 config.providers.openai_api_key.as_deref(),

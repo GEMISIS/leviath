@@ -10,8 +10,9 @@
 use super::*;
 
 /// Every keyed provider with a host and a header, Ollama, both sign-ins,
-/// limits, overrides and routing preferences, in the file backend. Some keys
-/// and hosts are left out of the file so the environment fills them.
+/// limits, overrides and routing preferences, in the file backend, plus one
+/// `[model_providers]` endpoint. Some keys and hosts are left out of the file
+/// so the environment fills them.
 const FIXTURE: &str = r#"
 default_provider = "openai"
 override_model = "gpt-override"
@@ -62,25 +63,23 @@ X-Gateway = "gw"
 
 [providers.xai_headers]
 X-Tenant = "t"
+
+# The one documented exclusion: the runtime loader does not read these.
+[model_providers.groq]
+kind = "openai-compatible"
+base_url = "https://groq.example/v1"
 "#;
 
 /// The variables the two loaders read, each set or cleared explicitly so the
 /// machine running the suite cannot leak into either side.
 fn environment(home: &std::path::Path) -> Vec<(String, Option<String>)> {
-    let mut vars: Vec<(String, Option<String>)> = leviath_runtime::user_creds::PROVIDER_KEYS
+    let mut vars: Vec<(String, Option<String>)> = leviath_runtime::KEYED_PROVIDERS
         .iter()
-        .map(|(_, var)| (var.to_string(), None))
+        .flat_map(|k| std::iter::once(k.key_env).chain(k.base_url_env))
+        .map(|var| (var.to_string(), None))
         .collect();
     vars.extend(
         [
-            "ANTHROPIC_BASE_URL",
-            "OPENAI_BASE_URL",
-            "GOOGLE_BASE_URL",
-            "OPENROUTER_BASE_URL",
-            "MESHY_BASE_URL",
-            "BEDROCK_BASE_URL",
-            "XAI_BASE_URL",
-            "META_AI_BASE_URL",
             "AWS_REGION",
             "AWS_DEFAULT_REGION",
             "OLLAMA_HOST",
@@ -147,11 +146,21 @@ fn the_runtime_loader_matches_the_cli_for_every_covered_provider() {
             ],
             "every covered provider is exercised"
         );
+        // Everything the CLI registers, less only the `[model_providers]`
+        // entries the runtime loader documents it does not read: a provider
+        // the CLI registers and the runtime omits fails here.
         let cli: Vec<ProviderCreds> = provider_creds_from_config(&config)
             .into_iter()
-            .filter(|c| names.contains(&c.name.as_str()))
+            .filter(|c| !config.model_providers.contains_key(&c.name))
             .collect();
-        assert_eq!(cli.len(), loaded.creds.len(), "the CLI registers them all");
+        assert!(
+            provider_creds_from_config(&config)
+                .iter()
+                .any(|c| c.name == "groq"),
+            "the exclusion is exercised"
+        );
+        let cli_names: Vec<&str> = cli.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(cli_names, names, "the same providers, in the same order");
         for (cli, runtime) in cli.iter().zip(&loaded.creds) {
             assert!(
                 cli == runtime,
