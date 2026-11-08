@@ -233,7 +233,24 @@ impl Resolving<'_> {
 /// stable order, so a stage reading a storyboard lands on the model that
 /// can see it when the blueprint lists such a model anywhere. A pinned
 /// `provider/model` override is never reordered: the caller asked for it.
+///
+/// The warnings this logs name the stage with a blank name (`stage ''`);
+/// [`resolve_stage_candidates_named`] takes the name to report instead.
 pub fn resolve_stage_candidates_for(
+    model_cfg: &ModelChoice,
+    model_override: Option<&str>,
+    defaults: &ModelDefaults,
+    registry: &ProviderRegistry,
+    needs: &[String],
+) -> Vec<Candidate> {
+    resolve_stage_candidates_named("", model_cfg, model_override, defaults, registry, needs)
+}
+
+/// [`resolve_stage_candidates_for`], naming the stage `stage` in every
+/// warning it logs, so a host resolving its own stages reports them by the
+/// name it gave them.
+pub fn resolve_stage_candidates_named(
+    stage: &str,
     model_cfg: &ModelChoice,
     model_override: Option<&str>,
     defaults: &ModelDefaults,
@@ -246,7 +263,7 @@ pub fn resolve_stage_candidates_for(
         defaults,
         registry,
         needs,
-        Resolving::Stage(""),
+        Resolving::Stage(stage),
     )
 }
 
@@ -2238,6 +2255,16 @@ mod tests {
             pairs(&got),
             vec![("seeing", "vision"), ("blind", "text-only")]
         );
+        // The stage's name changes what a warning says, never the order.
+        let named = resolve_stage_candidates_named(
+            "storyboard",
+            &cfg,
+            None,
+            &ModelDefaults::default(),
+            &registry,
+            &needs,
+        );
+        assert_eq!(named, got);
         // Nothing needed, or nothing that sees: the blueprint's order stands.
         let got =
             resolve_stage_candidates_for(&cfg, None, &ModelDefaults::default(), &registry, &[]);

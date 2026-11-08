@@ -55,14 +55,33 @@ fn a_missing_file_is_the_defaults() {
     assert!(loaded.warnings.is_empty());
 }
 
-/// The table and the slots agree: entry `i` of [`PROVIDER_KEYS`] reads the
-/// field named for its provider, and the variable stands in for it.
+/// Every entry of [`KEYED_PROVIDERS`] has its fields, found by name, and
+/// those fields are the ones named for it: a key written as
+/// `<provider>_api_key` registers that provider and no other, and its
+/// variable stands in for it. Bound by name, so reordering or inserting an
+/// entry cannot move one provider's key onto another.
 #[test]
 fn every_keyed_provider_reads_its_own_field_and_variable() {
-    assert_eq!(settings::KEYED.len(), PROVIDER_KEYS.len());
-    for (keyed, names) in settings::KEYED.iter().zip(PROVIDER_KEYS) {
-        assert_eq!(keyed.names, *names);
-        let (provider, var) = *names;
+    let mut names: Vec<&str> = KEYED_PROVIDERS.iter().map(|k| k.provider).collect();
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(
+        names.len(),
+        KEYED_PROVIDERS.len(),
+        "a provider listed twice"
+    );
+    let mut slotted: Vec<&str> = settings::SLOTS.iter().map(|s| s.provider).collect();
+    slotted.sort_unstable();
+    assert_eq!(
+        slotted, names,
+        "fields for a provider the table does not list"
+    );
+    assert_eq!(keyed_provider("ollama"), None);
+
+    for keyed in KEYED_PROVIDERS {
+        let (provider, var) = (keyed.provider, keyed.key_env);
+        assert_eq!(keyed_provider(provider), Some(keyed));
+        assert_eq!(settings::slots(provider).provider, provider);
         let table = if provider == "openrouter" {
             ""
         } else {
@@ -87,7 +106,124 @@ fn every_keyed_provider_reads_its_own_field_and_variable() {
         let loaded = load_user_creds(&source).unwrap();
         assert_eq!(loaded.creds[0].name, provider, "{var}");
         assert_eq!(loaded.origins[provider], KeyOrigin::Env(var.to_string()));
+
+        // The host variable reaches this provider's host and no other's.
+        let host = keyed.base_url_env.expect("every keyed provider has one");
+        let dir = with_config(&format!("{table}{provider}_api_key = \"k\"\n"));
+        let env = env_of(&[(host, "https://gateway.example")]);
+        let source = UserCredsSource {
+            env: Some(&env),
+            ..bare(dir.path())
+        };
+        let loaded = load_user_creds(&source).unwrap();
+        assert_eq!(
+            loaded.creds[0].base_url.as_deref(),
+            Some("https://gateway.example"),
+            "{host}"
+        );
     }
+}
+
+/// A key variable that is set but blank fills the slot, as it does for
+/// `lev`, so the provider is not registered and the keychain is not asked
+/// for it; a warning names the variable so the disappearance is explained.
+#[test]
+fn a_blank_key_variable_is_explained() {
+    let dir = with_config("[security]\ncredential_store = \"keychain\"\n");
+    let env = env_of(&[("OPENAI_API_KEY", "  ")]);
+    let store = Arc::new(leviath_core::MemoryStore::new());
+    store
+        .set(&leviath_core::provider_account("openai"), "kc-openai")
+        .unwrap();
+    let open = move || Ok(store.clone() as Arc<dyn CredentialStore>);
+    let source = UserCredsSource {
+        env: Some(&env),
+        keychain: Some(&open),
+        ..bare(dir.path())
+    };
+    let loaded = load_user_creds(&source).unwrap();
+    assert!(loaded.creds.is_empty(), "{:?}", loaded.creds);
+    assert!(loaded.origins.is_empty());
+    assert_eq!(loaded.warnings.len(), 1, "{:?}", loaded.warnings);
+    assert!(
+        loaded.warnings[0].starts_with("OPENAI_API_KEY is set but empty"),
+        "{:?}",
+        loaded.warnings
+    );
+}
+
+/// A store that counts every read, and an opener that counts every open.
+struct Counting {
+    reads: std::sync::atomic::AtomicUsize,
+}
+
+impl CredentialStore for Counting {
+    fn get(&self, _: &str) -> Result<Option<String>, String> {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(Some("from-store".to_string()))
+    }
+    fn set(&self, _: &str, _: &str) -> Result<(), String> {
+        Ok(())
+    }
+    fn delete(&self, _: &str) -> Result<bool, String> {
+        Ok(false)
+    }
+}
+
+/// The keychain is asked only for the keys the file and the environment
+/// left unset, and not opened at all when there are none.
+#[test]
+fn the_keychain_is_asked_only_for_keys_still_missing() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let dir = with_config(
+        "[security]\ncredential_store = \"keychain\"\n[providers]\nanthropic_api_key = \"f\"\n",
+    );
+    let store = Arc::new(Counting {
+        reads: AtomicUsize::new(0),
+    });
+    let opens = AtomicUsize::new(0);
+    let open = || {
+        opens.fetch_add(1, Ordering::SeqCst);
+        Ok(store.clone() as Arc<dyn CredentialStore>)
+    };
+
+    // Every other key from the environment: nothing left to ask for.
+    let vars: Vec<(&str, &str)> = KEYED_PROVIDERS
+        .iter()
+        .filter(|k| k.provider != "anthropic")
+        .map(|k| (k.key_env, "from-env"))
+        .collect();
+    let env = env_of(&vars);
+    let source = UserCredsSource {
+        env: Some(&env),
+        keychain: Some(&open),
+        ..bare(dir.path())
+    };
+    let loaded = load_user_creds(&source).unwrap();
+    assert_eq!(loaded.creds.len(), KEYED_PROVIDERS.len());
+    assert_eq!(opens.load(Ordering::SeqCst), 0, "the store was opened");
+    assert_eq!(store.reads.load(Ordering::SeqCst), 0, "the store was read");
+    assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+
+    // Two keys missing: two reads, one for each, and nothing else.
+    let vars: Vec<(&str, &str)> = KEYED_PROVIDERS
+        .iter()
+        .filter(|k| !["anthropic", "google", "meta"].contains(&k.provider))
+        .map(|k| (k.key_env, "from-env"))
+        .collect();
+    let env = env_of(&vars);
+    let source = UserCredsSource {
+        env: Some(&env),
+        keychain: Some(&open),
+        ..bare(dir.path())
+    };
+    let loaded = load_user_creds(&source).unwrap();
+    assert_eq!(opens.load(Ordering::SeqCst), 1);
+    assert_eq!(store.reads.load(Ordering::SeqCst), 2);
+    assert_eq!(loaded.origins["google"], KeyOrigin::Keychain);
+    assert_eq!(loaded.origins["meta"], KeyOrigin::Keychain);
+    assert_eq!(loaded.origins["anthropic"], KeyOrigin::File);
 }
 
 /// File, then environment, then keychain; a blank key in the file blocks the
@@ -415,6 +551,15 @@ fn an_unreadable_or_malformed_file_is_an_error() {
     assert!(e.to_string().contains("config.toml"), "{e}");
     assert!(e.source().is_some());
 
+    // A config path under a directory that does not exist is the defaults,
+    // as `Path::exists` says for `lev`.
+    let dir = tempfile::tempdir().unwrap();
+    let source = UserCredsSource {
+        config_path: Some(dir.path().join("nowhere").join("config.toml")),
+        ..bare(dir.path())
+    };
+    assert!(load_user_creds(&source).unwrap().creds.is_empty());
+
     // A directory where the file should be reads as an error, not as absent.
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join("config.toml")).unwrap();
@@ -448,10 +593,24 @@ fn the_system_source_reads_the_real_install() {
             assert_eq!(env("LEVIATH_USER_CREDS_PROBE").as_deref(), Some("seen"));
             assert_eq!(env("LEVIATH_USER_CREDS_UNSET"), None);
 
-            keyring_core::set_default_store(keyring_core::mock::Store::new().expect("mock"));
+            let _guard = with_mock_keychain();
             let open = source.keychain.expect("the OS store");
             let store = open().expect("the mock store answers the probe");
             assert_eq!(store.get("provider/none").unwrap(), None);
         },
     );
+}
+
+/// Install a fresh in-memory store as the process default, holding a lock for
+/// the caller's lifetime so no other test swaps the default meanwhile: the
+/// pattern `leviath-providers` and `leviath-cli` use for the same store.
+/// Tolerates poisoning, since a test that panicked holding it has already
+/// failed.
+fn with_mock_keychain() -> std::sync::MutexGuard<'static, ()> {
+    static STORE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let guard = STORE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    keyring_core::set_default_store(keyring_core::mock::Store::new().expect("mock store"));
+    guard
 }

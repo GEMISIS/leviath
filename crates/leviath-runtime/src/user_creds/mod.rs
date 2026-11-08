@@ -17,7 +17,7 @@
 //!
 //! # Scope
 //!
-//! The built-in providers only: the API-keyed ones in [`PROVIDER_KEYS`],
+//! The built-in providers only: the API-keyed ones in [`KEYED_PROVIDERS`],
 //! Ollama, and the Codex and Grok sign-ins. `[model_providers]` entries
 //! (OpenAI-compatible endpoints and Rhai script providers) are not read, nor
 //! the retention words they carry, and no `.env` file is loaded: a host that
@@ -34,31 +34,79 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Every provider API key: the provider, as the credential store's account
-/// names it, and the environment variable read when the file leaves the key
-/// unset.
+/// One API-keyed provider and the environment variables that stand in for
+/// what the config file leaves unset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyedProvider {
+    /// The provider's registry name, which is also the credential store
+    /// account it is filed under (`provider/<name>`).
+    pub provider: &'static str,
+    /// The variable read when the file leaves the key unset.
+    pub key_env: &'static str,
+    /// The variable read when the file leaves the provider's host unset, if
+    /// it has one.
+    pub base_url_env: Option<&'static str>,
+}
+
+/// Every API-keyed provider, in the order they are registered.
 ///
-/// The one table of them. The CLI's config loader, its credential-store
-/// overlay, `lev auth` and [`load_user_creds`] all read it, in this order,
-/// which is also the order the providers are registered in.
-pub const PROVIDER_KEYS: &[(&str, &str)] = &[
-    ("anthropic", "ANTHROPIC_API_KEY"),
-    ("openai", "OPENAI_API_KEY"),
-    ("google", "GOOGLE_API_KEY"),
+/// The one table of them: the CLI's config loader, its credential-store
+/// overlay, `lev auth` and [`load_user_creds`] all look providers up here by
+/// name, through [`keyed_provider`], so an entry added or moved cannot shift
+/// one provider's variable onto another.
+pub const KEYED_PROVIDERS: &[KeyedProvider] = &[
+    KeyedProvider {
+        provider: "anthropic",
+        key_env: "ANTHROPIC_API_KEY",
+        base_url_env: Some("ANTHROPIC_BASE_URL"),
+    },
+    KeyedProvider {
+        provider: "openai",
+        key_env: "OPENAI_API_KEY",
+        base_url_env: Some("OPENAI_BASE_URL"),
+    },
+    KeyedProvider {
+        provider: "google",
+        key_env: "GOOGLE_API_KEY",
+        base_url_env: Some("GOOGLE_BASE_URL"),
+    },
     // The one key at the top level of the file rather than under
     // `[providers]`.
-    ("openrouter", "OPENROUTER_API_KEY"),
-    ("meshy", "MESHY_API_KEY"),
-    // The variable AWS's own tooling reads.
-    (
-        leviath_providers::bedrock::PROVIDER_NAME,
-        leviath_providers::bedrock::KEY_ENV,
-    ),
-    (leviath_providers::xai::PROVIDER_NAME, "XAI_API_KEY"),
+    KeyedProvider {
+        provider: "openrouter",
+        key_env: "OPENROUTER_API_KEY",
+        base_url_env: Some("OPENROUTER_BASE_URL"),
+    },
+    KeyedProvider {
+        provider: "meshy",
+        key_env: "MESHY_API_KEY",
+        base_url_env: Some("MESHY_BASE_URL"),
+    },
+    // The key variable AWS's own tooling reads.
+    KeyedProvider {
+        provider: leviath_providers::bedrock::PROVIDER_NAME,
+        key_env: leviath_providers::bedrock::KEY_ENV,
+        base_url_env: Some("BEDROCK_BASE_URL"),
+    },
+    KeyedProvider {
+        provider: leviath_providers::xai::PROVIDER_NAME,
+        key_env: "XAI_API_KEY",
+        base_url_env: Some("XAI_BASE_URL"),
+    },
     // Not Meta's own `MODEL_API_KEY`: a name that generic could belong to
     // anything on the machine.
-    (leviath_providers::meta::PROVIDER_NAME, "META_AI_API_KEY"),
+    KeyedProvider {
+        provider: leviath_providers::meta::PROVIDER_NAME,
+        key_env: "META_AI_API_KEY",
+        base_url_env: Some("META_AI_BASE_URL"),
+    },
 ];
+
+/// The entry in [`KEYED_PROVIDERS`] for `provider`, or `None` when it is not
+/// an API-keyed built-in.
+pub fn keyed_provider(provider: &str) -> Option<&'static KeyedProvider> {
+    KEYED_PROVIDERS.iter().find(|k| k.provider == provider)
+}
 
 /// The file the provider sign-in grants are kept in, under the data
 /// directory. The name `ProviderAuthStore::default_path` uses.
@@ -85,8 +133,9 @@ pub struct UserCredsSource<'a> {
     /// entirely, so only the file and the keychain supply keys.
     pub env: Option<EnvReader<'a>>,
     /// How to open the OS credential store, used only when the config says
-    /// `credential_store = "keychain"`. `None` never touches the OS store; a
-    /// config that asks for it then loads with a warning instead.
+    /// `credential_store = "keychain"` and a key is still missing after the
+    /// file and the environment. `None` never touches the OS store; a config
+    /// that asks for it then loads with a warning instead.
     pub keychain: Option<KeychainOpener<'a>>,
 }
 
@@ -108,6 +157,13 @@ impl UserCredsSource<'static> {
     /// The real install, read as `lev` reads it: [`leviath_core::data_dir`]
     /// (which honours `LEVIATH_HOME`), `LEVIATH_CONFIG_PATH` when it is set,
     /// the process environment, and the OS credential store.
+    ///
+    /// One difference from `lev`: no `.env` file is loaded. `lev` reads
+    /// `./.env` into its environment when `load_dotenv = true` or
+    /// `LEVIATH_LOAD_DOTENV=1` asks it to; a host that wants the same keys
+    /// loads that file into its own process environment before calling this
+    /// (skipping the names `leviath_core::dotenv_var_allowed` refuses), or
+    /// passes an [`env`](Self::env) reader that consults it.
     ///
     /// `None` when no home directory can be resolved.
     pub fn system() -> Option<Self> {
@@ -161,7 +217,8 @@ pub struct UserCreds {
     /// Where each registered API-keyed provider's key came from, by provider.
     pub origins: BTreeMap<String, KeyOrigin>,
     /// What went wrong without stopping the load: a keychain that was asked
-    /// for and could not be opened, a malformed fallback entry.
+    /// for and could not be opened, a key variable set but empty, a malformed
+    /// fallback entry.
     pub warnings: Vec<String>,
 }
 
@@ -208,9 +265,11 @@ impl std::error::Error for UserCredsError {
 
 /// Read the user's provider credentials from `source`.
 ///
-/// A missing config file is the defaults, as it is for `lev`. A keychain that
+/// A config file that does not exist is the defaults, as it is for `lev`;
+/// one that exists and cannot be read or parsed is an error. A keychain that
 /// cannot be opened is a warning, never an error: keys from the file and the
-/// environment still load.
+/// environment still load. The keychain is opened only when a key is still
+/// missing after the file and the environment.
 pub fn load_user_creds(source: &UserCredsSource<'_>) -> Result<UserCreds, UserCredsError> {
     let path = source
         .config_path
@@ -220,18 +279,19 @@ pub fn load_user_creds(source: &UserCredsSource<'_>) -> Result<UserCreds, UserCr
     let mut warnings = Vec::new();
 
     let mut origins = BTreeMap::new();
-    for keyed in &settings::KEYED {
-        if (keyed.key)(&mut settings).is_some() {
-            origins.insert(keyed.provider().to_string(), KeyOrigin::File);
+    for keyed in KEYED_PROVIDERS {
+        if (settings::slots(keyed.provider).key_ref)(&settings).is_some() {
+            origins.insert(keyed.provider.to_string(), KeyOrigin::File);
         }
     }
     if let Some(env) = source.env {
-        settings.fill_from_env(env, &mut origins);
+        settings.fill_from_env(env, &mut origins, &mut warnings);
     }
     let credential_store = settings.security.credential_store;
-    if credential_store == CredentialStoreKind::Keychain {
+    let missing = settings.missing_keys();
+    if credential_store == CredentialStoreKind::Keychain && !missing.is_empty() {
         match source.keychain.map(|open| open()) {
-            Some(Ok(store)) => settings.fill_from_store(store.as_ref(), &mut origins),
+            Some(Ok(store)) => settings.fill_from_store(store.as_ref(), &missing, &mut origins),
             Some(Err(e)) => warnings.push(format!(
                 "`[security] credential_store = \"keychain\"` is set, but {e}. Using keys from \
                  the config file and environment."
@@ -245,7 +305,7 @@ pub fn load_user_creds(source: &UserCredsSource<'_>) -> Result<UserCreds, UserCr
     }
 
     let grants_path = source.data_dir.join(GRANTS_FILE);
-    let creds = creds::provider_creds(&mut settings, &grants_path);
+    let creds = creds::provider_creds(&settings, &grants_path);
     // Only providers that made it into the registry list: a blank key is
     // not a key, wherever it came from.
     origins.retain(|provider, _| creds.iter().any(|c| &c.name == provider));
@@ -262,12 +322,21 @@ pub fn load_user_creds(source: &UserCredsSource<'_>) -> Result<UserCreds, UserCr
 }
 
 /// The settings in the file at `path`, or the defaults when there is none.
+///
+/// "None" is decided the way the CLI decides it, by [`Path::exists`], so
+/// `lev` and an embedder agree on every install: a path that does not
+/// resolve is the defaults, and a file that is there but will not read is
+/// an error.
+///
+/// [`Path::exists`]: std::path::Path::exists
 fn read_settings(path: PathBuf) -> Result<settings::Settings, UserCredsError> {
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(source) => return Err(UserCredsError::Read { path, source }),
-    };
+    if !path.exists() {
+        return Ok(settings::Settings::default());
+    }
+    let text = std::fs::read_to_string(&path).map_err(|source| UserCredsError::Read {
+        path: path.clone(),
+        source,
+    })?;
     toml::from_str(&text).map_err(|source| UserCredsError::Parse { path, source })
 }
 

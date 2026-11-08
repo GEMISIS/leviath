@@ -187,7 +187,8 @@ pub(crate) use inference::{
 mod resolve;
 pub use resolve::{
     Candidate, HeadSource, ModelDefaults, bare_user_model, is_unread_catalog_refusal, model_key,
-    providers_tried, resolve_stage_candidates, resolve_stage_candidates_for, resolve_stage_model,
+    providers_tried, resolve_stage_candidates, resolve_stage_candidates_for,
+    resolve_stage_candidates_named, resolve_stage_model,
 };
 pub(crate) use resolve::{
     Resolving, StageMimes, made_beyond_text, resolve_candidates, resolve_stage_route,
