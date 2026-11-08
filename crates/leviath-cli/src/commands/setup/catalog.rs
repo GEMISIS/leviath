@@ -540,18 +540,14 @@ mod tests {
     #[test]
     fn every_row_stores_its_choice_the_way_its_credential_implies() {
         for p in providers() {
-            let ok = match p.credential {
-                Credential::ApiKey | Credential::BaseUrl => {
-                    matches!(p.setting, Setting::Text { .. })
-                }
-                Credential::Signin => matches!(p.setting, Setting::Switch { .. }),
-                Credential::Endpoint => matches!(p.setting, Setting::Endpoints),
+            // `Setting`'s Debug names its shape, so the comparison is one
+            // equality rather than a branch per kind.
+            let want = match p.credential {
+                Credential::ApiKey | Credential::BaseUrl => "Text",
+                Credential::Signin => "Switch",
+                Credential::Endpoint => "Endpoints",
             };
-            assert!(
-                ok,
-                "{} has setting {:?} for {:?}",
-                p.id, p.setting, p.credential
-            );
+            assert_eq!(format!("{:?}", p.setting), want, "{}", p.id);
         }
     }
 

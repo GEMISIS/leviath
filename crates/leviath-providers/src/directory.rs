@@ -193,8 +193,9 @@ mod tests {
     #[test]
     fn every_buildable_kind_has_a_directory_row() {
         for (kind, _feature) in crate::compiled::KNOWN {
-            let row = meta(kind).unwrap_or_else(|| panic!("{kind} has no directory row"));
-            assert_ne!(row.credential, Credential::Endpoint, "{kind}");
+            let row = meta(kind);
+            assert!(row.is_some(), "{kind} has no directory row");
+            assert_ne!(row.unwrap().credential, Credential::Endpoint, "{kind}");
         }
     }
 
