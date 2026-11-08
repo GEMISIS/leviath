@@ -1,6 +1,6 @@
 //! Whether the compiled Codex model catalog still matches what OpenAI ships.
 //!
-//! The Codex route has no `/models` endpoint, so
+//! The Codex route's `/models` listing needs an authenticated session, so
 //! `crates/leviath-providers/src/codex/catalog.rs` carries the list as a
 //! compiled table. A table nobody checks is a table that rots, and the two
 //! ways it rots are both quiet: a model withdrawn or renamed stays offered
@@ -28,9 +28,9 @@ use anyhow::{Context, Result};
 
 use super::Prices;
 
-/// The family the Codex route serves. Narrower than "every OpenAI model",
+/// The families the Codex route serves. Narrower than "every OpenAI model",
 /// which would report dozens of irrelevant ids every week.
-const FAMILY: &str = "gpt-5.";
+const FAMILIES: &[&str] = &["gpt-5.", "gpt-6"];
 
 /// A model whose name says it is Codex's own, and so will never appear in a
 /// public price catalogue.
@@ -59,14 +59,24 @@ const MEASURED_ABSENT: &[(&str, &str)] = &[
     ("gpt-5.6-sol-pro", "refused on Plus, 2026-08-31"),
 ];
 
-/// The `gpt-5.N` generation of an id, as `N`.
+/// Which of [`FAMILIES`] `id` belongs to.
+fn family(id: &str) -> Option<usize> {
+    FAMILIES.iter().position(|f| id.starts_with(f))
+}
+
+/// The `(major, minor)` generation of an id: `gpt-5.6-sol` is `(5, 6)`,
+/// `gpt-6.1-sol` is `(6, 1)` and `gpt-6-sol` is `(6, 0)`.
 ///
-/// `None` for anything outside the family, which is most of what OpenAI
+/// `None` for anything outside the families, which is most of what OpenAI
 /// publishes.
-fn generation(id: &str) -> Option<u32> {
-    let rest = id.strip_prefix(FAMILY)?;
-    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-    digits.parse().ok()
+fn generation(id: &str) -> Option<(u32, u32)> {
+    family(id)?;
+    let rest = id.strip_prefix("gpt-")?;
+    let digits = |s: &str| -> String { s.chars().take_while(char::is_ascii_digit).collect() };
+    let (major, after) = rest.split_once('.').unwrap_or((rest, ""));
+    let minor = digits(after).parse().unwrap_or(0);
+    // The family prefix guarantees digits here; 0 is never produced.
+    Some((digits(major).parse().unwrap_or(0), minor))
 }
 
 /// The model ids in `catalog.rs`, read from the source rather than linked.
@@ -111,7 +121,14 @@ pub fn drift(ids: &[String], openrouter: &Prices) -> Vec<String> {
     // shipped, and Codex serves none of them: without a floor this reported
     // a dozen models a week, which is a report nobody reads. The floor moves
     // on its own as the catalog does.
-    let floor = ids.iter().filter_map(|id| generation(id)).max();
+    // One floor per family: a newer family does not hide the older one's
+    // current models, and a gpt-6 minor does not raise the gpt-5 bar.
+    let floor = |fam: usize| {
+        ids.iter()
+            .filter(|id| family(id) == Some(fam))
+            .filter_map(|id| generation(id))
+            .max()
+    };
 
     let mut report = Vec::new();
     for id in ids {
@@ -142,10 +159,10 @@ pub fn drift(ids: &[String], openrouter: &Prices) -> Vec<String> {
         let covered = ids
             .iter()
             .any(|known| known == id || known.starts_with(*id));
-        let current = match (generation(id), floor) {
-            (Some(generation), Some(floor)) => generation >= floor,
-            // No floor means an empty catalog, which `catalog_ids` refuses,
-            // and no generation means the id is outside the family.
+        let current = match (family(id), generation(id)) {
+            (Some(fam), Some(generation)) => floor(fam).is_some_and(|floor| generation >= floor),
+            // No generation means the id is outside the families, and no
+            // floor means the catalog has nothing in this one.
             _ => false,
         };
         if !current || covered {
@@ -213,6 +230,7 @@ mod tests {
         let source = include_str!("../../crates/leviath-providers/src/codex/catalog.rs");
         let ids = catalog_ids(source).expect("the shipped catalog parses");
         assert!(ids.iter().any(|id| id.starts_with("gpt-5")), "{ids:?}");
+        assert!(ids.iter().any(|id| id.starts_with("gpt-6")), "{ids:?}");
     }
 
     /// A variant the sources price under the family name is not missing.
@@ -273,6 +291,29 @@ mod tests {
         let older_catalog = vec!["gpt-5.2-pro".to_string()];
         let report = drift(&older_catalog, &sources);
         assert_eq!(report.len(), 2, "{report:?}");
+    }
+
+    /// Each family is checked against its own floor.
+    #[test]
+    fn each_family_has_its_own_floor() {
+        assert_eq!(generation("gpt-5.6-sol"), Some((5, 6)));
+        assert_eq!(generation("gpt-6.1-sol"), Some((6, 1)));
+        assert_eq!(generation("gpt-6-sol"), Some((6, 0)));
+        assert_eq!(generation("gpt-4o"), None);
+        assert_eq!(generation("o3"), None);
+
+        let ids = vec!["gpt-5.6-sol".to_string(), "gpt-6.1-sol".to_string()];
+        let sources = priced(&["gpt-5.6", "gpt-6.1", "gpt-6.2-new", "gpt-5.2-pro"]);
+        let report = drift(&ids, &sources);
+        assert_eq!(report.len(), 1, "{report:?}");
+        assert!(report[0].contains("gpt-6.2-new"), "{report:?}");
+
+        // A family the catalog has nothing in is never asked about.
+        let report = drift(
+            &["gpt-5.6-sol".to_string()],
+            &priced(&["gpt-5.6", "gpt-6.2-new"]),
+        );
+        assert!(report.is_empty(), "{report:?}");
     }
 
     /// A model already asked about is not asked about again. The whole value

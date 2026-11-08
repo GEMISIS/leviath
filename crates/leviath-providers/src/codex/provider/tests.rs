@@ -9,7 +9,7 @@ use super::*;
 use crate::oauth::store::{ProviderAuthStore, ProviderGrant};
 use crate::oauth::token::RefreshError;
 use crate::provider::{Message, MessageContent, SystemBlock};
-use leviath_testkit::{spawn_mock_sequence, spawn_mock_server};
+use leviath_testkit::{spawn_mock_sequence, spawn_mock_server, spawn_mock_server_truncated_body};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// A token source with no file behind it, for the paths that never refresh.
@@ -868,10 +868,12 @@ fn a_plan_gated_model_says_which_plan_and_what_is_left() {
     assert!(reason.contains("plus"), "{reason}");
     assert!(reason.contains("gpt-5.3-codex-spark"), "{reason}");
     // And what to use instead, which is the half that makes it actionable.
-    assert!(reason.contains("gpt-5.5"), "{reason}");
+    assert!(reason.contains("gpt-6.1-sol"), "{reason}");
 
     // A model the plan does reach has nothing to explain.
-    assert_eq!(plus.refusal_reason("gpt-5.5"), None);
+    assert_eq!(plus.refusal_reason("gpt-6.1-sol"), None);
+    // `gpt-5.5` was retired from Plus (measured 2026-11-08), and says so.
+    assert!(plus.refusal_reason("gpt-5.5").is_some());
     // Nor does a name this route never carried: "not carried" is already the
     // right message for that, and the caller has a better one.
     assert_eq!(plus.refusal_reason("gpt-4o"), None);
@@ -920,4 +922,72 @@ async fn the_quota_answers_through_the_provider_trait() {
         .expect("a subscription")
         .expect("read");
     assert_eq!(report.plan.as_deref(), Some("plus"));
+}
+
+/// The `/models` body, as measured on a Plus account (trimmed to what is read).
+const LISTING: &str = r#"{"models":[
+    {"slug":"gpt-6.1-sol","display_name":"GPT-6.1-Sol","max_context_window":872000,"visibility":"list"},
+    {"slug":"gpt-7-new","display_name":"GPT-7 New","max_context_window":2000000,"visibility":"list"},
+    {"slug":"gpt-reserve","display_name":"GPT-Reserve","visibility":"hide"}
+]}"#;
+
+/// When the route lists the account's models, that list is the catalog: the
+/// table is only the fallback, and a model it has never heard of is served.
+#[tokio::test]
+async fn the_routes_own_listing_beats_the_compiled_table() {
+    let url = spawn_mock_server(200, "OK", LISTING).await;
+    let p = provider(&url, Static::new("t"));
+    p.prime_capabilities().await.expect("priming");
+
+    let served = p.served_catalog().expect("primed");
+    assert_eq!(served, ["gpt-6.1-sol", "gpt-7-new", "gpt-reserve"]);
+    assert_eq!(p.serves_model("gpt-7-new").as_deref(), Some("gpt-7-new"));
+
+    let models = p.list_models().await.expect("listing");
+    let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        ["gpt-6.1-sol", "gpt-7-new"],
+        "hidden rows are not offered"
+    );
+    assert!(models.iter().all(|m| m.learned));
+    assert_eq!(models[1].display_name.as_deref(), Some("GPT-7 New"));
+    assert_eq!(models[1].capabilities.max_context_tokens, 2_000_000);
+    assert_eq!(
+        models[1].capabilities.limits_source,
+        crate::capabilities::LimitsSource::Api
+    );
+    // A listed model without a window keeps the fallback's.
+    assert_eq!(p.capabilities("gpt-reserve").max_context_tokens, 128_000);
+}
+
+/// A listing that cannot be had leaves the compiled table in charge, for every
+/// way of not having one.
+#[tokio::test]
+async fn a_listing_that_does_not_answer_leaves_the_table_in_charge() {
+    for url in [
+        spawn_mock_server(500, "Internal Server Error", "{}").await,
+        spawn_mock_server(200, "OK", "not json").await,
+        spawn_mock_server_truncated_body(200, "OK").await,
+        "http://127.0.0.1:1".to_string(),
+    ] {
+        let p = provider(&url, Static::new("t"));
+        p.prime_capabilities().await.expect("priming");
+        let served = p.served_catalog().expect("primed");
+        assert!(served.contains(&"gpt-6.1-sol".to_string()));
+        assert!(!served.contains(&"gpt-5.3-codex-spark".to_string()));
+        let models = p.list_models().await.expect("listing");
+        assert!(models.iter().all(|m| !m.learned));
+    }
+}
+
+/// The wizard's check learns the listing too.
+#[tokio::test]
+async fn a_successful_check_reads_the_listing() {
+    let base = spawn_mock_server(200, "OK", LISTING).await;
+    let usage = br#"{"plan_type":"plus","rate_limit":{}}"#.to_vec();
+    let usage = spawn_mock_server(200, "OK", usage).await;
+    let p = provider(&base, Static::new("t")).with_usage_url(Some(usage));
+    let models = p.check_credential().await.expect("answered");
+    assert_eq!(models.len(), 2);
 }

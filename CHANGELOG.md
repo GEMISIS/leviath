@@ -15,6 +15,11 @@ same list.
 
 ### Added
 
+- The `codex` provider serves the gpt-6 family (`gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-6-sol`,
+  `gpt-6-astra`, `gpt-6-luna`) and reads the route's own `/models` listing for the signed-in
+  account, falling back to the compiled catalog when it does not answer. `gpt-5.5` is no longer
+  offered on Plus, where the route now refuses it.
+
 - A provider script can call an API that answers with raw audio or image bytes:
   `http_get_bytes(url [, headers])` and `http_post_bytes(url, body [, headers])` return
   `#{ mime_type, bytes }` with the body as a blob, and a `parts` entry whose `bytes` is a

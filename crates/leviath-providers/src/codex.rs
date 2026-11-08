@@ -40,6 +40,8 @@
 pub mod catalog;
 pub mod headers;
 #[cfg(feature = "openai-subscription")]
+pub(crate) mod listing;
+#[cfg(feature = "openai-subscription")]
 pub mod provider;
 pub mod usage;
 

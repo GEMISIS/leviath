@@ -1,9 +1,10 @@
 //! What this route serves, and which plans can reach it.
 //!
-//! There is no `/models` endpoint here, so the catalog is compiled in. Two
-//! consequences worth stating rather than
-//! discovering: the context windows are this build's belief and cannot be
-//! checked against the server, and the reachable set depends on the account's
+//! The route does have a `/models?client_version=` listing, and
+//! `listing` reads it when it answers. This catalog is the offline
+//! fallback, compiled in. Two consequences worth stating rather than
+//! discovering: when the listing has not answered, the context windows are
+//! this build's belief, and the reachable set depends on the account's
 //! ChatGPT plan.
 //!
 //! Percentage region budgets resolve once at spawn against
@@ -36,7 +37,19 @@ use crate::capabilities::{LimitsSource, Match, ModelCapabilities, Row};
 /// when using Codex with a ChatGPT account`, in the same run where `gpt-5.5`
 /// and `gpt-5.6-sol` answered 200. They are recorded in that task's
 /// `MEASURED_ABSENT` so it stops asking.
+///
+/// The gpt-6 ids are spelled as OpenRouter's last path segment and were
+/// measured on a Plus account on 2026-11-08: `gpt-6.1-sol`, `gpt-6.1-terra`,
+/// `gpt-6-sol`, `gpt-6-astra` and `gpt-6-luna` answer 200, while
+/// `gpt-6-astra-pro` and `gpt-6.1-sol-pro` answer `400 ... not supported when
+/// using Codex with a ChatGPT account`. The same run found `gpt-5.5` refused
+/// on Plus, which it served in August (see [`PLAN_EXCLUSIONS`]).
 pub(crate) const CATALOG: &[(&str, &str)] = &[
+    ("gpt-6.1-sol", "GPT-6.1 Sol"),
+    ("gpt-6.1-terra", "GPT-6.1 Terra"),
+    ("gpt-6-astra", "GPT-6 Astra"),
+    ("gpt-6-sol", "GPT-6 Sol"),
+    ("gpt-6-luna", "GPT-6 Luna"),
     ("gpt-5.6-sol", "GPT-5.6 Sol"),
     ("gpt-5.6-terra", "GPT-5.6 Terra"),
     ("gpt-5.6-luna", "GPT-5.6 Luna"),
@@ -55,7 +68,9 @@ const PLAN_EXCLUSIONS: &[(&str, &[&str])] = &[
     // "The 'gpt-5.3-codex-spark' model is not supported when using Codex with
     // a ChatGPT account."
     ("free", &["gpt-5.3-codex-spark"]),
-    ("plus", &["gpt-5.3-codex-spark"]),
+    // Measured 2026-11-08: `gpt-5.5` on a Plus account answers 400
+    // `model_not_found` too, and the route's own `/models` omits it.
+    ("plus", &["gpt-5.3-codex-spark", "gpt-5.5"]),
 ];
 
 /// What this build knows about the models, most specific first.
@@ -64,6 +79,17 @@ const PLAN_EXCLUSIONS: &[(&str, &[&str])] = &[
 /// the OpenAI provider: this route answers `400 Unsupported parameter:
 /// temperature` for every model it serves.
 pub(crate) const MODELS: &[Row] = &[
+    Row {
+        // The route's own `max_context_window` for every gpt-6 model, read
+        // from `GET /models` on a Plus account on 2026-11-08 (OpenRouter's
+        // 1,050,000 is the API's window; this route reports less). Output
+        // keeps the 128,000 allowance of the 5.x rows.
+        matches: &[Match::Prefix("gpt-6")],
+        temperature: false,
+        tools: true,
+        context: 872_000,
+        output: 128_000,
+    },
     Row {
         matches: &[Match::Prefix("gpt-5.6")],
         temperature: false,
@@ -204,14 +230,31 @@ mod tests {
     }
 
     #[test]
-    fn a_plus_plan_reaches_everything_but_the_pro_preview() {
+    fn a_plus_plan_reaches_the_gpt_6_and_5_6_families_but_not_the_retired_ones() {
         // Exactly what the probe measured against a live Plus account.
         let served = served(Some("plus"));
-        assert!(served.contains(&"gpt-5.6-sol".to_string()));
-        assert!(served.contains(&"gpt-5.6-terra".to_string()));
-        assert!(served.contains(&"gpt-5.6-luna".to_string()));
-        assert!(served.contains(&"gpt-5.5".to_string()));
+        for id in [
+            "gpt-6.1-sol",
+            "gpt-6.1-terra",
+            "gpt-6-astra",
+            "gpt-6-sol",
+            "gpt-6-luna",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+        ] {
+            assert!(served.contains(&id.to_string()), "{id}");
+        }
+        assert!(!served.contains(&"gpt-5.5".to_string()));
         assert!(!served.contains(&"gpt-5.3-codex-spark".to_string()));
+    }
+
+    #[test]
+    fn gpt_6_takes_the_windows_the_route_reports() {
+        let caps = capabilities("gpt-6.1-sol");
+        assert_eq!(caps.max_context_tokens, 872_000);
+        assert_eq!(caps.max_output_tokens, 128_000);
+        assert!(!caps.supports_temperature);
     }
 
     #[test]
