@@ -1553,7 +1553,7 @@ mod tests {
         // Nor in the environment, which the loader reads keys from too.
         let unset: Vec<&str> = crate::config::PROVIDER_KEYS
             .iter()
-            .map(|key| key.env)
+            .map(|key| key.env())
             .collect();
         temp_env::with_vars_unset(unset, || {
             run_auth(&path, AuthArgs::migrate_for_test(false, false))
