@@ -937,6 +937,7 @@ mod tests {
         ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
             match self.reply {
                 Ok(reply) => Ok(leviath_providers::InferenceResponse {
+                    reasoning_summary: None,
                     parts: Vec::new(),
                     content: reply.to_string(),
                     tool_calls: vec![],
@@ -1294,6 +1295,7 @@ mod tests {
                 return Err((self.error)());
             }
             Ok(leviath_providers::InferenceResponse {
+                reasoning_summary: None,
                 content: "Recovered Title".to_string(),
                 tool_calls: vec![],
                 tokens_used: leviath_providers::TokenUsage {
@@ -1514,6 +1516,7 @@ mod tests {
             self.inferred
                 .store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(leviath_providers::InferenceResponse {
+                reasoning_summary: None,
                 content: "A Title".to_string(),
                 tool_calls: vec![],
                 tokens_used: leviath_providers::TokenUsage::new(1, 0, 0, 1),

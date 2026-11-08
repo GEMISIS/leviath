@@ -492,6 +492,7 @@ impl Provider for MeshyProvider {
                 .join(", ")
         );
         Ok(InferenceResponse {
+            reasoning_summary: None,
             content: crate::jobs::noted(summary, notes),
             tool_calls: Vec::new(),
             tokens_used: TokenUsage::new(0, 0, 0, 0),

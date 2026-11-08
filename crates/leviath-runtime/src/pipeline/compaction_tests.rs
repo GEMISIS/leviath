@@ -29,6 +29,7 @@ impl Provider for Serving {
     async fn infer(&self, r: &InferenceRequest) -> leviath_providers::Result<InferenceResponse> {
         self.asked.lock().unwrap().push(r.model.clone());
         Ok(InferenceResponse {
+            reasoning_summary: None,
             parts: Vec::new(),
             content: "summary".to_string(),
             tool_calls: vec![],

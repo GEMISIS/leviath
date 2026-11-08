@@ -157,6 +157,15 @@ fn chunk_delta_only() {
 }
 
 #[test]
+fn chunk_reasoning_delta_is_read_when_present_and_absent_otherwise() {
+    let c = chunk_from_dynamic(dyn_from_json(r#"{"reasoning_delta":"thinking"}"#)).unwrap();
+    assert_eq!(c.reasoning_delta.as_deref(), Some("thinking"));
+    assert!(c.delta.is_empty());
+    let c = chunk_from_dynamic(dyn_from_json(r#"{"delta":"tok"}"#)).unwrap();
+    assert!(c.reasoning_delta.is_none());
+}
+
+#[test]
 fn chunk_with_tools_tokens_finish() {
     let c = chunk_from_dynamic(dyn_from_json(
         r#"{"tool_calls":[{"index":2,"id":"x","name":"f","arguments_delta":"{\"a\":"}],

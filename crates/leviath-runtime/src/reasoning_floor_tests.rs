@@ -258,6 +258,7 @@ impl Provider for AlwaysThinks {
             return Err(mandatory_refusal());
         }
         Ok(InferenceResponse {
+            reasoning_summary: None,
             content: "Scaffold The Poly Wright".to_string(),
             tool_calls: vec![],
             tokens_used: leviath_providers::TokenUsage {

@@ -525,6 +525,7 @@ pub(super) fn parse_response(body: &Value) -> Result<InferenceResponse> {
         .and_then(|v| v.as_str())
         .unwrap_or("end_turn");
     Ok(InferenceResponse {
+        reasoning_summary: None,
         content,
         tool_calls,
         tokens_used: parse_usage(body.get("usage")),

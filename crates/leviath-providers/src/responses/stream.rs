@@ -161,6 +161,23 @@ pub(crate) fn parse_event(
             })))
         }
 
+        // A second or later summary part starts a new paragraph. The parts
+        // arrive as separate events with no text between them, so without a
+        // boundary the last word of one runs into the first of the next.
+        "response.reasoning_summary_part.added" => {
+            let index = json.get("summary_index").and_then(|i| i.as_u64())?;
+            (index > 0).then_some(())?;
+            Some(Some(Ok(StreamChunk {
+                delta: String::new(),
+                tool_calls: vec![],
+                tokens: None,
+                finish_reason: None,
+                reasoning: None,
+                reasoning_delta: Some("\n\n".to_string()),
+                parts: Vec::new(),
+            })))
+        }
+
         // Opens a call: the only event carrying its id and name.
         "response.output_item.added" => {
             let item = json.get("item")?;

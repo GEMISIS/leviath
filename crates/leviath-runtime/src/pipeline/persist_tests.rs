@@ -51,6 +51,7 @@ impl Provider for Script {
 
 fn text(content: &str) -> InferenceResponse {
     InferenceResponse {
+        reasoning_summary: None,
         parts: Vec::new(),
         content: content.to_string(),
         tool_calls: vec![],

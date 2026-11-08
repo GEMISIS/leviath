@@ -83,6 +83,7 @@ pub fn parse_inference_dynamic(mut value: Dynamic) -> Result<InferenceResponse> 
         )));
     }
     Ok(InferenceResponse {
+        reasoning_summary: None,
         content: json
             .get("content")
             .and_then(|v| v.as_str())
@@ -211,7 +212,12 @@ pub fn chunk_from_dynamic(mut value: Dynamic) -> Result<StreamChunk> {
         ProviderError::InvalidResponse(format!("on_chunk received an unconvertible value: {e}"))
     })?;
     Ok(StreamChunk {
-        reasoning_delta: None,
+        // Readable reasoning text to show as it arrives; absent for most
+        // scripts. Unlike the sealed `reasoning`, nothing here can be replayed.
+        reasoning_delta: json
+            .get("reasoning_delta")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
         delta: json
             .get("delta")
             .and_then(|v| v.as_str())

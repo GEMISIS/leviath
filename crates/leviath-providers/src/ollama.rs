@@ -647,6 +647,7 @@ impl OllamaProvider {
         };
 
         Ok(InferenceResponse {
+            reasoning_summary: None,
             content,
             tool_calls,
             // Local inference: no cache classes and, running on your own

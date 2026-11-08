@@ -634,6 +634,13 @@ pub struct InferenceResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
 
+    /// The model's reasoning *summary* in readable text, when the provider
+    /// streamed one: the concatenation of every
+    /// [`StreamChunk::reasoning_delta`]. For showing the thinking, not for
+    /// replaying it; [`reasoning`](Self::reasoning) is the replayable blob.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_summary: Option<String>,
+
     /// Mime the model produced beside its text: an image from a model that
     /// draws, audio from one that speaks. Bytes, not references, because the
     /// provider has no store; the runtime stores them on the assistant turn.
@@ -820,7 +827,7 @@ pub trait Provider: Send + Sync {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>> {
         let response = self.infer(request).await?;
         let chunk = StreamChunk {
-            reasoning_delta: None,
+            reasoning_delta: response.reasoning_summary,
             delta: response.content,
             tool_calls: response
                 .tool_calls
@@ -2217,6 +2224,7 @@ mod tests {
     impl Provider for MinimalProvider {
         async fn infer(&self, _request: &InferenceRequest) -> Result<InferenceResponse> {
             Ok(InferenceResponse {
+                reasoning_summary: None,
                 content: "hello".to_string(),
                 tool_calls: vec![ToolCall {
                     id: "call_1".to_string(),

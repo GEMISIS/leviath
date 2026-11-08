@@ -72,7 +72,7 @@ pub use capabilities::{LimitsSource, ModelCapabilities, ModelCapabilityOverride,
 pub use capability_cache::{CapabilityCache, CheckOutcome, ProviderCheck};
 #[cfg(feature = "openai-subscription")]
 pub use codex::CodexProvider;
-pub use directory::{Credential, PROVIDERS, ProviderMeta, meta};
+pub use directory::{Credential, PROVIDERS, ProviderMeta};
 pub use endpoint::EndpointProvider;
 #[cfg(feature = "google")]
 pub use gemini::GeminiProvider;

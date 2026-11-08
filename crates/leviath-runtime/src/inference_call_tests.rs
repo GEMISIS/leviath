@@ -76,6 +76,7 @@ fn request() -> InferenceRequest {
 
 fn response(text: &str) -> InferenceResponse {
     InferenceResponse {
+        reasoning_summary: None,
         parts: Vec::new(),
         content: text.to_string(),
         tool_calls: vec![],

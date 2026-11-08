@@ -109,6 +109,7 @@ impl Provider for Planner {
     ) -> leviath_providers::Result<InferenceResponse> {
         let tool_calls = self.turn(request);
         Ok(InferenceResponse {
+            reasoning_summary: None,
             content: match tool_calls.is_empty() {
                 true => "done".to_string(),
                 false => String::new(),

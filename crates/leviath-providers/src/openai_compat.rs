@@ -879,6 +879,7 @@ pub fn parse_openai_response(body: &serde_json::Value) -> Result<InferenceRespon
     let reported_cost_usd = usage.and_then(|u| u.get("cost")).and_then(|v| v.as_f64());
 
     Ok(InferenceResponse {
+        reasoning_summary: None,
         content,
         tool_calls,
         parts: crate::mime_output::message_blobs(message),
