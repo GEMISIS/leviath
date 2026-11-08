@@ -121,13 +121,16 @@ pub fn drift(ids: &[String], openrouter: &Prices) -> Vec<String> {
     // shipped, and Codex serves none of them: without a floor this reported
     // a dozen models a week, which is a report nobody reads. The floor moves
     // on its own as the catalog does.
-    // One floor per family: a newer family does not hide the older one's
-    // current models, and a gpt-6 minor does not raise the gpt-5 bar.
+    // One floor per family, and it is the LOWEST generation the catalog still
+    // carries in that family: while `gpt-6.1-sol` is served, a new `gpt-6-nova`
+    // is as current as it is. A newer family does not hide the older one's
+    // models, and Codex-only ids (`gpt-5.3-codex-spark`) are left out, since
+    // they are old by design and would drag the bar down to 5.3.
     let floor = |fam: usize| {
         ids.iter()
-            .filter(|id| family(id) == Some(fam))
+            .filter(|id| family(id) == Some(fam) && !is_codex_only(id))
             .filter_map(|id| generation(id))
-            .max()
+            .min()
     };
 
     let mut report = Vec::new();
@@ -286,11 +289,26 @@ mod tests {
         let report = drift(&ids, &sources);
         assert!(report.is_empty(), "{report:?}");
 
-        // The floor is the catalog's own newest, so the same sources against
+        // The floor is the catalog's own lowest, so the same sources against
         // an older catalog do produce questions.
         let older_catalog = vec!["gpt-5.2-pro".to_string()];
         let report = drift(&older_catalog, &sources);
         assert_eq!(report.len(), 2, "{report:?}");
+    }
+
+    /// The floor is the lowest generation carried, so a `gpt-6` model is
+    /// current while `gpt-6.1` is served, and a Codex-only id does not drag
+    /// the gpt-5 bar down to its own generation.
+    #[test]
+    fn the_floor_is_the_lowest_generation_the_catalog_carries() {
+        let ids = vec!["gpt-6.1-sol".to_string(), "gpt-6-sol".to_string()];
+        let report = drift(&ids, &priced(&["gpt-6", "gpt-6.1", "gpt-6-nova"]));
+        assert_eq!(report.len(), 1, "{report:?}");
+        assert!(report[0].contains("gpt-6-nova"), "{report:?}");
+
+        let ids = vec!["gpt-5.5".to_string(), "gpt-5.3-codex-spark".to_string()];
+        let report = drift(&ids, &priced(&["gpt-5.5", "gpt-5.4-nano"]));
+        assert!(report.is_empty(), "{report:?}");
     }
 
     /// Each family is checked against its own floor.

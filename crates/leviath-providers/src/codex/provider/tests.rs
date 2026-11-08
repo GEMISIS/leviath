@@ -498,7 +498,7 @@ fn a_subscription_call_costs_a_known_zero_rather_than_an_unknown() {
 fn no_model_is_offered_with_a_temperature() {
     let p = provider("http://x", Static::new("t"));
     assert!(!p.capabilities("gpt-5.6-sol").supports_temperature);
-    assert_eq!(p.max_context_tokens("gpt-5.6-sol"), 922_000);
+    assert_eq!(p.max_context_tokens("gpt-5.6-sol"), 744_000);
 }
 
 #[test]
@@ -952,7 +952,10 @@ async fn the_routes_own_listing_beats_the_compiled_table() {
     );
     assert!(models.iter().all(|m| m.learned));
     assert_eq!(models[1].display_name.as_deref(), Some("GPT-7 New"));
-    assert_eq!(models[1].capabilities.max_context_tokens, 2_000_000);
+    // The route's figure is the whole window; the fallback row's 32,000
+    // output allowance comes off to leave the input window.
+    assert_eq!(models[1].capabilities.max_context_tokens, 1_968_000);
+    assert_eq!(models[0].capabilities.max_context_tokens, 744_000);
     assert_eq!(
         models[1].capabilities.limits_source,
         crate::capabilities::LimitsSource::Api
@@ -979,6 +982,136 @@ async fn a_listing_that_does_not_answer_leaves_the_table_in_charge() {
         let models = p.list_models().await.expect("listing");
         assert!(models.iter().all(|m| !m.learned));
     }
+}
+
+/// A listing that omits what the compiled table offers, and includes what the
+/// compiled plan gating refuses, as the route did on a Plus account.
+const PLUS_LISTING: &str = r#"{"models":[
+    {"slug":"gpt-6.1-sol","max_context_window":872000},
+    {"slug":"gpt-5.5","max_context_window":872000},
+    {"slug":"tiny","max_context_window":1000},
+    {"display_name":"a row with no slug"}
+]}"#;
+
+/// Once the listing has been read it decides, in both directions: a model it
+/// lists is offered and served whatever the compiled plan table says, and one
+/// it omits is refused with the route's own list, whatever the catalog says.
+#[tokio::test]
+async fn the_listing_is_authoritative_for_offering_and_for_serving() {
+    let url = spawn_mock_server(200, "OK", PLUS_LISTING).await;
+    let p = provider(&url, Static::with_plan("t", Some("plus"))).with_request_timeout(Some(5));
+
+    // Before the listing is read, the compiled gating answers.
+    assert!(p.serves_model("gpt-5.5").is_none());
+    assert!(p.refusal_reason("gpt-5.5").is_some());
+
+    p.prime_capabilities().await.expect("priming");
+
+    // Listed, and compiled-excluded on Plus: served, offered, not refused.
+    assert_eq!(p.serves_model("gpt-5.5").as_deref(), Some("gpt-5.5"));
+    assert_eq!(p.refusal_reason("gpt-5.5"), None);
+    let offered = p.list_models().await.expect("listing");
+    assert!(offered.iter().any(|m| m.id == "gpt-5.5"));
+
+    // In the catalog, allowed by the compiled gating, but not listed:
+    // neither served nor offered, and the refusal names what is.
+    assert!(p.serves_model("gpt-5.6-sol").is_none());
+    assert!(!offered.iter().any(|m| m.id == "gpt-5.6-sol"));
+    let reason = p.refusal_reason("gpt-5.6-sol").expect("refused");
+    assert!(reason.contains("gpt-5.6-sol"), "{reason}");
+    assert!(reason.contains("gpt-6.1-sol, gpt-5.5, tiny"), "{reason}");
+
+    // A name nobody carries still falls to the caller's own message.
+    assert_eq!(p.refusal_reason("gpt-4o"), None);
+
+    // An operator's override names a model on purpose.
+    let mut overrides = std::collections::HashMap::new();
+    overrides.insert(
+        "gpt-5.6-sol".to_string(),
+        ModelCapabilityOverride::default(),
+    );
+    let p =
+        provider(&url_again(PLUS_LISTING).await, Static::new("t")).with_overrides(Some(overrides));
+    p.prime_capabilities().await.expect("priming");
+    assert!(p.serves_model("gpt-5.6-sol").is_some());
+    assert_eq!(p.refusal_reason("gpt-5.6-sol"), None);
+
+    // A window no bigger than the output allowance is not a window.
+    assert_eq!(p.capabilities("tiny").max_context_tokens, 128_000);
+    assert_eq!(
+        p.capabilities("tiny").limits_source,
+        crate::capabilities::LimitsSource::Builtin
+    );
+    // The row without a slug was skipped, not the whole listing.
+    assert_eq!(p.served_catalog().expect("primed").len(), 3);
+}
+
+/// One more one-shot server, for a test that builds a second provider.
+async fn url_again(body: &str) -> String {
+    spawn_mock_server(200, "OK", body.as_bytes().to_vec()).await
+}
+
+/// A 401 on the listing refreshes the token once and asks again, like an
+/// inference request does; and every way that can fail falls back, loudly.
+#[tokio::test]
+async fn the_listing_refreshes_once_on_a_401_and_falls_back_when_it_cannot() {
+    let (url, _) = spawn_mock_sequence(vec![
+        (401, "Unauthorized", b"expired".to_vec()),
+        (200, "OK", LISTING.as_bytes().to_vec()),
+    ])
+    .await;
+    let tokens = Static::new("stale");
+    let p = provider(&url, tokens.clone());
+    p.prime_capabilities().await.expect("priming");
+    assert_eq!(tokens.refreshes.load(Ordering::SeqCst), 1);
+    assert!(
+        p.list_models()
+            .await
+            .expect("listing")
+            .iter()
+            .all(|m| m.learned)
+    );
+
+    // The retry cannot be sent: the listener is gone.
+    let (url, _) = spawn_mock_sequence(vec![(401, "Unauthorized", b"expired".to_vec())]).await;
+    let p = provider(&url, Static::new("stale"));
+    p.prime_capabilities().await.expect("priming");
+    assert!(
+        p.list_models()
+            .await
+            .expect("listing")
+            .iter()
+            .all(|m| !m.learned)
+    );
+
+    // The refresh itself is refused.
+    struct RefusesToRefresh;
+    #[async_trait]
+    impl TokenSource for RefusesToRefresh {
+        async fn credentials(&self) -> std::result::Result<Credentials, RefreshError> {
+            Ok(Credentials {
+                access_token: "stale".to_string(),
+                account_id: None,
+            })
+        }
+        async fn refresh_stale(&self, _: &str) -> std::result::Result<Credentials, RefreshError> {
+            Err(RefreshError::Terminal("expired".to_string()))
+        }
+        fn grant(&self) -> Option<ProviderGrant> {
+            None
+        }
+    }
+    let url = spawn_mock_server(401, "Unauthorized", b"expired".to_vec()).await;
+    let p = provider(&url, Arc::new(RefusesToRefresh));
+    p.prime_capabilities().await.expect("priming");
+    assert!(p.served_catalog().is_some());
+    assert!(
+        p.list_models()
+            .await
+            .expect("listing")
+            .iter()
+            .all(|m| !m.learned)
+    );
 }
 
 /// The wizard's check learns the listing too.

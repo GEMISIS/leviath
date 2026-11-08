@@ -38,7 +38,13 @@ pub struct CodexProvider {
     served: std::sync::Mutex<Option<Vec<String>>>,
     /// The route's own listing for this account, once it has answered.
     ///
-    /// Preferred over [`catalog::CATALOG`] wherever it is present.
+    /// Authoritative wherever it is present: it decides what is offered and
+    /// what is served, and the compiled catalog only answers without it.
+    ///
+    /// TODO: fold this into [`crate::learned::LearnedModels`], as OpenRouter
+    /// does, so the listing also lands in the shared capability cache. Not
+    /// done here: it needs a hidden-row flag and a cache round trip that
+    /// `LearnedModel` has no field for.
     listing: std::sync::Mutex<Option<Vec<listing::Listed>>>,
 }
 
@@ -238,7 +244,7 @@ impl CodexProvider {
             }
             400 if plan_gated(&body, model) => Err(ProviderError::Unavailable {
                 reason: UnavailableReason::Forbidden,
-                detail: catalog::gated_remedy(self.plan().as_deref(), model),
+                detail: self.remedy(model),
             }),
             400 if body.contains("Unsupported parameter") => Err(ProviderError::ApiError(format!(
                 "the Codex route rejected a parameter Leviath sent. This is a bug in \
@@ -268,7 +274,8 @@ impl CodexProvider {
 
     /// A GET carrying the route's identity headers, asking for JSON.
     fn get_json(&self, url: &str, creds: &Credentials) -> reqwest::RequestBuilder {
-        let mut builder = self.client.get(url);
+        let mut builder =
+            crate::provider::apply_request_timeout(self.client.get(url), self.request_timeout_secs);
         for (name, value) in headers::inference(creds, &self.originator, &self.user_agent) {
             // These routes answer JSON, not a stream.
             if name == "Accept" {
@@ -282,19 +289,44 @@ impl CodexProvider {
 
     /// Ask the route which models this account can use.
     ///
-    /// Best effort: any failure is `None` and the compiled catalog answers.
+    /// Best effort: any failure is `None` and the compiled catalog answers,
+    /// but it is said, so a fallback is never silent.
     async fn fetch_listing(&self) -> Option<Vec<listing::Listed>> {
-        let creds = self.credentials().await.ok()?;
+        match self.try_listing().await {
+            Ok(rows) => Some(rows),
+            Err(why) => {
+                tracing::warn!(
+                    %why,
+                    "the Codex model listing was not available; using the compiled catalog"
+                );
+                None
+            }
+        }
+    }
+
+    /// One read of `/models`, refreshing once on a 401 as [`Self::send`] does.
+    async fn try_listing(&self) -> std::result::Result<Vec<listing::Listed>, String> {
+        let creds = self.credentials().await.map_err(why)?;
         let url = format!(
             "{}/models?client_version={}",
             self.base_url,
             listing::CLIENT_VERSION
         );
-        let response = self.get_json(&url, &creds).send().await.ok()?;
-        if !response.status().is_success() {
-            return None;
+        let mut response = self.get_json(&url, &creds).send().await.map_err(why)?;
+        if response.status().as_u16() == 401 {
+            let refreshed = self
+                .tokens
+                .refresh_stale(&creds.access_token)
+                .await
+                .map_err(why)?;
+            response = self.get_json(&url, &refreshed).send().await.map_err(why)?;
+        }
+        let status = response.status();
+        if !status.is_success() {
+            return Err(format!("the route answered HTTP {status}"));
         }
         listing::parse(&response.text().await.unwrap_or_default())
+            .ok_or_else(|| "the answer was not a model listing".to_string())
     }
 
     /// Remember what the account can reach: the route's listing when it
@@ -316,6 +348,31 @@ impl CodexProvider {
             .iter()
             .find(|m| m.id == model)
             .cloned()
+    }
+
+    /// Whether the route's listing has been read at all.
+    fn has_listing(&self) -> bool {
+        leviath_core::sync::lock(&self.listing).is_some()
+    }
+
+    /// The ids offered to this account: the route's own listing when it has
+    /// been read (hidden rows left out), the compiled catalog for `plan`
+    /// otherwise.
+    fn offered(&self, plan: Option<&str>) -> Vec<String> {
+        match &*leviath_core::sync::lock(&self.listing) {
+            Some(rows) => rows
+                .iter()
+                .filter(|m| !m.hidden)
+                .map(|m| m.id.clone())
+                .collect(),
+            None => catalog::served(plan),
+        }
+    }
+
+    /// The remedy for a model this account cannot use, naming what it can.
+    fn remedy(&self, model: &str) -> String {
+        let plan = self.plan();
+        catalog::remedy(plan.as_deref(), model, &self.offered(plan.as_deref()))
     }
 
     /// Read the subscription's quota windows.
@@ -343,6 +400,11 @@ impl CodexProvider {
             )
         })
     }
+}
+
+/// An error as the sentence the listing fallback logs.
+fn why(error: impl std::fmt::Display) -> String {
+    error.to_string()
 }
 
 /// The reasoning efforts this route accepts.
@@ -435,9 +497,13 @@ impl Provider for CodexProvider {
     fn capabilities(&self, model: &str) -> ModelCapabilities {
         let mut base = catalog::capabilities(model);
         if let Some(window) = self.listed(model).and_then(|m| m.context) {
-            // The route's own figure for this account beats the table.
-            base.max_context_tokens = window;
-            base.limits_source = crate::capabilities::LimitsSource::Api;
+            // The route's own figure for this account beats the table. It is
+            // the whole window (see the note on `catalog::MODELS`), and this
+            // field is the input window, so the output allowance comes off.
+            if window > base.max_output_tokens {
+                base.max_context_tokens = window - base.max_output_tokens;
+                base.limits_source = crate::capabilities::LimitsSource::Api;
+            }
         }
         match self.capability_overrides.get(model) {
             // Merged, not swapped: an override names only what it corrects.
@@ -522,13 +588,19 @@ impl Provider for CodexProvider {
     }
 
     fn serves_model(&self, model_key: &str) -> Option<String> {
-        let known = catalog::CATALOG.iter().any(|(id, _)| *id == model_key)
-            || self.listed(model_key).is_some()
-            || self.capability_overrides.contains_key(model_key);
-        // Plan gating is applied here so a `pro`-only model is not claimed on a
-        // `plus` account, which would resolve a stage onto a model that 400s.
-        (known && catalog::plan_allows(self.plan().as_deref(), model_key))
-            .then(|| model_key.to_string())
+        let overridden = self.capability_overrides.contains_key(model_key);
+        // The route's own listing is authoritative when it has been read: it
+        // is already narrowed to this account, hidden rows included. The
+        // compiled catalog and plan gating are only the fallback, applied here
+        // so a `pro`-only model is not claimed on a `plus` account, which
+        // would resolve a stage onto a model that 400s.
+        let served = if self.has_listing() {
+            self.listed(model_key).is_some()
+        } else {
+            catalog::CATALOG.iter().any(|(id, _)| *id == model_key)
+                && catalog::plan_allows(self.plan().as_deref(), model_key)
+        };
+        (served || overridden).then(|| model_key.to_string())
     }
 
     fn refusal_reason(&self, model_key: &str) -> Option<String> {
@@ -536,8 +608,13 @@ impl Provider for CodexProvider {
         // name nobody here has heard of, and the caller's own "not carried"
         // message is the better one for that.
         let known = catalog::CATALOG.iter().any(|(id, _)| *id == model_key);
-        (known && !catalog::plan_allows(self.plan().as_deref(), model_key))
-            .then(|| catalog::gated_remedy(self.plan().as_deref(), model_key))
+        let refused = if self.has_listing() {
+            self.listed(model_key).is_none()
+        } else {
+            !catalog::plan_allows(self.plan().as_deref(), model_key)
+        };
+        (known && refused && !self.capability_overrides.contains_key(model_key))
+            .then(|| self.remedy(model_key))
     }
 
     fn served_catalog(&self) -> Option<Vec<String>> {
