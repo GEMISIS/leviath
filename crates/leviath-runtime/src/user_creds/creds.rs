@@ -6,7 +6,7 @@
 //! two to the same answer for one config that exercises all of them, so the
 //! copy cannot drift without a failing build.
 
-use super::settings::{KEYED, Settings};
+use super::settings::{Settings, slots};
 use crate::pipeline::ModelDefaults;
 use crate::provider_creds::ProviderCreds;
 use crate::spec::names::ModelRef;
@@ -33,11 +33,12 @@ fn cache_ttl_key(ttl: leviath_providers::anthropic::CacheTtl) -> &'static str {
 
 /// Every provider `settings` opts in, in the order the CLI registers them:
 /// the keyed ones with a non-blank key, then Ollama, Codex and Grok.
-pub(super) fn provider_creds(settings: &mut Settings, grants_path: &Path) -> Vec<ProviderCreds> {
+pub(super) fn provider_creds(settings: &Settings, grants_path: &Path) -> Vec<ProviderCreds> {
     let mut creds = Vec::new();
-    for keyed in &KEYED {
-        let name = keyed.provider();
-        let Some(key) = non_blank((keyed.key)(settings).as_deref()) else {
+    for keyed in super::KEYED_PROVIDERS {
+        let name = keyed.provider;
+        let fields = slots(name);
+        let Some(key) = non_blank((fields.key_ref)(settings).as_deref()) else {
             continue;
         };
         let mut options = HashMap::new();
@@ -51,8 +52,8 @@ pub(super) fn provider_creds(settings: &mut Settings, grants_path: &Path) -> Vec
         {
             options.insert("region".to_string(), region);
         }
-        let base_url = non_blank((keyed.base_url)(settings).as_deref());
-        let headers = (keyed.headers)(settings)
+        let base_url = non_blank((fields.base_url_ref)(settings).as_deref());
+        let headers = (fields.headers)(settings)
             .iter()
             .map(|(header, value)| (header.clone(), value.clone()))
             .collect();

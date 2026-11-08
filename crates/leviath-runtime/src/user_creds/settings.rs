@@ -163,88 +163,99 @@ impl Default for ProviderSettings {
     }
 }
 
-/// One API-keyed provider: its names, and where its key, host and headers
-/// sit in [`Settings`].
-pub(super) struct Keyed {
-    /// The provider and the variable its key falls back to, from
-    /// [`super::PROVIDER_KEYS`].
-    pub(super) names: (&'static str, &'static str),
-    /// The variable its host falls back to.
-    pub(super) base_url_env: &'static str,
-    /// The key's field.
+/// Where one API-keyed provider's key, host and headers sit in [`Settings`].
+///
+/// Bound to its provider by name, never by position: [`slots`] looks an
+/// entry up by the name [`super::KEYED_PROVIDERS`] gives it.
+pub(super) struct Slots {
+    /// The provider these fields belong to.
+    pub(super) provider: &'static str,
+    /// The key's field, to fill.
     pub(super) key: fn(&mut Settings) -> &mut Option<String>,
-    /// The host's field.
+    /// The key's field, to read.
+    pub(super) key_ref: fn(&Settings) -> &Option<String>,
+    /// The host's field, to fill.
     pub(super) base_url: fn(&mut Settings) -> &mut Option<String>,
+    /// The host's field, to read.
+    pub(super) base_url_ref: fn(&Settings) -> &Option<String>,
     /// The extra headers' field.
     pub(super) headers: fn(&Settings) -> &BTreeMap<String, String>,
 }
 
-/// Every API-keyed provider, in [`super::PROVIDER_KEYS`] order, which is the
-/// order the CLI registers them in.
-pub(super) const KEYED: [Keyed; 8] = [
-    Keyed {
-        names: super::PROVIDER_KEYS[0],
-        base_url_env: "ANTHROPIC_BASE_URL",
+/// The fields of every API-keyed provider.
+pub(super) const SLOTS: [Slots; 8] = [
+    Slots {
+        provider: "anthropic",
         key: |s| &mut s.providers.anthropic_api_key,
+        key_ref: |s| &s.providers.anthropic_api_key,
         base_url: |s| &mut s.providers.anthropic_base_url,
+        base_url_ref: |s| &s.providers.anthropic_base_url,
         headers: |s| &s.providers.anthropic_headers,
     },
-    Keyed {
-        names: super::PROVIDER_KEYS[1],
-        base_url_env: "OPENAI_BASE_URL",
+    Slots {
+        provider: "openai",
         key: |s| &mut s.providers.openai_api_key,
+        key_ref: |s| &s.providers.openai_api_key,
         base_url: |s| &mut s.providers.openai_base_url,
+        base_url_ref: |s| &s.providers.openai_base_url,
         headers: |s| &s.providers.openai_headers,
     },
-    Keyed {
-        names: super::PROVIDER_KEYS[2],
-        base_url_env: "GOOGLE_BASE_URL",
+    Slots {
+        provider: "google",
         key: |s| &mut s.providers.google_api_key,
+        key_ref: |s| &s.providers.google_api_key,
         base_url: |s| &mut s.providers.google_base_url,
+        base_url_ref: |s| &s.providers.google_base_url,
         headers: |s| &s.providers.google_headers,
     },
-    Keyed {
-        names: super::PROVIDER_KEYS[3],
-        base_url_env: "OPENROUTER_BASE_URL",
+    Slots {
+        provider: "openrouter",
         key: |s| &mut s.openrouter_api_key,
+        key_ref: |s| &s.openrouter_api_key,
         base_url: |s| &mut s.providers.openrouter_base_url,
+        base_url_ref: |s| &s.providers.openrouter_base_url,
         headers: |s| &s.providers.openrouter_headers,
     },
-    Keyed {
-        names: super::PROVIDER_KEYS[4],
-        base_url_env: "MESHY_BASE_URL",
+    Slots {
+        provider: "meshy",
         key: |s| &mut s.providers.meshy_api_key,
+        key_ref: |s| &s.providers.meshy_api_key,
         base_url: |s| &mut s.providers.meshy_base_url,
+        base_url_ref: |s| &s.providers.meshy_base_url,
         headers: |s| &s.providers.meshy_headers,
     },
-    Keyed {
-        names: super::PROVIDER_KEYS[5],
-        base_url_env: "BEDROCK_BASE_URL",
+    Slots {
+        provider: leviath_providers::bedrock::PROVIDER_NAME,
         key: |s| &mut s.providers.bedrock_api_key,
+        key_ref: |s| &s.providers.bedrock_api_key,
         base_url: |s| &mut s.providers.bedrock_base_url,
+        base_url_ref: |s| &s.providers.bedrock_base_url,
         headers: |s| &s.providers.bedrock_headers,
     },
-    Keyed {
-        names: super::PROVIDER_KEYS[6],
-        base_url_env: "XAI_BASE_URL",
+    Slots {
+        provider: leviath_providers::xai::PROVIDER_NAME,
         key: |s| &mut s.providers.xai_api_key,
+        key_ref: |s| &s.providers.xai_api_key,
         base_url: |s| &mut s.providers.xai_base_url,
+        base_url_ref: |s| &s.providers.xai_base_url,
         headers: |s| &s.providers.xai_headers,
     },
-    Keyed {
-        names: super::PROVIDER_KEYS[7],
-        base_url_env: "META_AI_BASE_URL",
+    Slots {
+        provider: leviath_providers::meta::PROVIDER_NAME,
         key: |s| &mut s.providers.meta_api_key,
+        key_ref: |s| &s.providers.meta_api_key,
         base_url: |s| &mut s.providers.meta_base_url,
+        base_url_ref: |s| &s.providers.meta_base_url,
         headers: |s| &s.providers.meta_headers,
     },
 ];
 
-impl Keyed {
-    /// The provider's name.
-    pub(super) fn provider(&self) -> &'static str {
-        self.names.0
-    }
+/// The fields of `provider`, an entry of [`super::KEYED_PROVIDERS`].
+pub(super) fn slots(provider: &str) -> &'static Slots {
+    SLOTS
+        .iter()
+        .find(|slots| slots.provider == provider)
+        .expect("every keyed provider has its fields in Settings")
 }
 
 impl Settings {
@@ -252,23 +263,39 @@ impl Settings {
     /// loader does: each key from its variable, each host from its own,
     /// Bedrock's region from AWS's variables, and Ollama's address from
     /// `OLLAMA_HOST`. A value in the file wins, a blank one included.
+    ///
+    /// A key variable that is set but blank fills the slot as it does for
+    /// `lev`, so the provider is not registered and the keychain is not
+    /// asked; a warning says so, since otherwise the provider just vanishes.
     pub(super) fn fill_from_env(
         &mut self,
         env: &dyn Fn(&str) -> Option<String>,
         origins: &mut BTreeMap<String, super::KeyOrigin>,
+        warnings: &mut Vec<String>,
     ) {
-        for keyed in &KEYED {
-            let (provider, var) = keyed.names;
-            let slot = (keyed.key)(self);
+        for keyed in super::KEYED_PROVIDERS {
+            let slots = slots(keyed.provider);
+            let slot = (slots.key)(self);
             if slot.is_none() {
-                *slot = env(var);
-                if slot.is_some() {
-                    origins.insert(provider.to_string(), super::KeyOrigin::Env(var.to_string()));
+                *slot = env(keyed.key_env);
+                match slot.as_deref().map(str::trim) {
+                    Some("") => warnings.push(format!(
+                        "{} is set but empty, so {} is not registered; a key for it in the \
+                         credential store is ignored",
+                        keyed.key_env, keyed.provider
+                    )),
+                    Some(_) => {
+                        origins.insert(
+                            keyed.provider.to_string(),
+                            super::KeyOrigin::Env(keyed.key_env.to_string()),
+                        );
+                    }
+                    None => {}
                 }
             }
-            let base_url = (keyed.base_url)(self);
+            let base_url = (slots.base_url)(self);
             if base_url.is_none() {
-                *base_url = env(keyed.base_url_env);
+                *base_url = keyed.base_url_env.and_then(env);
             }
         }
         // Blank is unset: an exported empty variable is not a region.
@@ -283,25 +310,34 @@ impl Settings {
         }
     }
 
-    /// Fill any key still unset from `store`, filed under
-    /// `provider/<name>` as `lev auth` keeps them.
+    /// The keyed providers whose key is still unset after the file and the
+    /// environment: the only accounts worth asking a credential store for.
+    pub(super) fn missing_keys(&self) -> Vec<&'static str> {
+        super::KEYED_PROVIDERS
+            .iter()
+            .map(|keyed| keyed.provider)
+            .filter(|provider| (slots(provider).key_ref)(self).is_none())
+            .collect()
+    }
+
+    /// Fill each of the `missing` keys from `store`, filed under
+    /// `provider/<name>` as `lev auth` keeps them. Reads those accounts and
+    /// no others.
     pub(super) fn fill_from_store(
         &mut self,
         store: &dyn leviath_core::CredentialStore,
+        missing: &[&'static str],
         origins: &mut BTreeMap<String, super::KeyOrigin>,
     ) {
-        let accounts: Vec<String> = KEYED
+        let accounts: Vec<String> = missing
             .iter()
-            .map(|keyed| leviath_core::provider_account(keyed.provider()))
+            .map(|provider| leviath_core::provider_account(provider))
             .collect();
         let mut found = store.read_all(&accounts);
-        for keyed in &KEYED {
-            let slot = (keyed.key)(self);
-            if slot.is_none() {
-                *slot = found.remove(&leviath_core::provider_account(keyed.provider()));
-                if slot.is_some() {
-                    origins.insert(keyed.provider().to_string(), super::KeyOrigin::Keychain);
-                }
+        for provider in missing {
+            if let Some(secret) = found.remove(&leviath_core::provider_account(provider)) {
+                *(slots(provider).key)(self) = Some(secret);
+                origins.insert(provider.to_string(), super::KeyOrigin::Keychain);
             }
         }
     }

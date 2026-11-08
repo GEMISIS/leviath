@@ -162,7 +162,8 @@ pub use providers::ProviderRegistry;
 pub use taint::TaintGate;
 pub use tool_bridge::BoxedToolExec;
 pub use user_creds::{
-    KeyOrigin, PROVIDER_KEYS, UserCreds, UserCredsError, UserCredsSource, load_user_creds,
+    KEYED_PROVIDERS, KeyOrigin, KeyedProvider, UserCreds, UserCredsError, UserCredsSource,
+    keyed_provider, load_user_creds,
 };
 pub use world::{PipelineWorld, TickOutcome};
 
