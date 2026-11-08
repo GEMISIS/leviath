@@ -512,6 +512,7 @@ impl Provider for MeshyProvider {
         // the mesh. So emit one chunk that carries the parts through.
         let response = self.infer(request).await?;
         let chunk = StreamChunk {
+            reasoning_delta: None,
             delta: response.content,
             tool_calls: Vec::new(),
             tokens: Some(response.tokens_used),

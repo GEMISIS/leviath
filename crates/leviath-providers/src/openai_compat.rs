@@ -976,6 +976,7 @@ pub fn parse_openai_sse_event(buffer: &mut String) -> Option<Option<Result<Strea
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0) as usize;
             return Some(Some(Ok(StreamChunk {
+                reasoning_delta: None,
                 delta: String::new(),
                 tool_calls: Vec::new(),
                 // Same normalisation as the non-streaming path: the
@@ -1074,6 +1075,7 @@ pub fn parse_openai_sse_event(buffer: &mut String) -> Option<Option<Result<Strea
     });
 
     Some(Some(Ok(StreamChunk {
+        reasoning_delta: None,
         delta: content,
         tool_calls: tool_call_deltas,
         tokens,

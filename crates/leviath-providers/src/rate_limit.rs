@@ -645,6 +645,7 @@ mod tests {
 
     fn usage_chunk(total: usize) -> StreamChunk {
         StreamChunk {
+            reasoning_delta: None,
             parts: Vec::new(),
             delta: String::new(),
             tool_calls: vec![],
@@ -656,6 +657,7 @@ mod tests {
 
     fn text_chunk() -> StreamChunk {
         StreamChunk {
+            reasoning_delta: None,
             parts: Vec::new(),
             delta: "hi".to_string(),
             tool_calls: vec![],

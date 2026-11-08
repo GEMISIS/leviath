@@ -19,6 +19,7 @@ pub mod codex;
 pub mod compiled;
 #[cfg(feature = "debug-http")]
 pub(crate) mod debug_http;
+pub mod directory;
 pub mod effort;
 pub mod endpoint;
 pub mod factory;
@@ -71,6 +72,7 @@ pub use capabilities::{LimitsSource, ModelCapabilities, ModelCapabilityOverride,
 pub use capability_cache::{CapabilityCache, CheckOutcome, ProviderCheck};
 #[cfg(feature = "openai-subscription")]
 pub use codex::CodexProvider;
+pub use directory::{Credential, PROVIDERS, ProviderMeta, meta};
 pub use endpoint::EndpointProvider;
 #[cfg(feature = "google")]
 pub use gemini::GeminiProvider;

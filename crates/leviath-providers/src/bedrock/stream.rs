@@ -165,6 +165,7 @@ impl Stream for ConverseStream {
 /// A chunk carrying nothing but what is set on it.
 fn chunk() -> StreamChunk {
     StreamChunk {
+        reasoning_delta: None,
         delta: String::new(),
         tool_calls: Vec::new(),
         tokens: None,

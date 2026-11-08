@@ -272,6 +272,28 @@ pub(super) fn forget_tool_credentials_with(
 
 #[cfg(test)]
 mod tests {
+    /// The provider directory in `leviath-providers` and this table are one
+    /// list of keys: each key's variable is the directory's, and every
+    /// API-key row in the directory has a slot here.
+    #[test]
+    fn the_directory_env_vars_match_this_table() {
+        use leviath_providers::directory::{Credential, PROVIDERS, meta};
+        for key in PROVIDER_KEYS {
+            let row = meta(key.provider).expect("in the directory");
+            assert_eq!(row.env_var, Some(key.env), "{}", key.provider);
+        }
+        for row in PROVIDERS
+            .iter()
+            .filter(|m| m.credential == Credential::ApiKey)
+        {
+            assert!(
+                PROVIDER_KEYS.iter().any(|k| k.provider == row.id),
+                "{} is an API-key provider with no key slot",
+                row.id
+            );
+        }
+    }
+
     use super::*;
 
     /// Every `*_api_key` field in the two structs, as a dotted path.

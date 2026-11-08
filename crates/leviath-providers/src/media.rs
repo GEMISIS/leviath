@@ -664,6 +664,7 @@ pub(crate) fn response(
 ))]
 pub(crate) fn one_chunk(response: InferenceResponse) -> crate::rate_limit::ChunkStream {
     let chunk = StreamChunk {
+        reasoning_delta: None,
         delta: response.content,
         tool_calls: Vec::new(),
         tokens: Some(response.tokens_used),

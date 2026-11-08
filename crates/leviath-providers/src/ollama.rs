@@ -943,6 +943,7 @@ fn ollama_chunk(json: &serde_json::Value) -> StreamChunk {
         .to_string();
     if !done {
         return StreamChunk {
+            reasoning_delta: None,
             parts: Vec::new(),
             delta: content,
             tool_calls: Vec::new(),
@@ -993,6 +994,7 @@ fn ollama_chunk(json: &serde_json::Value) -> StreamChunk {
     };
 
     StreamChunk {
+        reasoning_delta: None,
         parts: Vec::new(),
         delta: content,
         tool_calls,
@@ -1030,6 +1032,7 @@ fn ollama_flush(buffer: &mut String) -> Option<StreamChunk> {
         .unwrap_or("")
         .to_string();
     Some(StreamChunk {
+        reasoning_delta: None,
         delta: content,
         tool_calls: Vec::new(),
         tokens: None,

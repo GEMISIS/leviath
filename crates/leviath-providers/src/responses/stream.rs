@@ -135,11 +135,28 @@ pub(crate) fn parse_event(
         "response.output_text.delta" => {
             let text = json.get("delta").and_then(|d| d.as_str()).unwrap_or("");
             Some(Some(Ok(StreamChunk {
+                reasoning_delta: None,
                 delta: text.to_string(),
                 tool_calls: vec![],
                 tokens: None,
                 finish_reason: None,
                 reasoning: None,
+                parts: Vec::new(),
+            })))
+        }
+
+        // The model's reasoning *summary*, as it is written. Surfaced on its
+        // own field so a UI can show the thinking live; the sealed blob that
+        // is replayed on the next turn still arrives separately.
+        "response.reasoning_summary_text.delta" => {
+            let text = json.get("delta").and_then(|d| d.as_str())?;
+            Some(Some(Ok(StreamChunk {
+                delta: String::new(),
+                tool_calls: vec![],
+                tokens: None,
+                finish_reason: None,
+                reasoning: None,
+                reasoning_delta: Some(text.to_string()),
                 parts: Vec::new(),
             })))
         }
@@ -152,6 +169,7 @@ pub(crate) fn parse_event(
             }
             turn.saw_tool_call = true;
             Some(Some(Ok(StreamChunk {
+                reasoning_delta: None,
                 delta: String::new(),
                 tool_calls: vec![ToolCallDelta {
                     // From `output_index`, never a running counter. A fresh
@@ -181,6 +199,7 @@ pub(crate) fn parse_event(
         "response.function_call_arguments.delta" => {
             let delta = json.get("delta").and_then(|d| d.as_str()).unwrap_or("");
             Some(Some(Ok(StreamChunk {
+                reasoning_delta: None,
                 delta: String::new(),
                 tool_calls: vec![ToolCallDelta {
                     index: output_index(&json),
@@ -213,6 +232,7 @@ pub(crate) fn parse_event(
         "response.completed" => {
             let response = json.get("response")?;
             Some(Some(Ok(StreamChunk {
+                reasoning_delta: None,
                 delta: String::new(),
                 tool_calls: vec![],
                 tokens: Some(usage_of(response, &turn.dialect)),
@@ -228,6 +248,7 @@ pub(crate) fn parse_event(
         "response.incomplete" => {
             let response = json.get("response")?;
             Some(Some(Ok(StreamChunk {
+                reasoning_delta: None,
                 delta: String::new(),
                 tool_calls: vec![],
                 tokens: Some(usage_of(response, &turn.dialect)),

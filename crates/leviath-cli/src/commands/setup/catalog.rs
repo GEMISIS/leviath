@@ -12,22 +12,9 @@
 
 use crate::config::Config;
 
-/// What a provider needs from the user.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Credential {
-    /// An API key, entered masked.
-    ApiKey,
-    /// A base URL, with a working default.
-    BaseUrl,
-    /// One or more `[model_providers.<name>]` endpoints of kind
-    /// `openai-compatible`, each with a name, an address and an optional key.
-    /// The row is a preset; the entries under it are the wizard's own.
-    Endpoint,
-    /// A browser sign-in. Nothing is typed and nothing lands in `config.toml`:
-    /// selecting the row turns the provider on, and the grant is taken by
-    /// `lev auth login <id>` and stored outside the config entirely.
-    Signin,
-}
+/// What a provider needs from the user. Defined with the provider directory
+/// in `leviath-providers`, which owns the purpose-neutral half of every row.
+pub use leviath_providers::directory::Credential;
 
 /// Where a provider's choice lives in a [`Config`], as the row itself
 /// declares it.
@@ -98,6 +85,27 @@ pub struct Provider {
 }
 
 impl Provider {
+    /// The row for `id` with what the directory knows filled in and the
+    /// wizard's own fields left blank, to be overridden by the caller.
+    ///
+    /// The directory owns `display`, `credential`, `env_var` and
+    /// `signup_url`; this table owns the wording, the placeholder and where
+    /// the choice is stored. A test holds the two to the same set of ids.
+    fn from_directory(id: &'static str) -> Self {
+        let meta = leviath_providers::directory::meta(id).expect("every row is in the directory");
+        Self {
+            id: meta.id,
+            display: meta.display,
+            blurb: "",
+            credential: meta.credential,
+            hint: "",
+            env_var: meta.env_var,
+            signup_url: meta.signup_url,
+            preset_url: None,
+            setting: Setting::Endpoints,
+        }
+    }
+
     /// How this provider authenticates, the wizard's top-level grouping: a
     /// browser subscription login, an API key, or a local/custom endpoint.
     pub(crate) fn auth_kind(&self) -> &'static str {
@@ -136,161 +144,137 @@ pub(crate) fn providers() -> Vec<Provider> {
     vec![
         Provider {
             id: "anthropic",
-            display: "Anthropic",
             blurb: "Claude models. The default for every shipped blueprint.",
-            credential: Credential::ApiKey,
             hint: "sk-ant-...",
-            env_var: Some("ANTHROPIC_API_KEY"),
-            signup_url: Some("https://console.anthropic.com/settings/keys"),
             preset_url: None,
             setting: Setting::Text {
                 read: |c| c.providers.anthropic_api_key.clone(),
                 write: |c, v| c.providers.anthropic_api_key = v,
             },
+
+            ..Provider::from_directory("anthropic")
         },
         Provider {
             id: "openai",
-            display: "OpenAI",
             blurb: "GPT chat models, GPT Image, Sora video, speech and Whisper \
                     transcription.",
-            credential: Credential::ApiKey,
             hint: "sk-...",
-            env_var: Some("OPENAI_API_KEY"),
-            signup_url: Some("https://platform.openai.com/api-keys"),
             preset_url: None,
             setting: Setting::Text {
                 read: |c| c.providers.openai_api_key.clone(),
                 write: |c, v| c.providers.openai_api_key = v,
             },
+
+            ..Provider::from_directory("openai")
         },
         Provider {
             id: "google",
-            display: "Google",
             blurb: "Gemini chat and image models, Veo video, Gemini speech and Lyria \
                     music.",
-            credential: Credential::ApiKey,
             hint: "AIza...",
-            env_var: Some("GOOGLE_API_KEY"),
-            signup_url: Some("https://aistudio.google.com/app/apikey"),
             preset_url: None,
             setting: Setting::Text {
                 read: |c| c.providers.google_api_key.clone(),
                 write: |c, v| c.providers.google_api_key = v,
             },
+
+            ..Provider::from_directory("google")
         },
         Provider {
             id: "xai",
-            display: "xAI",
             blurb: "Grok chat, image, video and speech models, billed to an xAI API \
                     balance.",
-            credential: Credential::ApiKey,
             hint: "xai-...",
-            env_var: Some("XAI_API_KEY"),
-            signup_url: Some("https://console.x.ai"),
             preset_url: None,
             setting: Setting::Text {
                 read: |c| c.providers.xai_api_key.clone(),
                 write: |c, v| c.providers.xai_api_key = v,
             },
+
+            ..Provider::from_directory("xai")
         },
         Provider {
             id: "meta",
-            display: "Meta",
             blurb: "Muse Spark chat, Muse Image and Muse Voice Transcribe, billed to a \
                     Meta developer account.",
-            credential: Credential::ApiKey,
             // Meta publishes no key prefix; Verify is the check.
             hint: "your Meta Model API key",
-            env_var: Some("META_AI_API_KEY"),
-            signup_url: Some("https://dev.meta.ai/"),
             preset_url: None,
             setting: Setting::Text {
                 read: |c| c.providers.meta_api_key.clone(),
                 write: |c, v| c.providers.meta_api_key = v,
             },
+
+            ..Provider::from_directory("meta")
         },
         Provider {
             id: "openrouter",
-            display: "OpenRouter",
             blurb: "One key, many vendors' models.",
-            credential: Credential::ApiKey,
             hint: "sk-or-...",
-            env_var: Some("OPENROUTER_API_KEY"),
-            signup_url: Some("https://openrouter.ai/keys"),
             preset_url: None,
             setting: Setting::Text {
                 read: |c| c.openrouter_api_key.clone(),
                 write: |c, v| c.openrouter_api_key = v,
             },
+
+            ..Provider::from_directory("openrouter")
         },
         Provider {
             id: "meshy",
-            display: "Meshy",
             blurb: "Generative 3D: reference images or a mesh in, a textured \
                     model out.",
-            credential: Credential::ApiKey,
             hint: "msy_...",
-            env_var: Some("MESHY_API_KEY"),
-            signup_url: Some("https://www.meshy.ai/api"),
             preset_url: None,
             setting: Setting::Text {
                 read: |c| c.providers.meshy_api_key.clone(),
                 write: |c, v| c.providers.meshy_api_key = v,
             },
+
+            ..Provider::from_directory("meshy")
         },
         Provider {
             id: "bedrock",
-            display: "AWS Bedrock",
             blurb: "Claude, Nova, Llama, Mistral and more, billed to an AWS account. \
                     Takes a Bedrock API key; the region defaults to us-east-1.",
-            credential: Credential::ApiKey,
             hint: "ABSK...",
-            env_var: Some("AWS_BEARER_TOKEN_BEDROCK"),
-            signup_url: Some("https://console.aws.amazon.com/bedrock/home#/api-keys"),
             preset_url: None,
             setting: Setting::Text {
                 read: |c| c.providers.bedrock_api_key.clone(),
                 write: |c, v| c.providers.bedrock_api_key = v,
             },
+
+            ..Provider::from_directory("bedrock")
         },
         Provider {
             id: "codex",
-            display: "OpenAI Codex",
             blurb: "GPT-5.x billed to a ChatGPT plan instead of an API balance. \
                     Signs in with a browser.",
-            credential: Credential::Signin,
             hint: "",
-            env_var: None,
-            signup_url: Some("https://chatgpt.com/codex"),
             preset_url: None,
             setting: Setting::Switch {
                 read: |c| c.providers.codex_enabled,
                 write: |c, v| c.providers.codex_enabled = v,
             },
+
+            ..Provider::from_directory("codex")
         },
         Provider {
             id: "grok",
-            display: "Grok",
             blurb: "Grok billed to a SuperGrok or X Premium+ plan instead of an API \
                     balance. Signs in with a browser.",
-            credential: Credential::Signin,
             hint: "",
-            env_var: None,
-            signup_url: Some("https://grok.com"),
             preset_url: None,
             setting: Setting::Switch {
                 read: |c| c.providers.grok_enabled,
                 write: |c, v| c.providers.grok_enabled = v,
             },
+
+            ..Provider::from_directory("grok")
         },
         Provider {
             id: "ollama",
-            display: "Ollama",
             blurb: "Models running on this machine. No key needed.",
-            credential: Credential::BaseUrl,
             hint: DEFAULT_OLLAMA_URL,
-            env_var: Some("OLLAMA_HOST"),
-            signup_url: Some("https://ollama.com/download"),
             preset_url: None,
             // Two config fields, one setting. `ollama_enabled` is "I chose
             // Ollama" and the URL is "and it is not at the default address",
@@ -309,42 +293,38 @@ pub(crate) fn providers() -> Vec<Provider> {
                         v.filter(|url| !url.is_empty() && url != DEFAULT_OLLAMA_URL);
                 },
             },
+
+            ..Provider::from_directory("ollama")
         },
         Provider {
             id: "llama-cpp",
-            display: "llama.cpp",
             blurb: "A llama.cpp server on this machine, over its OpenAI-compatible API. \
                     No key needed.",
-            credential: Credential::Endpoint,
             hint: LLAMA_CPP_URL,
-            env_var: None,
-            signup_url: Some("https://github.com/ggml-org/llama.cpp"),
             preset_url: Some(LLAMA_CPP_URL),
             setting: Setting::Endpoints,
+
+            ..Provider::from_directory("llama-cpp")
         },
         Provider {
             id: "lm-studio",
-            display: "LM Studio",
             blurb: "LM Studio's local server, over its OpenAI-compatible API. No key \
                     needed.",
-            credential: Credential::Endpoint,
             hint: LM_STUDIO_URL,
-            env_var: None,
-            signup_url: Some("https://lmstudio.ai"),
             preset_url: Some(LM_STUDIO_URL),
             setting: Setting::Endpoints,
+
+            ..Provider::from_directory("lm-studio")
         },
         Provider {
             id: "openai-compatible",
-            display: "Custom OpenAI-compatible endpoint",
             blurb: "vLLM, BionicGPT, a gateway, or any server that speaks the OpenAI \
                     chat API: a name, a base URL, and a key or headers if it wants them.",
-            credential: Credential::Endpoint,
             hint: "http://host:port/v1",
-            env_var: None,
-            signup_url: None,
             preset_url: None,
             setting: Setting::Endpoints,
+
+            ..Provider::from_directory("openai-compatible")
         },
     ]
 }
@@ -566,6 +546,23 @@ mod tests {
         }
         let meta = all.iter().find(|p| p.id == "meta").unwrap();
         assert_eq!(meta.kinds(), [KIND_TEXT, KIND_AUDIO]);
+    }
+
+    /// The two tables are one set of providers, and the wizard's rows say
+    /// what the directory says: a row cannot drift from its directory entry.
+    #[test]
+    fn the_table_and_the_directory_list_the_same_providers() {
+        use leviath_providers::directory::PROVIDERS;
+        let ours: Vec<&str> = providers().iter().map(|p| p.id).collect();
+        let theirs: Vec<&str> = PROVIDERS.iter().map(|p| p.id).collect();
+        assert_eq!(ours, theirs, "same ids in the same order");
+        for p in providers() {
+            let m = leviath_providers::directory::meta(p.id).expect("in the directory");
+            assert_eq!(p.display, m.display);
+            assert_eq!(p.credential, m.credential);
+            assert_eq!(p.env_var, m.env_var);
+            assert_eq!(p.signup_url, m.signup_url);
+        }
     }
 
     #[test]

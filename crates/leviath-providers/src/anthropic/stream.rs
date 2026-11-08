@@ -132,6 +132,7 @@ fn parse_event(
                 Some("text_delta") => {
                     let text = delta.get("text").and_then(|t| t.as_str()).unwrap_or("");
                     Some(StreamChunk {
+                        reasoning_delta: None,
                         delta: text.to_string(),
                         tool_calls: Vec::new(),
                         tokens: None,
@@ -146,6 +147,7 @@ fn parse_event(
                         .and_then(|t| t.as_str())
                         .unwrap_or("");
                     Some(StreamChunk {
+                        reasoning_delta: None,
                         delta: String::new(),
                         tool_calls: vec![ToolCallDelta {
                             // The block this delta names, or the one still
@@ -196,6 +198,7 @@ fn parse_event(
                         .unwrap_or_else(|| open_tool_block.map_or(0, |open| open + 1));
                     *open_tool_block = Some(idx);
                     Some(StreamChunk {
+                        reasoning_delta: None,
                         delta: String::new(),
                         tool_calls: vec![ToolCallDelta {
                             index: idx,
@@ -236,6 +239,7 @@ fn parse_event(
                 .unwrap_or(0) as usize;
 
             Some(StreamChunk {
+                reasoning_delta: None,
                 delta: String::new(),
                 tool_calls: Vec::new(),
                 tokens: Some(TokenUsage::new(0, 0, 0, output_tokens)),
@@ -262,6 +266,7 @@ fn parse_event(
 
             if input_tokens > 0 || cached > 0 || cache_write > 0 {
                 Some(StreamChunk {
+                    reasoning_delta: None,
                     delta: String::new(),
                     tool_calls: Vec::new(),
                     tokens: Some(TokenUsage::new(input_tokens, cached, cache_write, 0)),
