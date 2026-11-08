@@ -237,6 +237,23 @@ fn hosts_regions_and_ollama_fall_back_to_the_environment() {
     let loaded = load_user_creds(&bare(dir.path())).unwrap();
     assert_eq!(cred(&loaded, "openai").base_url, None);
     assert!(loaded.creds.iter().all(|c| c.name != "ollama"));
+
+    // A region and an address in the file win over the environment's.
+    let dir = with_config(
+        "ollama_base_url = \"http://file:11434\"\n\
+         [providers]\nbedrock_api_key = \"b\"\nbedrock_region = \"us-east-2\"\n",
+    );
+    let env = env_of(&[("AWS_REGION", "eu-west-1"), ("OLLAMA_HOST", "http://env:1")]);
+    let source = UserCredsSource {
+        env: Some(&env),
+        ..bare(dir.path())
+    };
+    let loaded = load_user_creds(&source).unwrap();
+    assert_eq!(cred(&loaded, "bedrock").options["region"], "us-east-2");
+    assert_eq!(
+        cred(&loaded, "ollama").base_url.as_deref(),
+        Some("http://file:11434")
+    );
 }
 
 /// Every per-provider setting reaches the provider it names: cache lifetime,
