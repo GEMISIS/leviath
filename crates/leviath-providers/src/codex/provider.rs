@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use super::{catalog, headers, usage};
+use super::{catalog, headers, listing, usage};
 use crate::capabilities::{ModelCapabilities, ModelCapabilityOverride};
 use crate::oauth::{Credentials, RefreshError, TokenSource};
 use crate::provider::{
@@ -36,6 +36,10 @@ pub struct CodexProvider {
     /// Taken through [`leviath_core::sync::lock`]; the sections clone a `Vec`
     /// and nothing else.
     served: std::sync::Mutex<Option<Vec<String>>>,
+    /// The route's own listing for this account, once it has answered.
+    ///
+    /// Preferred over [`catalog::CATALOG`] wherever it is present.
+    listing: std::sync::Mutex<Option<Vec<listing::Listed>>>,
 }
 
 impl CodexProvider {
@@ -57,6 +61,7 @@ impl CodexProvider {
             request_timeout_secs: None,
             usage_url: super::USAGE_URL.to_string(),
             served: std::sync::Mutex::new(None),
+            listing: std::sync::Mutex::new(None),
         }
     }
 
@@ -261,19 +266,63 @@ impl CodexProvider {
         quota.resets_in(leviath_core::duration::now_secs_u64())
     }
 
-    /// Read the subscription's quota windows.
-    pub async fn quota(&self) -> Result<usage::Quota> {
-        let creds = self.credentials().await?;
-        let mut builder = self.client.get(&self.usage_url);
-        for (name, value) in headers::inference(&creds, &self.originator, &self.user_agent) {
-            // The usage route answers JSON, not a stream.
+    /// A GET carrying the route's identity headers, asking for JSON.
+    fn get_json(&self, url: &str, creds: &Credentials) -> reqwest::RequestBuilder {
+        let mut builder = self.client.get(url);
+        for (name, value) in headers::inference(creds, &self.originator, &self.user_agent) {
+            // These routes answer JSON, not a stream.
             if name == "Accept" {
                 builder = builder.header(name, "application/json");
                 continue;
             }
             builder = builder.header(name, value);
         }
-        let response = builder
+        builder
+    }
+
+    /// Ask the route which models this account can use.
+    ///
+    /// Best effort: any failure is `None` and the compiled catalog answers.
+    async fn fetch_listing(&self) -> Option<Vec<listing::Listed>> {
+        let creds = self.credentials().await.ok()?;
+        let url = format!(
+            "{}/models?client_version={}",
+            self.base_url,
+            listing::CLIENT_VERSION
+        );
+        let response = self.get_json(&url, &creds).send().await.ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        listing::parse(&response.text().await.unwrap_or_default())
+    }
+
+    /// Remember what the account can reach: the route's listing when it
+    /// answers, the compiled catalog narrowed by `plan` when it does not.
+    async fn learn(&self, plan: Option<&str>) {
+        let listed = self.fetch_listing().await;
+        let served = match &listed {
+            Some(rows) => rows.iter().map(|m| m.id.clone()).collect(),
+            None => catalog::served(plan),
+        };
+        *leviath_core::sync::lock(&self.listing) = listed;
+        *leviath_core::sync::lock(&self.served) = Some(served);
+    }
+
+    /// What the route said about `model`, if it listed it.
+    fn listed(&self, model: &str) -> Option<listing::Listed> {
+        leviath_core::sync::lock(&self.listing)
+            .as_ref()?
+            .iter()
+            .find(|m| m.id == model)
+            .cloned()
+    }
+
+    /// Read the subscription's quota windows.
+    pub async fn quota(&self) -> Result<usage::Quota> {
+        let creds = self.credentials().await?;
+        let response = self
+            .get_json(&self.usage_url, &creds)
             .send()
             .await
             .map_err(|e| ProviderError::transport("reading the subscription quota", &e))?;
@@ -384,7 +433,12 @@ impl Provider for CodexProvider {
     }
 
     fn capabilities(&self, model: &str) -> ModelCapabilities {
-        let base = catalog::capabilities(model);
+        let mut base = catalog::capabilities(model);
+        if let Some(window) = self.listed(model).and_then(|m| m.context) {
+            // The route's own figure for this account beats the table.
+            base.max_context_tokens = window;
+            base.limits_source = crate::capabilities::LimitsSource::Api;
+        }
         match self.capability_overrides.get(model) {
             // Merged, not swapped: an override names only what it corrects.
             Some(over) => over.apply_to(base),
@@ -412,11 +466,23 @@ impl Provider for CodexProvider {
             Some(plan) => Some(plan),
             None => self.quota().await.ok().and_then(|q| q.plan_type),
         };
-        *leviath_core::sync::lock(&self.served) = Some(catalog::served(plan.as_deref()));
+        self.learn(plan.as_deref()).await;
         Ok(())
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
+        let learned = leviath_core::sync::lock(&self.listing).clone();
+        if let Some(rows) = learned {
+            return Ok(rows
+                .into_iter()
+                .filter(|m| !m.hidden)
+                .map(|m| {
+                    ModelInfo::new(&m.id, super::PROVIDER_NAME, self.capabilities(&m.id))
+                        .named(Some(m.display))
+                        .listed()
+                })
+                .collect());
+        }
         let allowed = leviath_core::sync::lock(&self.served).clone();
         Ok(catalog::CATALOG
             .iter()
@@ -451,12 +517,13 @@ impl Provider for CodexProvider {
         // Learned for real this time, so `served_catalog` can start answering
         // and a later `list_models` shows this account's models rather than
         // every account's.
-        *leviath_core::sync::lock(&self.served) = Some(catalog::served(plan.as_deref()));
+        self.learn(plan.as_deref()).await;
         self.list_models().await
     }
 
     fn serves_model(&self, model_key: &str) -> Option<String> {
         let known = catalog::CATALOG.iter().any(|(id, _)| *id == model_key)
+            || self.listed(model_key).is_some()
             || self.capability_overrides.contains_key(model_key);
         // Plan gating is applied here so a `pro`-only model is not claimed on a
         // `plus` account, which would resolve a stage onto a model that 400s.
