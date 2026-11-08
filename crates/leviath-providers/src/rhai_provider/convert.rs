@@ -211,6 +211,7 @@ pub fn chunk_from_dynamic(mut value: Dynamic) -> Result<StreamChunk> {
         ProviderError::InvalidResponse(format!("on_chunk received an unconvertible value: {e}"))
     })?;
     Ok(StreamChunk {
+        reasoning_delta: None,
         delta: json
             .get("delta")
             .and_then(|v| v.as_str())

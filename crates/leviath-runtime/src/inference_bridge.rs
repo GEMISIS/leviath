@@ -1593,6 +1593,7 @@ mod tests {
         > {
             Ok(Box::pin(tokio_stream::iter(vec![
                 Ok(leviath_providers::provider::StreamChunk {
+                    reasoning_delta: None,
                     delta: "streamed".to_string(),
                     tool_calls: Vec::new(),
                     tokens: None,
@@ -1601,6 +1602,7 @@ mod tests {
                     parts: Vec::new(),
                 }),
                 Ok(leviath_providers::provider::StreamChunk {
+                    reasoning_delta: None,
                     delta: String::new(),
                     tool_calls: Vec::new(),
                     tokens: Some(leviath_providers::TokenUsage::new(7, 0, 0, 3)),

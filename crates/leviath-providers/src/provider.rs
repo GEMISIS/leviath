@@ -745,6 +745,11 @@ pub struct StreamChunk {
     /// carries the provider's reasoning item, not necessarily the last.
     pub reasoning: Option<String>,
 
+    /// Incremental reasoning *summary* text, for showing the model's thinking
+    /// as it streams. Distinct from [`reasoning`](Self::reasoning), the sealed
+    /// blob to replay. `None` for every provider that does not stream one.
+    pub reasoning_delta: Option<String>,
+
     /// See [`InferenceResponse::parts`]: mime this chunk carried whole.
     pub parts: Vec<leviath_core::mime::Blob>,
 }
@@ -815,6 +820,7 @@ pub trait Provider: Send + Sync {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>> {
         let response = self.infer(request).await?;
         let chunk = StreamChunk {
+            reasoning_delta: None,
             delta: response.content,
             tool_calls: response
                 .tool_calls

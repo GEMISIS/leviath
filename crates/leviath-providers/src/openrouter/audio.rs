@@ -126,6 +126,7 @@ pub(super) fn openrouter_audio_sse_event(
     if data == "[DONE]" {
         return Some(audio.take_blob().map(|blob| {
             Ok(StreamChunk {
+                reasoning_delta: None,
                 delta: String::new(),
                 tool_calls: Vec::new(),
                 tokens: None,

@@ -500,6 +500,7 @@ fn request_to_dynamic(request: &InferenceRequest) -> Dynamic {
 #[cfg(feature = "rhai")]
 fn collapse_chunk(response: InferenceResponse) -> StreamChunk {
     StreamChunk {
+        reasoning_delta: None,
         parts: Vec::new(),
         delta: response.content,
         tool_calls: response

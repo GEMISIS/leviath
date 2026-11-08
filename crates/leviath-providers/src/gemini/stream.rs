@@ -65,6 +65,7 @@ where
 /// A chunk carrying only `delta`.
 fn text_chunk(delta: String) -> StreamChunk {
     StreamChunk {
+        reasoning_delta: None,
         delta,
         tool_calls: Vec::new(),
         tokens: None,

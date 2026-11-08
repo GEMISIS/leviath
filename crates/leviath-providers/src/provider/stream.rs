@@ -319,6 +319,7 @@ mod tests {
 
     fn text_chunk(text: &str) -> StreamChunk {
         StreamChunk {
+            reasoning_delta: None,
             parts: Vec::new(),
             delta: text.to_string(),
             tool_calls: Vec::new(),
@@ -453,6 +454,7 @@ mod tests {
             text_chunk("Let me "),
             text_chunk("check that."),
             StreamChunk {
+                reasoning_delta: None,
                 parts: Vec::new(),
                 delta: String::new(),
                 tool_calls: vec![ToolCallDelta {
@@ -470,6 +472,7 @@ mod tests {
             // is not valid JSON on its own, which is why they are buffered as
             // text and parsed once at the end.
             StreamChunk {
+                reasoning_delta: None,
                 delta: String::new(),
                 tool_calls: vec![ToolCallDelta {
                     index: 0,
@@ -484,6 +487,7 @@ mod tests {
                 parts: Vec::new(),
             },
             StreamChunk {
+                reasoning_delta: None,
                 delta: String::new(),
                 tool_calls: Vec::new(),
                 tokens: None,
@@ -516,6 +520,7 @@ mod tests {
     async fn collect_stream_names_a_call_without_an_id_and_refuses_one_without_a_name() {
         let call = |id: Option<&str>, name: Option<&str>| {
             chunks(vec![StreamChunk {
+                reasoning_delta: None,
                 parts: Vec::new(),
                 delta: String::new(),
                 tool_calls: vec![ToolCallDelta {
@@ -550,6 +555,7 @@ mod tests {
     async fn collect_stream_keeps_a_cut_off_tool_call_argument_as_text() {
         let stream = chunks(vec![
             StreamChunk {
+                reasoning_delta: None,
                 parts: Vec::new(),
                 delta: String::new(),
                 tool_calls: vec![ToolCallDelta {
@@ -564,6 +570,7 @@ mod tests {
                 reasoning: None,
             },
             StreamChunk {
+                reasoning_delta: None,
                 parts: Vec::new(),
                 delta: String::new(),
                 tool_calls: Vec::new(),
@@ -618,6 +625,7 @@ mod tests {
     async fn collect_stream_adds_usage_across_chunks() {
         let stream = chunks(vec![
             StreamChunk {
+                reasoning_delta: None,
                 parts: Vec::new(),
                 delta: String::new(),
                 tool_calls: Vec::new(),
@@ -626,6 +634,7 @@ mod tests {
                 reasoning: None,
             },
             StreamChunk {
+                reasoning_delta: None,
                 parts: Vec::new(),
                 delta: String::new(),
                 tool_calls: Vec::new(),
@@ -702,6 +711,7 @@ mod tests {
             reported_cost_usd: None,
         };
         let stream = chunks(vec![StreamChunk {
+            reasoning_delta: None,
             parts: Vec::new(),
             delta: String::new(),
             tool_calls: Vec::new(),

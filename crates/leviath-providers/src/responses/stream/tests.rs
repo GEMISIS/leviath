@@ -66,6 +66,29 @@ fn text_deltas_become_content() {
 }
 
 #[test]
+fn reasoning_summary_deltas_surface_as_reasoning_delta() {
+    let c = chunk(serde_json::json!({
+        "type": "response.reasoning_summary_text.delta",
+        "delta": "Weighing the options",
+        "summary_index": 0,
+    }));
+    assert_eq!(c.reasoning_delta.as_deref(), Some("Weighing the options"));
+    assert!(c.delta.is_empty());
+    assert!(c.reasoning.is_none());
+    assert!(c.tool_calls.is_empty());
+    // Ordinary text carries no summary.
+    let text = chunk(serde_json::json!({"type": "response.output_text.delta", "delta": "x"}));
+    assert!(text.reasoning_delta.is_none());
+}
+
+#[test]
+fn a_reasoning_summary_delta_with_no_text_yields_nothing() {
+    assert!(
+        parse_one(serde_json::json!({"type": "response.reasoning_summary_text.delta"})).is_none()
+    );
+}
+
+#[test]
 fn an_opening_tool_item_carries_the_call_id_and_name() {
     // Captured shape: the item has both `id` (fc_...) and `call_id` (call_...)
     // and only the latter may be echoed on the matching output.
@@ -395,7 +418,6 @@ fn the_bookkeeping_events_are_ignored() {
         "response.output_text.done",
         "response.reasoning_summary_part.added",
         "response.reasoning_summary_part.done",
-        "response.reasoning_summary_text.delta",
         "response.reasoning_summary_text.done",
         "response.function_call_arguments.done",
         "something.we.have.never.seen",
