@@ -65,6 +65,11 @@ proptest = { workspace = true }
 # A provider's HTTP failure built the way the HTTP layer builds it, status and
 # body, so a test classifies it exactly as a live call would.
 reqwest = { workspace = true }
+# An in-memory credential store installed as the process default, so the
+# user-creds keychain opener runs the real `leviath_sys::keychain` path. No CI
+# runner has an unlocked login keychain, and a developer's real one would
+# prompt.
+keyring-core = { workspace = true }
 
 [lints]
 workspace = true

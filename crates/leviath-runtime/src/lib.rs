@@ -138,6 +138,7 @@ pub mod title;
 pub(crate) mod title_bridge;
 pub mod tool_bridge;
 mod tool_guard;
+pub mod user_creds;
 pub mod world;
 // test_support.rs gates itself with an inner `#![cfg(test)]` attribute, so no
 // `#[cfg(test)]` is needed here (adding one would trigger clippy's
@@ -160,6 +161,9 @@ pub use provider_creds::{ProviderCreds, build_provider_registry};
 pub use providers::ProviderRegistry;
 pub use taint::TaintGate;
 pub use tool_bridge::BoxedToolExec;
+pub use user_creds::{
+    KeyOrigin, PROVIDER_KEYS, UserCreds, UserCredsError, UserCredsSource, load_user_creds,
+};
 pub use world::{PipelineWorld, TickOutcome};
 
 /// The name issue-facing docs use for the world's event enum; the same type
