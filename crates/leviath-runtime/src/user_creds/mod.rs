@@ -98,11 +98,10 @@ fn process_env(name: &str) -> Option<String> {
 /// The real OS credential store, for [`UserCredsSource::system`]: probed once,
 /// so a machine with no usable store says so here rather than at every key.
 fn system_keychain() -> Result<Arc<dyn CredentialStore>, String> {
-    leviath_sys::keychain::probe(leviath_core::credentials::SERVICE)?;
-    Ok(
+    leviath_sys::keychain::probe(leviath_core::credentials::SERVICE).map(|()| {
         leviath_providers::oauth::store::store_for(CredentialStoreKind::Keychain)
-            .expect("the keychain backend always has a store"),
-    )
+            .expect("the keychain backend always has a store")
+    })
 }
 
 impl UserCredsSource<'static> {

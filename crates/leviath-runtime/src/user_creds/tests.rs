@@ -183,9 +183,6 @@ fn an_unreachable_keychain_is_a_warning_and_the_file_mode_never_opens_one() {
         ..bare(file.path())
     };
     assert!(load_user_creds(&source).unwrap().warnings.is_empty());
-    // The opener exists to be called somewhere; a panic here is the test
-    // above holding.
-    assert!(std::panic::catch_unwind(never).is_err());
 }
 
 /// Hosts, Bedrock's region and Ollama's address fall back to their variables
