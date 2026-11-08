@@ -29,63 +29,68 @@ impl ProviderKey {
     }
 }
 
-/// Every provider API key the config holds.
+/// The provider and variable of entry `i` in the runtime's
+/// [`leviath_runtime::user_creds::PROVIDER_KEYS`], which is the one place
+/// either is spelled: an embedder loading the same keys reads that table too.
+const fn names(i: usize) -> (&'static str, &'static str) {
+    leviath_runtime::user_creds::PROVIDER_KEYS[i]
+}
+
+/// Every provider API key the config holds, in the runtime table's order.
 ///
 /// Fixed, because the OS stores offer no portable "list everything under this
 /// service" operation: the accounts to look for have to come from somewhere,
 /// and for provider keys it is this table. A test holds it to every
-/// `*_api_key` field of [`Config`] and [`super::ProviderConfig`].
+/// `*_api_key` field of [`Config`] and [`super::ProviderConfig`], and each
+/// entry to the field named for its provider.
 pub(crate) const PROVIDER_KEYS: &[ProviderKey] = &[
     ProviderKey {
-        provider: "anthropic",
-        env: "ANTHROPIC_API_KEY",
+        provider: names(0).0,
+        env: names(0).1,
         get: |c| c.providers.anthropic_api_key.as_deref(),
         slot: |c| &mut c.providers.anthropic_api_key,
     },
     ProviderKey {
-        provider: "openai",
-        env: "OPENAI_API_KEY",
+        provider: names(1).0,
+        env: names(1).1,
         get: |c| c.providers.openai_api_key.as_deref(),
         slot: |c| &mut c.providers.openai_api_key,
     },
     ProviderKey {
-        provider: "google",
-        env: "GOOGLE_API_KEY",
+        provider: names(2).0,
+        env: names(2).1,
         get: |c| c.providers.google_api_key.as_deref(),
         slot: |c| &mut c.providers.google_api_key,
     },
     // The one key at the top level of the file rather than under
     // `[providers]`.
     ProviderKey {
-        provider: "openrouter",
-        env: "OPENROUTER_API_KEY",
+        provider: names(3).0,
+        env: names(3).1,
         get: |c| c.openrouter_api_key.as_deref(),
         slot: |c| &mut c.openrouter_api_key,
     },
     ProviderKey {
-        provider: "meshy",
-        env: "MESHY_API_KEY",
+        provider: names(4).0,
+        env: names(4).1,
         get: |c| c.providers.meshy_api_key.as_deref(),
         slot: |c| &mut c.providers.meshy_api_key,
     },
-    // The variable AWS's own tooling reads.
     ProviderKey {
-        provider: "bedrock",
-        env: leviath_providers::bedrock::KEY_ENV,
+        provider: names(5).0,
+        env: names(5).1,
         get: |c| c.providers.bedrock_api_key.as_deref(),
         slot: |c| &mut c.providers.bedrock_api_key,
     },
     ProviderKey {
-        provider: "xai",
-        env: "XAI_API_KEY",
+        provider: names(6).0,
+        env: names(6).1,
         get: |c| c.providers.xai_api_key.as_deref(),
         slot: |c| &mut c.providers.xai_api_key,
     },
-    // Not Meta's own `MODEL_API_KEY`: a name that generic could belong to
-    // anything on the machine.
     ProviderKey {
-        provider: "meta",
-        env: "META_AI_API_KEY",
+        provider: names(7).0,
+        env: names(7).1,
         get: |c| c.providers.meta_api_key.as_deref(),
         slot: |c| &mut c.providers.meta_api_key,
     },
@@ -346,6 +351,25 @@ mod tests {
             reached, fields,
             "a field no entry reaches, or two that share one"
         );
+    }
+
+    /// The table is the runtime's, entry for entry, and each entry's slot is
+    /// the field named for its provider: `<provider>_api_key`.
+    #[test]
+    fn the_table_is_the_runtimes_and_each_slot_is_named_for_its_provider() {
+        let runtime = leviath_runtime::user_creds::PROVIDER_KEYS;
+        assert_eq!(PROVIDER_KEYS.len(), runtime.len());
+        for (key, (provider, env)) in PROVIDER_KEYS.iter().zip(runtime) {
+            assert_eq!((key.provider, key.env), (*provider, *env));
+            let mut config = Config::default();
+            *(key.slot)(&mut config) = Some("set".to_string());
+            let value = serde_json::to_value(&config).unwrap();
+            let holder = match *provider {
+                "openrouter" => &value,
+                _ => &value["providers"],
+            };
+            assert_eq!(holder[format!("{provider}_api_key")], "set", "{provider}");
+        }
     }
 
     /// Each key falls back to its own variable, and a key the file set is
