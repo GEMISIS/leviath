@@ -553,17 +553,22 @@ mod tests {
         assert_eq!(installed_rule_names(&mut world), vec!["shell"]);
     }
 
+    /// Under the environment lock: both sides read `LEVIATH_HOME`, and a test
+    /// that sets it in between would hand them different homes.
     #[test]
     fn for_daemon_watches_the_real_policy_paths() {
-        let reload = PolicyReload::for_daemon();
-        assert_eq!(
-            reload.policy_path,
-            crate::commands::policy::policy_path().unwrap(),
-            "the daemon has to watch the file `lev policy add` writes"
-        );
-        assert_eq!(
-            reload.rules_dir,
-            crate::commands::policy::rules_dir().unwrap()
-        );
+        let home = tempfile::tempdir().unwrap();
+        temp_env::with_var("LEVIATH_HOME", Some(home.path()), || {
+            let reload = PolicyReload::for_daemon();
+            assert_eq!(
+                reload.policy_path,
+                crate::commands::policy::policy_path().unwrap(),
+                "the daemon has to watch the file `lev policy add` writes"
+            );
+            assert_eq!(
+                reload.rules_dir,
+                crate::commands::policy::rules_dir().unwrap()
+            );
+        });
     }
 }
