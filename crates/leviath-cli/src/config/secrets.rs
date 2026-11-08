@@ -29,12 +29,9 @@ impl ProviderKey {
     }
 }
 
-/// The provider and variable of entry `i` in the runtime's
-/// [`leviath_runtime::user_creds::PROVIDER_KEYS`], which is the one place
-/// either is spelled: an embedder loading the same keys reads that table too.
-const fn names(i: usize) -> (&'static str, &'static str) {
-    leviath_runtime::user_creds::PROVIDER_KEYS[i]
-}
+// The runtime's table of provider names and variables, the one place either
+// is spelled: an embedder loading the same keys reads it too.
+use leviath_runtime::user_creds::PROVIDER_KEYS as NAMES;
 
 /// Every provider API key the config holds, in the runtime table's order.
 ///
@@ -45,52 +42,52 @@ const fn names(i: usize) -> (&'static str, &'static str) {
 /// entry to the field named for its provider.
 pub(crate) const PROVIDER_KEYS: &[ProviderKey] = &[
     ProviderKey {
-        provider: names(0).0,
-        env: names(0).1,
+        provider: NAMES[0].0,
+        env: NAMES[0].1,
         get: |c| c.providers.anthropic_api_key.as_deref(),
         slot: |c| &mut c.providers.anthropic_api_key,
     },
     ProviderKey {
-        provider: names(1).0,
-        env: names(1).1,
+        provider: NAMES[1].0,
+        env: NAMES[1].1,
         get: |c| c.providers.openai_api_key.as_deref(),
         slot: |c| &mut c.providers.openai_api_key,
     },
     ProviderKey {
-        provider: names(2).0,
-        env: names(2).1,
+        provider: NAMES[2].0,
+        env: NAMES[2].1,
         get: |c| c.providers.google_api_key.as_deref(),
         slot: |c| &mut c.providers.google_api_key,
     },
     // The one key at the top level of the file rather than under
     // `[providers]`.
     ProviderKey {
-        provider: names(3).0,
-        env: names(3).1,
+        provider: NAMES[3].0,
+        env: NAMES[3].1,
         get: |c| c.openrouter_api_key.as_deref(),
         slot: |c| &mut c.openrouter_api_key,
     },
     ProviderKey {
-        provider: names(4).0,
-        env: names(4).1,
+        provider: NAMES[4].0,
+        env: NAMES[4].1,
         get: |c| c.providers.meshy_api_key.as_deref(),
         slot: |c| &mut c.providers.meshy_api_key,
     },
     ProviderKey {
-        provider: names(5).0,
-        env: names(5).1,
+        provider: NAMES[5].0,
+        env: NAMES[5].1,
         get: |c| c.providers.bedrock_api_key.as_deref(),
         slot: |c| &mut c.providers.bedrock_api_key,
     },
     ProviderKey {
-        provider: names(6).0,
-        env: names(6).1,
+        provider: NAMES[6].0,
+        env: NAMES[6].1,
         get: |c| c.providers.xai_api_key.as_deref(),
         slot: |c| &mut c.providers.xai_api_key,
     },
     ProviderKey {
-        provider: names(7).0,
-        env: names(7).1,
+        provider: NAMES[7].0,
+        env: NAMES[7].1,
         get: |c| c.providers.meta_api_key.as_deref(),
         slot: |c| &mut c.providers.meta_api_key,
     },

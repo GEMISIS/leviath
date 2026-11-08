@@ -20,6 +20,16 @@ same list.
   account, falling back to the compiled catalog when it does not answer. `gpt-5.5` is no longer
   offered on Plus, where the route now refuses it.
 
+- An embedding host can read the user's provider credentials the way `lev` does:
+  `leviath_runtime::load_user_creds` reads `config.toml`, fills unset keys from the
+  environment and, under `credential_store = "keychain"`, the OS store, and returns the
+  `ProviderCreds` list `build_provider_registry` takes, the `ModelDefaults` a stage
+  resolves against, and where each key came from. The host chooses the data directory
+  and whether the environment and the keychain are read. `[model_providers]` entries are
+  not covered. The stage resolver's ranked list (`resolve_stage_candidates_for`,
+  `Candidate`) and `with_effort` are public too, so a host can rank models as a stage
+  does.
+
 - A provider script can call an API that answers with raw audio or image bytes:
   `http_get_bytes(url [, headers])` and `http_post_bytes(url, body [, headers])` return
   `#{ mime_type, bytes }` with the body as a blob, and a `parts` entry whose `bytes` is a
