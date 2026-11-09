@@ -46,11 +46,31 @@ impl Config {
     pub(super) fn fill_from_env(&mut self, env: &dyn Fn(&str) -> Option<String>) {
         let mut settings = self.user_settings();
         let mut notes = Vec::new();
-        settings.fill_from_env(env, &mut BTreeMap::new(), &mut notes);
+        self.env_fill = settings.fill_from_env(env, &mut notes);
         for note in &notes {
             tracing::debug!("{note}");
         }
         self.adopt_filled(settings);
+    }
+
+    /// This config as it is kept: with what the environment supplied taken
+    /// back out.
+    ///
+    /// A load fills what the file leaves unset from the environment, and the
+    /// config a run uses has to carry that. The copy written to disk must
+    /// not: every command that edits the config loads it, changes one thing
+    /// and saves it, and writing the struct as it stands would pin a key the
+    /// user keeps in their environment, a gateway address and a region into
+    /// `config.toml`. A key the credential store supplied stays, since it is
+    /// kept, only somewhere else; and a setting changed since the load is
+    /// the caller's own and stays as they set it.
+    pub(crate) fn as_stored(&self) -> Self {
+        let mut stored = self.clone();
+        let mut settings = stored.user_settings();
+        settings.without_env_fill(&self.env_fill);
+        stored.adopt_filled(settings);
+        stored.env_fill = leviath_runtime::user_creds::EnvFill::default();
+        stored
     }
 
     /// Fill each provider key still unset from `store`, reading only those

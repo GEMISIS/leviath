@@ -414,13 +414,16 @@ fn retarget_default_provider(config: &mut Config) {
 
 /// Build a wizard against `env`.
 ///
-/// The base config comes from reading the *file*, deliberately not from
-/// `Config::load()`: `load` folds `$ANTHROPIC_API_KEY` and friends in, and the
-/// old wizard re-serialized the whole struct - quietly writing into
-/// `~/.leviath/config.toml` a key the user had chosen to keep in their
-/// environment. Those are tracked separately and shown as such.
+/// The base config is the config as it is kept
+/// (`Config::as_stored`): what the file and the credential store hold,
+/// without what a load folds in from `$ANTHROPIC_API_KEY` and friends. Those
+/// are tracked separately and shown as such, so a key the user chose to keep
+/// in their environment is neither offered for editing nor written into
+/// `~/.leviath/config.toml`.
 pub fn build_wizard(env: &SetupEnv) -> Wizard {
-    let base = Config::load_from_path(&env.config_path).unwrap_or_default();
+    let base = Config::load_from_path(&env.config_path)
+        .unwrap_or_default()
+        .as_stored();
     let (candidates, errors) = state::candidates_from_scans(import::scan(&env.roots));
     let remembered = env
         .ui_state_path
@@ -649,6 +652,39 @@ mod tests {
             // a plan writes its declines here and never to the real file.
             ui_state_path: Some(dir.join("ui-state.json")),
         }
+    }
+
+    /// A key the user keeps in their environment is shown as coming from
+    /// there, with nothing in the row to edit, and the plan the wizard
+    /// builds does not write it into the config. The loader reads the
+    /// process environment, as it does for a real run.
+    #[test]
+    fn a_key_in_the_environment_is_shown_as_such_and_not_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = SetupEnv {
+            env_lookup: Box::new(|name| {
+                (name == "ANTHROPIC_API_KEY").then(|| "sk-ant-env".to_string())
+            }),
+            ..env_in(dir.path())
+        };
+        let mut vars: Vec<(&str, Option<&str>)> = leviath_runtime::user_creds::env_names()
+            .into_iter()
+            .filter(|name| *name != "ANTHROPIC_API_KEY")
+            .map(|name| (name, None))
+            .collect();
+        vars.push(("ANTHROPIC_API_KEY", Some("sk-ant-env")));
+        temp_env::with_vars(vars, || {
+            let wizard = build_wizard(&env);
+            let row = wizard
+                .providers
+                .iter()
+                .find(|row| row.provider.id == "anthropic")
+                .expect("anthropic is offered");
+            assert_eq!(row.from_env, Some("ANTHROPIC_API_KEY"));
+            assert!(row.value.is_empty(), "the environment's key is in the row");
+            assert!(row.selected);
+            assert_eq!(wizard.build_config().providers.anthropic_api_key, None);
+        });
     }
 
     #[test]

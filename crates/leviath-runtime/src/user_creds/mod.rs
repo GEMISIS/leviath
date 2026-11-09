@@ -47,7 +47,7 @@ pub use creds::{provider_creds, signin_options};
 pub use defaults::{model_defaults, retention_settings};
 pub use model_provider::{ModelProviderConfig, ModelProviderKind};
 pub use provider_config::ProviderConfig;
-pub use settings::{SecuritySettings, UserSettings, env_names};
+pub use settings::{EnvFill, SecuritySettings, UserSettings, env_names};
 
 use crate::pipeline::ModelDefaults;
 use crate::provider_creds::ProviderCreds;
@@ -321,7 +321,13 @@ pub fn load_user_creds(source: &UserCredsSource<'_>) -> Result<UserCreds, UserCr
         }
     }
     if let Some(env) = source.env {
-        settings.fill_from_env(env, &mut origins, &mut warnings);
+        let filled = settings.fill_from_env(env, &mut warnings);
+        for provider in filled.keys() {
+            let variable = keyed_provider(provider)
+                .expect("the fill names providers from the table")
+                .key_env;
+            origins.insert(provider.to_string(), KeyOrigin::Env(variable.to_string()));
+        }
     }
     let credential_store = settings.security.credential_store;
     let missing = settings.missing_keys();

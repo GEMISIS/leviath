@@ -190,55 +190,128 @@ pub fn env_names() -> Vec<&'static str> {
         .collect()
 }
 
+/// What [`UserSettings::fill_from_env`] took from the environment: which
+/// slots it filled, and with what.
+///
+/// Kept by a host that writes the settings back to disk, so it can take
+/// these out first with [`UserSettings::without_env_fill`]: a key the user
+/// keeps in their environment is not one to copy into their config file.
+///
+/// `Debug` names the providers and never prints a key or a host.
+#[derive(Clone, Default)]
+pub struct EnvFill {
+    /// Each key filled, by provider.
+    keys: Vec<(&'static str, String)>,
+    /// Each host filled, by provider.
+    base_urls: Vec<(&'static str, String)>,
+    /// Bedrock's region, when it was filled.
+    bedrock_region: Option<String>,
+    /// Ollama's address, when it was filled.
+    ollama_base_url: Option<String>,
+}
+
+impl EnvFill {
+    /// The providers whose key came from the environment, in table order.
+    pub fn keys(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.keys.iter().map(|(provider, _)| *provider)
+    }
+}
+
+impl std::fmt::Debug for EnvFill {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let names = |filled: &[(&'static str, String)]| -> Vec<&'static str> {
+            filled.iter().map(|(provider, _)| *provider).collect()
+        };
+        f.debug_struct("EnvFill")
+            .field("keys", &names(&self.keys))
+            .field("base_urls", &names(&self.base_urls))
+            .field("bedrock_region", &self.bedrock_region.is_some())
+            .field("ollama_base_url", &self.ollama_base_url.is_some())
+            .finish()
+    }
+}
+
 impl UserSettings {
     /// Fill what the file left unset from the environment: each key from its
-    /// variable, each host from its own,
-    /// Bedrock's region from AWS's variables, and Ollama's address from
-    /// `OLLAMA_HOST`. A value in the file wins, a blank one included.
+    /// variable, each host from its own, Bedrock's region from AWS's
+    /// variables, and Ollama's address from `OLLAMA_HOST`. A value in the
+    /// file wins, a blank one included. What was filled comes back.
     ///
     /// A key variable that is set but blank fills the slot, so the provider
-    /// is not registered and the keychain is not asked; a warning says so, since otherwise the provider just vanishes.
+    /// is not registered and the keychain is not asked; a warning says so,
+    /// since otherwise the provider just vanishes.
     pub fn fill_from_env(
         &mut self,
         env: &dyn Fn(&str) -> Option<String>,
-        origins: &mut BTreeMap<String, super::KeyOrigin>,
         warnings: &mut Vec<String>,
-    ) {
+    ) -> EnvFill {
+        let mut fill = EnvFill::default();
         for keyed in super::KEYED_PROVIDERS {
             let slots = slots(keyed.provider);
             let slot = (slots.key)(self);
-            if slot.is_none() {
-                *slot = env(keyed.key_env);
-                match slot.as_deref().map(str::trim) {
-                    Some("") => warnings.push(format!(
+            if slot.is_none()
+                && let Some(key) = env(keyed.key_env)
+            {
+                if key.trim().is_empty() {
+                    warnings.push(format!(
                         "{} is set but empty, so {} is not registered; a key for it in the \
                          credential store is ignored",
                         keyed.key_env, keyed.provider
-                    )),
-                    Some(_) => {
-                        origins.insert(
-                            keyed.provider.to_string(),
-                            super::KeyOrigin::Env(keyed.key_env.to_string()),
-                        );
-                    }
-                    None => {}
+                    ));
                 }
+                fill.keys.push((keyed.provider, key.clone()));
+                *slot = Some(key);
             }
             let base_url = (slots.base_url)(self);
-            if base_url.is_none() {
-                *base_url = keyed.base_url_env.and_then(env);
+            if base_url.is_none()
+                && let Some(url) = keyed.base_url_env.and_then(env)
+            {
+                fill.base_urls.push((keyed.provider, url.clone()));
+                *base_url = Some(url);
             }
         }
         // Blank is unset: an exported empty variable is not a region.
         if self.providers.bedrock_region.is_none() {
-            self.providers.bedrock_region = REGION_ENV
+            fill.bedrock_region = REGION_ENV
                 .into_iter()
                 .find_map(env)
                 .map(|r| r.trim().to_string())
                 .filter(|r| !r.is_empty());
+            self.providers.bedrock_region = fill.bedrock_region.clone();
         }
         if self.ollama_base_url.is_none() {
-            self.ollama_base_url = env(OLLAMA_ENV);
+            fill.ollama_base_url = env(OLLAMA_ENV);
+            self.ollama_base_url = fill.ollama_base_url.clone();
+        }
+        fill
+    }
+
+    /// Take back out what the environment supplied: every slot `fill` filled
+    /// that still holds that value is unset again.
+    ///
+    /// A slot holding anything else was changed since the fill, by whoever
+    /// is about to save these settings, and is left as they set it. One set
+    /// to the very value the environment had is indistinguishable from the
+    /// environment's and is unset with it, which reads back the same for as
+    /// long as the variable stays.
+    pub fn without_env_fill(&mut self, fill: &EnvFill) {
+        for (provider, value) in &fill.keys {
+            let slot = (slots(provider).key)(self);
+            if slot.as_ref() == Some(value) {
+                *slot = None;
+            }
+        }
+        for (provider, value) in &fill.base_urls {
+            let slot = (slots(provider).base_url)(self);
+            if slot.as_ref() == Some(value) {
+                *slot = None;
+            }
+        }
+        if fill.bedrock_region.is_some() && self.providers.bedrock_region == fill.bedrock_region {
+            self.providers.bedrock_region = None;
+        }
+        if fill.ollama_base_url.is_some() && self.ollama_base_url == fill.ollama_base_url {
+            self.ollama_base_url = None;
         }
     }
 

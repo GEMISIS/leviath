@@ -31,6 +31,14 @@ same list.
   `[providers] fallback_order` entry that is not `provider/model`, was logged each time the
   setting was asked for: every two seconds for the first two, at every stage for the third. Each
   is now said once, when `config.toml` is loaded, beside the unread-key warning.
+- Saving the config no longer writes down what came from the environment. Loading fills a
+  provider key, a host (`OPENAI_BASE_URL` and the rest), Bedrock's region and Ollama's address
+  from their variables when the file leaves them unset, and every command that edits the config
+  (`lev mcp add`, `lev providers`, `lev setup`, `lev update`, the config API) then saved all of
+  it, so a key kept in the environment ended up in `config.toml`, or in the OS keychain under
+  `credential_store = "keychain"`. A save now leaves those out unless they were changed after
+  the load. `lev setup` shows such a key as coming from the environment, and `lev auth migrate`
+  no longer moves it.
 
 ### Added
 
