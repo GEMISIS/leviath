@@ -40,9 +40,11 @@ same list.
   the load. `lev setup` shows such a key as coming from the environment, and `lev auth migrate`
   no longer moves it.
 - `lev rage` scrubs the xAI and Meta API keys and the values of `[providers] xai_headers` and
-  `meta_headers` from the bundle it writes. Its list of provider secrets had stopped at the
-  providers that existed when it was written; it now reads the same provider table the loader
-  does.
+  `meta_headers` from the logs and run files in the bundle it writes. The copy of
+  `config.toml` was always scrubbed by key name, but a log line that echoed one of those
+  values went into the bundle as it was: the list of secret values to look for had stopped at
+  the providers that existed when it was written. It now reads the same provider table the
+  loader does.
 
 ### Added
 
@@ -79,7 +81,9 @@ same list.
   `ProviderConfig`, `ModelProviderConfig`, `provider_creds`, `model_defaults` and
   `retention_settings` in `leviath_runtime::user_creds` are public, and
   `KEYED_PROVIDERS` is the one table of keyed providers and their variables, looked up
-  by name. The stage resolver's ranked list (`resolve_stage_candidates_for`,
+  by name. A host that writes settings back can leave out what the environment supplied:
+  `UserSettings::fill_from_env` returns what it filled and `without_env_fill` takes it
+  back out, and `env_names` lists the variables that count. The stage resolver's ranked list (`resolve_stage_candidates_for`,
   `resolve_stage_candidates_named`, `Candidate`) and `with_effort` are public too, so a
   host can rank models as a stage does.
 
