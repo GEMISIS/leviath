@@ -1699,6 +1699,183 @@ async fn a_script_that_cannot_be_offered_is_reported() {
     .await;
 }
 
+/// A machine holding the files the linkage tests read: a global tool whose
+/// file and `@tool` names differ, one a built-in shadows, one that does not
+/// compile, a provider script, and a blueprint carrying its own `collect`.
+fn linked_scripts(home: &std::path::Path) {
+    let write = |dir: &std::path::Path, file: &str, body: &str| {
+        std::fs::create_dir_all(dir).expect("the directory");
+        std::fs::write(dir.join(file), body).expect("the script");
+    };
+    let data = home.join(".leviath");
+    let global = data.join("tools");
+    write(
+        &global,
+        "gather.rhai",
+        "// @tool collect\n// @description collects\n1",
+    );
+    write(
+        &global,
+        "read_file.rhai",
+        "// @tool read_file\n// @description shadows\n1",
+    );
+    write(&global, "broken.rhai", "fn main( { this does not compile");
+    write(&data.join("providers"), "local.rhai", "fn name() { \"x\" }");
+    let agent = data.join("agents").join("coder");
+    write(
+        &agent.join("tools"),
+        "gather.rhai",
+        "// @tool collect\n// @description collects here\n2",
+    );
+    crate::test_support::write_test_agent(&agent, plain("coder", "1.0.0"));
+}
+
+/// A script tool and the script it is are one step apart in both directions,
+/// though the tool is called by its `@tool` name and the script is filed
+/// under its file's.
+#[tokio::test]
+async fn a_script_tool_and_its_script_lead_to_each_other() {
+    crate::commands::serve::testutil::with_home(|home| async move {
+        linked_scripts(&home);
+
+        let answer = run_query(
+            "{ tools(first: 500) { results { name
+                 ... on ScriptToolOutput { script { id name kind compiles tool { name } } } } }
+               scripts { results { id kind name tool { name path origin } } }
+               node(id: \"script:tool:gather\") { ... on ScriptOutput { tool { name } } } }",
+        )
+        .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+
+        let tools = json["tools"]["results"].as_array().expect("tools");
+        let collect = tools
+            .iter()
+            .find(|tool| tool["name"] == "collect")
+            .expect("the script tool");
+        assert_eq!(collect["script"]["id"], "script:tool:gather");
+        assert_eq!(collect["script"]["name"], "gather");
+        assert_eq!(collect["script"]["kind"], "TOOL");
+        assert_eq!(collect["script"]["compiles"], true);
+        assert_eq!(collect["script"]["tool"]["name"], "collect");
+
+        let scripts = json["scripts"]["results"].as_array().expect("scripts");
+        let by_id = |id: &str| {
+            scripts
+                .iter()
+                .find(|script| script["id"] == id)
+                .expect("a listed script")
+        };
+        let gather = by_id("script:tool:gather");
+        assert_eq!(gather["tool"]["name"], "collect");
+        assert_eq!(gather["tool"]["origin"], "GLOBAL_SCRIPT");
+        assert!(
+            gather["tool"]["path"]
+                .as_str()
+                .expect("a path")
+                .ends_with("gather.rhai")
+        );
+        // A file that offers nothing says so: one whose name a built-in has,
+        // one that does not compile, and one that is not a tool at all.
+        assert!(by_id("script:tool:read_file")["tool"].is_null());
+        assert!(by_id("script:tool:broken")["tool"].is_null());
+        assert!(by_id("script:provider:local")["tool"].is_null());
+
+        assert_eq!(json["node"]["tool"]["name"], "collect");
+    })
+    .await;
+}
+
+/// A file skipped because its name was taken says which tool has the name,
+/// and one skipped for any other reason does not.
+#[tokio::test]
+async fn a_skipped_script_names_the_tool_that_has_its_name() {
+    crate::commands::serve::testutil::with_home(|home| async move {
+        linked_scripts(&home);
+
+        let answer = run_query(
+            "{ tools(first: 500) { skipped { path takenBy { name origin } } }
+               blueprint(name: \"coder\") {
+                 tools(first: 500) { skipped { path takenBy { name origin
+                   ... on ScriptToolOutput { script { id } } } } }
+                 scripts { results { id tool { origin } } } } }",
+        )
+        .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        let skipped_at = |listing: &serde_json::Value, file: &str| {
+            listing["skipped"]
+                .as_array()
+                .expect("skipped")
+                .iter()
+                .find(|skipped| skipped["path"].as_str().expect("a path").ends_with(file))
+                .expect("the skipped file")
+                .clone()
+        };
+
+        let machine = &json["tools"];
+        let shadowed = skipped_at(machine, "read_file.rhai");
+        assert_eq!(shadowed["takenBy"]["name"], "read_file");
+        assert_eq!(shadowed["takenBy"]["origin"], "BUILTIN");
+        assert!(skipped_at(machine, "broken.rhai")["takenBy"].is_null());
+
+        // Under the blueprint, its own `collect` wins the name, so the global
+        // file is the one skipped and the blueprint's script is what took it.
+        let scoped = &json["blueprint"]["tools"];
+        let lost = skipped_at(scoped, "gather.rhai");
+        assert_eq!(lost["takenBy"]["origin"], "BLUEPRINT_SCRIPT");
+        assert_eq!(lost["takenBy"]["script"]["id"], "script:tool@coder:gather");
+        let scripts = json["blueprint"]["scripts"]["results"]
+            .as_array()
+            .expect("scripts");
+        let origin_of = |id: &str| {
+            scripts
+                .iter()
+                .find(|script| script["id"] == id)
+                .expect("a listed script")["tool"]["origin"]
+                .clone()
+        };
+        assert_eq!(origin_of("script:tool@coder:gather"), "BLUEPRINT_SCRIPT");
+        assert!(origin_of("script:tool:gather").is_null());
+    })
+    .await;
+}
+
+/// A bundled tool that is installed leads to the global script it is, and one
+/// that is not leads nowhere.
+#[tokio::test]
+async fn an_installed_bundled_tool_names_its_script() {
+    crate::commands::serve::testutil::with_home(|home| async move {
+        let shipped = crate::bundled::bundled_tools();
+        let installed = shipped.first().expect("this build ships a tool");
+        let global = home.join(".leviath").join("tools");
+        std::fs::create_dir_all(&global).expect("the tools directory");
+        std::fs::write(
+            global.join(format!("{}.rhai", installed.name)),
+            installed.source,
+        )
+        .expect("the installed copy");
+
+        let answer =
+            run_query("{ bundledTools { name isInstalled script { id scope compiles } } }").await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        let rows = json["bundledTools"].as_array().expect("bundled tools");
+        for row in rows {
+            let name = row["name"].as_str().expect("a name");
+            if name == installed.name {
+                assert_eq!(row["script"]["id"], format!("script:tool:{name}"));
+                assert_eq!(row["script"]["scope"], "GLOBAL");
+                assert_eq!(row["script"]["compiles"], true);
+            } else {
+                assert_eq!(row["isInstalled"], false);
+                assert!(row["script"].is_null(), "{row}");
+            }
+        }
+    })
+    .await;
+}
+
 /// An agent name that could escape the agents directory is refused, on this
 /// surface as on the REST one: the name arrives from a client and `join`
 /// resists neither `..` nor an absolute path.
@@ -3982,6 +4159,48 @@ async fn a_yolo_profile_decides_about_one_call() {
             profile["read"]["configured"] == "ALLOW" || profile["read"]["configured"] == "ASK",
             "the configured half is what the config layers resolved: {profile}"
         );
+    })
+    .await;
+}
+
+/// A decision asked for without a `kind` is made about the kind the server
+/// works out, so a client does not have to know where a tool comes from to
+/// ask what a profile makes of it.
+#[tokio::test]
+async fn a_yolo_profile_decides_without_being_told_the_kind() {
+    crate::commands::serve::testutil::with_home(|home| async move {
+        let path = crate::yolo::yolo_path();
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("the directory");
+        std::fs::write(
+            &path,
+            "[p]\ndefault = \"ask\"\n[p.tools]\nallow = [\"@mcp\"]\ndeny = [\"@scripts\"]\n",
+        )
+        .expect("the profiles");
+        let tools = home.join(".leviath").join("tools");
+        std::fs::create_dir_all(&tools).expect("the tools directory");
+        std::fs::write(
+            tools.join("summarize.rhai"),
+            "// @tool summarize\n// @description sums\n1",
+        )
+        .expect("the script");
+
+        let decided = run_query(
+            "{ yoloProfile(name: \"p\") {
+                 script: decide(tool: \"summarize\") { policy reason }
+                 mcp: decide(tool: \"docs__search\") { policy }
+                 named: decide(tool: \"docs__search\", kind: SCRIPT) { policy } } }",
+        )
+        .await;
+        assert!(decided.errors.is_empty(), "{:?}", decided.errors);
+        let json = serde_json::to_value(&decided.data).expect("data serializes");
+        let profile = &json["yoloProfile"];
+        // The machine holds a script by that name, so the `@scripts` rule
+        // reaches it and the `@mcp` one does not.
+        assert_eq!(profile["script"]["policy"], "DENY", "{profile}");
+        // Nothing here answers to the name, which leaves an MCP server.
+        assert_eq!(profile["mcp"]["policy"], "ALLOW", "{profile}");
+        // A kind the caller names is taken as given.
+        assert_eq!(profile["named"]["policy"], "DENY", "{profile}");
     })
     .await;
 }

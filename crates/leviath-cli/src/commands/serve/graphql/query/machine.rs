@@ -17,9 +17,10 @@ use super::super::types::machine::{
     CodexOptions, CodexReasoningEffort, CodexVerbosity, Config, ConfigError, ConfigErrorKind,
     ConfigFileStatus, ConfigHealth, Directory, DoctorCheck, DoctorReport, Gateway, GatewayKind,
     McpServer, McpServerFilter, McpServerOrder, McpServerOrderField, MimeRow, MimeRowFilter,
-    MimeRowOrder, MimeRowOrderField, ProviderAuthKind, ProviderConfig, ProviderOptions,
-    RoutingConfig, Script, ScriptFilter, ScriptOrder, ScriptOrderField, ServeLimits, ServerInfo,
-    YoloProfile, YoloProfileFilter, YoloProfileOrder, YoloProfileOrderField,
+    MimeRowOrder, MimeRowOrderField, OfferedTools, ProviderAuthKind, ProviderConfig,
+    ProviderOptions, RoutingConfig, Script, ScriptFilter, ScriptOrder, ScriptOrderField,
+    ServeLimits, ServerInfo, YoloProfile, YoloProfileFilter, YoloProfileOrder,
+    YoloProfileOrderField,
 };
 use super::super::types::update::{DaemonStatus, UpdatePlan};
 use super::listing::{Window, connection, terms};
@@ -183,6 +184,7 @@ pub(crate) async fn registered_scripts(
     let config = state.current_config().await;
     // Resolved on this task and walked on the blocking pool.
     let dirs = AgentDirs::of(&config);
+    let offered = OfferedTools::of(blueprint);
     let blueprint = blueprint.map(str::to_string);
     Ok(blocking(move || {
         super::super::super::scripts::registered(&config, &dirs, blueprint.as_deref())
@@ -190,7 +192,7 @@ pub(crate) async fn registered_scripts(
     .await
     .gql()?
     .into_iter()
-    .map(Script::from_item)
+    .map(|item| Script::from_item(item, offered.clone()))
     .collect())
 }
 

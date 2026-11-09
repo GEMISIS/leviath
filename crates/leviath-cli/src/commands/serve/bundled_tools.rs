@@ -133,18 +133,31 @@ pub(super) struct BundledToolsResp {
 
 /// Every tool this build can install globally, for whichever surface asked.
 pub(super) fn list(dirs: &AgentDirs) -> Vec<BundledToolRow> {
+    list_with_copies(dirs)
+        .into_iter()
+        .map(|(row, _)| row)
+        .collect()
+}
+
+/// [`list`], with the global copy each row was judged against beside it, for
+/// a surface that also answers what that copy is.
+pub(super) fn list_with_copies(
+    dirs: &AgentDirs,
+) -> Vec<(BundledToolRow, Option<super::scripts::ScriptSource>)> {
     crate::bundled::bundled_tools()
         .into_iter()
         .map(|tool| {
-            let on_disk = global_copy(dirs, tool.name).map(|script| script.content);
-            BundledToolRow {
+            let on_disk = global_copy(dirs, tool.name);
+            let content = on_disk.as_ref().map(|script| script.content.as_str());
+            let row = BundledToolRow {
                 name: tool.name.to_string(),
                 description: leviath_scripting::tool::check_source(tool.name, tool.source)
                     .map(|meta| meta.description)
                     .unwrap_or_default(),
-                installed: on_disk.is_some(),
-                current: on_disk.as_deref() == Some(tool.source),
-            }
+                installed: content.is_some(),
+                current: content == Some(tool.source),
+            };
+            (row, on_disk)
         })
         .collect()
 }

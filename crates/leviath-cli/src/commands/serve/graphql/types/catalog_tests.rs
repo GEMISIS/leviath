@@ -9,6 +9,7 @@ use crate::commands::serve::graphql::filter::testkit::{
     exercise, exercise_enum, exercise_list, exercise_order,
 };
 use crate::commands::serve::graphql::scalars::Decimal;
+use crate::commands::serve::graphql::types::machine::{OfferedTools, Script};
 
 /// A model entry as the catalogue holds it.
 fn entry() -> crate::commands::serve::types::ModelEntry {
@@ -188,23 +189,31 @@ fn an_inventory_entry_reads_back_as_its_own_kind() {
         agent: Some("coder".to_string()),
         requires: vec!["network".to_string()],
     };
+    let scope = OfferedTools::of(None);
 
-    let builtin = Tool::of(entry(ToolSource::Builtin, None));
+    let builtin = Tool::of(entry(ToolSource::Builtin, None), &scope);
     assert_eq!(builtin.tool_origin(), ToolOrigin::Builtin);
     assert_eq!(builtin.tool_name(), "t");
     assert_eq!(builtin.tool_description(), "does a thing");
     // A sub-agent tool is a built-in carrying a different origin: the two were
     // field for field the same type, so `origin` is the whole difference.
-    let subagent = Tool::of(entry(ToolSource::Subagent, None));
+    let subagent = Tool::of(entry(ToolSource::Subagent, None), &scope);
     assert_eq!(subagent.tool_origin(), ToolOrigin::Subagent);
-    let Tool::Script(script) = Tool::of(entry(ToolSource::Agent, Some("/a/tools/t.rhai"))) else {
+    let Tool::Script(script) = Tool::of(entry(ToolSource::Agent, Some("/a/tools/t.rhai")), &scope)
+    else {
         panic!("an agent script is a script tool");
     };
     assert_eq!(script.path, "/a/tools/t.rhai");
     assert_eq!(script.blueprint.as_deref(), Some("coder"));
     assert_eq!(script.requires, vec!["network".to_string()]);
     assert_eq!(script.description, "does a thing");
-    let global = Tool::of(entry(ToolSource::Global, Some("/g/t.rhai")));
+    // The same file as the script listing files it: under its file's name and
+    // its owner, whatever the tool calls itself.
+    assert_eq!(script.script.id.as_str(), "script:tool@coder:t");
+    assert_eq!(script.script.path, "/a/tools/t.rhai");
+    assert_eq!(script.script.relative_path.as_deref(), Some("tools/t.rhai"));
+    assert_eq!(script.script.compiles, Some(true));
+    let global = Tool::of(entry(ToolSource::Global, Some("/g/t.rhai")), &scope);
     assert_eq!(global.tool_origin(), ToolOrigin::GlobalScript);
     assert_eq!(global.tool_name(), "t");
     assert_eq!(global.tool_description(), "does a thing");
@@ -212,7 +221,7 @@ fn an_inventory_entry_reads_back_as_its_own_kind() {
     // A script source with no file cannot come out of discovery, which only
     // makes one from a file it read. Carried as a built-in rather than dropped:
     // a tool missing from the listing is worse than one in the wrong arm.
-    let pathless = Tool::of(entry(ToolSource::Global, None));
+    let pathless = Tool::of(entry(ToolSource::Global, None), &scope);
     assert_eq!(pathless.tool_origin(), ToolOrigin::GlobalScript);
 }
 
@@ -303,6 +312,15 @@ async fn every_mirrored_function_runs() {
         path: "/g/summarise.rhai".to_string(),
         blueprint: None,
         requires: vec!["network".to_string()],
+        script: Box::new(Script::from_item(
+            crate::commands::serve::scripts::tool_item(
+                std::path::Path::new("/g/summarise.rhai"),
+                "global",
+                None,
+                None,
+            ),
+            OfferedTools::of(None),
+        )),
     };
     let tools = [
         Tool::Builtin(BuiltinTool {
@@ -326,6 +344,7 @@ async fn every_mirrored_function_runs() {
     exercise(&[SkippedTool {
         path: "/g/broken.rhai".to_string(),
         reason: "missing @description".to_string(),
+        taken_by: None,
     }])
     .await;
 
@@ -334,6 +353,7 @@ async fn every_mirrored_function_runs() {
         description: "searches the web".to_string(),
         is_installed: true,
         is_current: false,
+        script: None,
     }])
     .await;
 }

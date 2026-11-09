@@ -641,25 +641,36 @@ fn collect_tools(dir: &Path, scope: &'static str, agent: Option<&str>, out: &mut
         failed.into_iter().map(|f| (f.path, f.reason)).collect();
 
     for path in rhai_files(dir) {
-        let (compiles, error) = match reasons.get(&path) {
-            Some(reason) => (false, Some(reason.clone())),
-            None => (true, None),
-        };
-        let name = stem_of(&path);
-        out.push(ScriptItem {
-            kind: ScriptKind::Tool.as_str().to_string(),
-            // A tool sits in `tools/`, so its manifest-relative path carries
-            // that directory even though the route addresses it without one.
-            relative_path: agent.map(|_| format!("tools/{name}.rhai")),
-            name,
-            source: scope.to_string(),
-            agent: agent.map(str::to_string),
-            path: path.display().to_string(),
-            declared: true,
-            compiles: Some(compiles),
-            error,
-            provider: None,
-        });
+        out.push(tool_item(&path, scope, agent, reasons.get(&path).cloned()));
+    }
+}
+
+/// The listing's row for one file in a tools directory.
+///
+/// `scope` is `agent` or `global`, `agent` names the owner of an agent's own
+/// file, and `error` is why the file does not compile, when it does not.
+/// Whoever has a tool's file and wants the script it is builds the row here,
+/// so the two cannot describe one file differently.
+pub(super) fn tool_item(
+    path: &Path,
+    scope: &str,
+    agent: Option<&str>,
+    error: Option<String>,
+) -> ScriptItem {
+    let name = stem_of(path);
+    ScriptItem {
+        kind: ScriptKind::Tool.as_str().to_string(),
+        // A tool sits in `tools/`, so its manifest-relative path carries
+        // that directory even though the route addresses it without one.
+        relative_path: agent.map(|_| format!("tools/{name}.rhai")),
+        name,
+        source: scope.to_string(),
+        agent: agent.map(str::to_string),
+        path: path.display().to_string(),
+        declared: true,
+        compiles: Some(error.is_none()),
+        error,
+        provider: None,
     }
 }
 

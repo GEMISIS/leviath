@@ -11,8 +11,8 @@ use super::{
     CodexOptions, CodexReasoningEffort, CodexVerbosity, Config, ConfigError, ConfigErrorKind,
     ConfigFileStatus, ConfigHealth, Directory, DoctorCheck, DoctorReport, Fixed, Gateway,
     GatewayKind, JournalHealth, JournalWriteError, McpAuth, McpServer, McpServerOrderField,
-    MimeRow, MimeRowOrderField, MimeRowOrigin, MimeTokenRule, PerByte, PerPage, PerPixel,
-    PerSecond, ProviderAuthKind, ProviderConfig, ProviderOptions, RoutingConfig, Script,
+    MimeRow, MimeRowOrderField, MimeRowOrigin, MimeTokenRule, OfferedTools, PerByte, PerPage,
+    PerPixel, PerSecond, ProviderAuthKind, ProviderConfig, ProviderOptions, RoutingConfig, Script,
     ScriptOrderField, ServeLimits, ServerInfo, ShellRule, YoloHuman, YoloProfile,
     YoloProfileOrderField, YoloShellRules, YoloToolRules, YoloWaiver, transport_of,
 };
@@ -374,6 +374,7 @@ async fn every_mirrored_function_runs() {
             is_declared: true,
             compiles: Some(true),
             compile_error: None,
+            offered: OfferedTools::of(None),
         }
     }
     fn write_error() -> JournalWriteError {

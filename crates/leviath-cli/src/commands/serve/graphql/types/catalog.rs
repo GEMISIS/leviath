@@ -7,6 +7,8 @@
 //! thing here that stays a bare list is `toolGroups`, which is a closed set
 //! this build compiles in.
 
+use std::sync::Arc;
+
 use async_graphql::{Enum, ID, SimpleObject};
 use leviath_graphql_derive::mirror;
 
@@ -17,7 +19,7 @@ use super::super::filter::{
     OrderField, Orderable, Parts, Term, Tri, object_confirm, object_test, sort_key,
 };
 use super::super::scalars::{Decimal, Timestamp};
-use super::machine::ProviderAuthKind;
+use super::machine::{OfferedTools, ProviderAuthKind, Script};
 
 /// Where a model's token limits came from.
 #[mirror]
@@ -452,34 +454,65 @@ pub(crate) struct ScriptTool {
     /// cannot satisfy is not offered at all, so an entry here is one this
     /// machine meets.
     pub(crate) requires: Vec<String>,
+    /// The same file as a script: what `scripts` lists it as, with its id, its
+    /// source and whether it compiles.
+    ///
+    /// A tool is called by the name its `@tool` line declares and a script is
+    /// filed under its file's name, and the two need not match. This is the
+    /// step from one to the other.
+    // Boxed so a script tool is not several times the size of a built-in in
+    // the `Tool` enum they share.
+    #[filter(skip)]
+    pub(crate) script: Box<Script>,
+}
+
+impl ScriptTool {
+    /// One script-backed inventory entry, and the file it was read from.
+    pub(crate) fn of(
+        entry: crate::tool_inventory::ToolEntry,
+        path: &std::path::Path,
+        scope: &Arc<OfferedTools>,
+    ) -> Self {
+        let item = crate::commands::serve::scripts::tool_item(
+            path,
+            entry.source.as_str(),
+            entry.agent.as_deref(),
+            None,
+        );
+        Self {
+            origin: ToolOrigin::from(entry.source),
+            name: entry.name,
+            description: entry.description,
+            arguments: super::super::scalars::Json(entry.arguments),
+            path: path.display().to_string(),
+            blueprint: entry.agent,
+            requires: entry.requires,
+            script: Box::new(Script::from_item(item, scope.clone())),
+        }
+    }
 }
 
 impl Tool {
     /// Read one inventory entry as the kind of tool it is.
     ///
+    /// `scope` is the listing the entry was found by, which is what the script
+    /// behind a script tool is then read against.
+    ///
     /// A script entry without a path cannot happen - discovery only makes one
     /// from a file it read - and is carried as a built-in rather than dropped,
     /// because a tool missing from the listing is worse than one in the wrong
     /// arm of it.
-    pub(crate) fn of(entry: crate::tool_inventory::ToolEntry) -> Self {
+    pub(crate) fn of(entry: crate::tool_inventory::ToolEntry, scope: &Arc<OfferedTools>) -> Self {
         use crate::tool_inventory::ToolSource;
-        let origin = ToolOrigin::from(entry.source);
-        let arguments = super::super::scalars::Json(entry.arguments);
-        match (entry.source, entry.path) {
-            (ToolSource::Agent | ToolSource::Global, Some(path)) => Self::Script(ScriptTool {
-                name: entry.name,
-                description: entry.description,
-                arguments,
-                origin,
-                path: path.display().to_string(),
-                blueprint: entry.agent,
-                requires: entry.requires,
-            }),
+        match (entry.source, entry.path.clone()) {
+            (ToolSource::Agent | ToolSource::Global, Some(path)) => {
+                Self::Script(ScriptTool::of(entry, &path, scope))
+            }
             _ => Self::Builtin(BuiltinTool {
+                origin: ToolOrigin::from(entry.source),
                 name: entry.name,
                 description: entry.description,
-                arguments,
-                origin,
+                arguments: super::super::scalars::Json(entry.arguments),
             }),
         }
     }
@@ -719,6 +752,10 @@ pub(crate) struct BundledTool {
     /// Whether that global copy is this build's, byte for byte. False when it
     /// is missing, older, or edited, which is when an install changes it.
     pub(crate) is_current: bool,
+    /// The global copy on this machine, as the script it is. Null when no
+    /// global tool by this name is installed.
+    #[filter(skip)]
+    pub(crate) script: Option<Script>,
 }
 
 /// A `.rhai` file that was found and could not be offered as a tool.
@@ -729,6 +766,12 @@ pub(crate) struct SkippedTool {
     pub(crate) path: String,
     /// Why it could not be offered.
     pub(crate) reason: String,
+    /// The tool that has the name this file declares, when that is why the
+    /// file was skipped: a built-in, a sub-agent tool, or a blueprint's own
+    /// script ahead of a global one. Null for a file skipped for any other
+    /// reason, such as one that does not compile.
+    #[filter(skip)]
+    pub(crate) taken_by: Option<Tool>,
 }
 
 /// What a tool listing says beyond the tools themselves.

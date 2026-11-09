@@ -96,8 +96,14 @@ impl YoloProfile {
         &self,
         ctx: &Context<'_>,
         #[graphql(desc = "The tool the model would call.")] tool: String,
-        #[graphql(desc = "Where that tool comes from, which is what a `@group` token matches on.")]
-        kind: ToolKind,
+        #[graphql(
+            desc = "Where that tool comes from, which is what a `@group` token matches on. \
+                    Omitted, the server works it out the way dispatch does: a built-in or \
+                    sub-agent tool by its name, a script by the machine's tools directory, \
+                    anything else as an MCP tool. A script only one blueprint carries is \
+                    not found that way, so pass `SCRIPT` for one."
+        )]
+        kind: Option<ToolKind>,
         #[graphql(desc = "The call's arguments. The shell reads its line from `command` here.")]
         args: Option<Json>,
     ) -> async_graphql::Result<YoloDecision> {
@@ -114,7 +120,7 @@ impl YoloProfile {
             arguments: args.map(|json| json.0),
             workdir: None,
             configured: None,
-            kind: Some(kind.wire().to_string()),
+            kind: kind.map(|kind| kind.wire().to_string()),
             allowed: false,
         };
         // Deciding loads the profiles file, as the REST route does on the

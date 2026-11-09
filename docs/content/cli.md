@@ -1718,6 +1718,11 @@ stands in for what the config layers resolve the tool to; left off, that is read
 `config.toml`. `--allowed` decides as if `--allow <tool>` had been passed. A shell line is judged
 with `--command`; any other tool takes its arguments as `--args '{"url": "..."}'`.
 
+`--kind` says where the tool comes from, which is what a `@group` rule matches on. Left off, it is
+worked out the way a run works it out: a built-in or sub-agent tool by its name, a script by your
+global tools directory, and anything else as an MCP tool. Pass `--kind script` for a tool only one
+blueprint carries, since `test` is not told which blueprint.
+
 ```bash
 lev yolo init
 lev yolo test careful --tool shell --command "rm -r target/debug"

@@ -11,7 +11,7 @@ use super::super::super::tools::AgentDirs;
 use super::super::super::types::AppState;
 use super::super::error::IntoGraphql;
 use super::super::script_ref::ScriptRef;
-use super::super::types::machine::Script;
+use super::super::types::machine::{OfferedTools, Script};
 
 /// Which script to write, and what to put in it.
 #[derive(Debug, InputObject)]
@@ -87,26 +87,32 @@ fn written_script(
     owner: Option<String>,
     written: ScriptWritten,
 ) -> Script {
-    Script::from_item(super::super::super::scripts::ScriptItem {
-        kind: kind.to_string(),
-        name,
-        // The two words a listing spells a scope with, and the two
-        // `ScriptScope::from_wire` reads back.
-        source: match owner {
-            Some(_) => "agent",
-            None => "global",
-        }
-        .to_string(),
-        agent: owner,
-        path: written.path,
-        relative_path: written.relative_path,
-        // Written by name into the registry the kind selects, which is
-        // what being declared is.
-        declared: true,
-        compiles: Some(written.compiles),
-        error: written.error,
-        provider: None,
-    })
+    // Read against the scope its owner's listing walks, as `script(ref:)`
+    // reads it.
+    let offered = OfferedTools::of(owner.as_deref());
+    Script::from_item(
+        super::super::super::scripts::ScriptItem {
+            kind: kind.to_string(),
+            name,
+            // The two words a listing spells a scope with, and the two
+            // `ScriptScope::from_wire` reads back.
+            source: match owner {
+                Some(_) => "agent",
+                None => "global",
+            }
+            .to_string(),
+            agent: owner,
+            path: written.path,
+            relative_path: written.relative_path,
+            // Written by name into the registry the kind selects, which is
+            // what being declared is.
+            declared: true,
+            compiles: Some(written.compiles),
+            error: written.error,
+            provider: None,
+        },
+        offered,
+    )
 }
 
 /// Which bundled tool to install.
