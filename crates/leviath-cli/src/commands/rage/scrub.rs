@@ -304,29 +304,20 @@ pub(crate) fn secret_strings_in(value: &serde_json::Value, out: &mut Vec<String>
 }
 
 /// The secret values a loaded config holds, wherever it holds them.
+///
+/// The provider keys and the providers' extra headers are found through the
+/// tables that name every provider (`Config::provider_secrets` and the
+/// runtime's `KEYED_PROVIDERS`), not listed here: a provider added to those
+/// is scrubbed without this function hearing of it.
 pub(crate) fn config_secrets(config: &crate::config::Config) -> Vec<String> {
-    let providers = &config.providers;
-    let mut out: Vec<String> = [
-        &providers.anthropic_api_key,
-        &providers.openai_api_key,
-        &providers.google_api_key,
-        &providers.meshy_api_key,
-        &providers.bedrock_api_key,
-        &config.openrouter_api_key,
-    ]
-    .into_iter()
-    .flatten()
-    .cloned()
-    .collect();
-    for headers in [
-        &providers.anthropic_headers,
-        &providers.openai_headers,
-        &providers.google_headers,
-        &providers.openrouter_headers,
-        &providers.meshy_headers,
-        &providers.bedrock_headers,
-    ] {
-        out.extend(headers.values().cloned());
+    let mut out: Vec<String> = config
+        .provider_secrets()
+        .into_iter()
+        .map(|(_, secret)| secret)
+        .collect();
+    let settings = config.user_settings();
+    for keyed in leviath_runtime::KEYED_PROVIDERS {
+        out.extend(settings.headers(keyed).values().cloned());
     }
     out.extend(
         config

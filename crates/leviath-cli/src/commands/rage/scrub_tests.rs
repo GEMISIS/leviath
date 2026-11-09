@@ -290,6 +290,56 @@ SEARCH = "tool-cred-1"
     assert_eq!(out, expected);
 }
 
+/// Every provider key and every provider's extra headers are scrubbed,
+/// whichever provider they belong to. The fields are found by walking the
+/// config and the runtime's provider table rather than listed here, so a
+/// provider added later is covered or this fails.
+#[test]
+fn config_secrets_covers_every_provider_key_and_header_field() {
+    let default = serde_json::to_value(crate::config::Config::default()).unwrap();
+    let key_fields = |table: &serde_json::Value| -> Vec<String> {
+        table
+            .as_object()
+            .expect("a table")
+            .keys()
+            .filter(|name| name.ends_with("_api_key"))
+            .cloned()
+            .collect()
+    };
+    let mut planted = Vec::new();
+    let mut text = String::new();
+    for field in key_fields(&default) {
+        text.push_str(&format!("{field} = \"key-{field}\"\n"));
+        planted.push(format!("key-{field}"));
+    }
+    text.push_str("[providers]\n");
+    for field in key_fields(&default["providers"]) {
+        text.push_str(&format!("{field} = \"key-{field}\"\n"));
+        planted.push(format!("key-{field}"));
+    }
+    for keyed in leviath_runtime::KEYED_PROVIDERS {
+        let provider = keyed.provider;
+        text.push_str(&format!(
+            "{provider}_headers = {{ h = \"hdr-{provider}\" }}\n"
+        ));
+        planted.push(format!("hdr-{provider}"));
+    }
+    assert_eq!(
+        planted.len(),
+        2 * leviath_runtime::KEYED_PROVIDERS.len(),
+        "a key and a header map for every keyed provider: {planted:?}"
+    );
+
+    let config: crate::config::Config = toml::from_str(&text).expect("the config parses");
+    // Every line planted was a field the config reads, not a stray key.
+    let read_back = toml::to_string(&config).expect("serializes");
+    let secrets = config_secrets(&config);
+    for secret in &planted {
+        assert!(read_back.contains(secret), "{secret} is not a config field");
+        assert!(secrets.contains(secret), "{secret} is not scrubbed");
+    }
+}
+
 #[test]
 fn env_secrets_and_present_names_follow_the_naming_rule() {
     let names = vec![
