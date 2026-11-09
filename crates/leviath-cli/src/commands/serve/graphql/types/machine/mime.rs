@@ -182,6 +182,10 @@ pub(crate) struct MimeRow {
     /// What a consumer that cannot take this type sees in the part's place.
     pub(crate) stand_in: Option<String>,
     /// A script the bytes must pass before they are stored as this type.
+    ///
+    /// An empty string names no script: it lifts a check a broader row put on
+    /// the type. Null means the row says nothing about checks, which leaves a
+    /// broader row's check in place.
     pub(crate) check: Option<String>,
 }
 

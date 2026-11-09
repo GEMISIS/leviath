@@ -113,6 +113,15 @@ same list.
   tools directory holds a script for is now a script. A script only one
   blueprint carries still needs `--kind script`, since the question does not
   say which blueprint.
+- GraphQL descriptions that said something untrue, or left a rule out, are
+  corrected. `RunOutput.updatedAt` read "last state change": it is when the
+  record was last written, which the 30-second heartbeat moves on a stuck run
+  too, and `lastProgressAt` is the one to age a run against. `Decimal` read
+  "an exact decimal": it is the daemon's `f64` in its shortest round-tripping
+  form. Every `first` argument now states its listing's cap, where it said
+  only that there was one. `MimeRowOutput.check` says what an empty string
+  means, and `StageOutput.availableTools` names the field that lists the
+  machine's tools.
 - Under the default `shell_env = "filtered"`, every git command in a shell tool
   failed with `missing config key GIT_CONFIG_KEY_0` when the daemon's
   environment carried git's `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` /

@@ -361,7 +361,8 @@ impl Stage {
     /// resolve at spawn.
     ///
     /// Names rather than tools: a blueprint may name a tool this machine does
-    /// not have, and resolving would drop it. Read `tools` for what is here.
+    /// not have, and resolving would drop it. Read `BlueprintOutput.tools` for
+    /// the tools this machine has for the blueprint.
     async fn available_tools(&self) -> Vec<String> {
         self.stage()
             .tools

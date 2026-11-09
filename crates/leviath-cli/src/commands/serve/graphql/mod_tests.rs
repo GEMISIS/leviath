@@ -144,6 +144,66 @@ fn the_documented_page_caps_are_the_ones_the_code_enforces() {
     );
 }
 
+/// Every `first` argument states the cap its listing enforces.
+///
+/// The description is the one place a client reading the schema learns a
+/// listing's page size, and the caps differ by listing. Read from the
+/// constants, like the guide's table above, so a cap that moves fails this
+/// until the description moves with it, and a listing added without one
+/// fails it too.
+#[test]
+fn every_page_size_argument_states_its_cap() {
+    use async_graphql::parser::parse_schema;
+    use async_graphql::parser::types::{TypeKind, TypeSystemDefinition};
+
+    use crate::commands::serve::core::{files, history, runs as run_core};
+
+    let parsed = parse_schema(include_str!(
+        "../../../../../../docs/schema/leviath.graphql"
+    ))
+    .expect("the schema parses");
+    let mut stated = 0;
+    for definition in &parsed.definitions {
+        let TypeSystemDefinition::Type(ty) = definition else {
+            continue;
+        };
+        let TypeKind::Object(object) = &ty.node.kind else {
+            continue;
+        };
+        let owner = ty.node.name.node.as_str();
+        for field in &object.fields {
+            let name = field.node.name.node.as_str();
+            let Some(first) = field
+                .node
+                .arguments
+                .iter()
+                .find(|argument| argument.node.name.node == "first")
+            else {
+                continue;
+            };
+            let cap = match (owner, name) {
+                ("Query", "models" | "catalog" | "providers" | "tools")
+                | ("BlueprintOutput", "tools") => super::query::catalog::PAGE_CAP,
+                ("RunOutput", "files") => files::MAX_LISTING_ENTRIES,
+                ("RunOutput", "contextHistory") => history::HISTORY_MAX_LIMIT,
+                _ => run_core::MAX_LIMIT,
+            };
+            let said = first
+                .node
+                .description
+                .as_ref()
+                .map(|description| description.node.as_str())
+                .unwrap_or_default();
+            assert!(
+                said.contains(&format!("at most {cap}.")),
+                "{owner}.{name}(first:) should state its cap of {cap}: {said:?}"
+            );
+            stated += 1;
+        }
+    }
+    assert!(stated >= 25, "only {stated} page-size arguments were found");
+}
+
 /// The complexity budget counts the rows a query asks for, not the words it
 /// is written with.
 ///
