@@ -333,10 +333,10 @@ fn config_secrets_covers_every_provider_key_and_header_field() {
     let config: crate::config::Config = toml::from_str(&text).expect("the config parses");
     // Every line planted was a field the config reads, not a stray key.
     let read_back = toml::to_string(&config).expect("serializes");
-    let secrets = config_secrets(&config);
-    for secret in &planted {
-        assert!(read_back.contains(secret), "{secret} is not a config field");
-        assert!(secrets.contains(secret), "{secret} is not scrubbed");
+    let scrubbed = config_secrets(&config);
+    for marker in &planted {
+        assert!(read_back.contains(marker), "{marker} is not a config field");
+        assert!(scrubbed.contains(marker), "{marker} is not scrubbed");
     }
 }
 

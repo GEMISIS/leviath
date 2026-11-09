@@ -1,10 +1,11 @@
 use super::super::Config;
 
-/// A config holding a secret everywhere it can: every provider's key and
-/// extra headers, an MCP server's environment and headers, a gateway's key,
-/// headers and forwarded extras, a tool credential, and a key the
-/// environment supplied on the way in.
-fn config_full_of_secrets() -> Config {
+/// A config holding a marker everywhere it can hold a credential: every
+/// provider's key and extra headers, an MCP server's environment and
+/// headers, a gateway's key, headers and forwarded extras, a tool
+/// credential, and a key the environment supplied on the way in. Each
+/// marker starts with `SECRET`, so one search finds any that got out.
+fn config_with_a_marker_everywhere() -> Config {
     let mut text = String::from("openrouter_api_key = \"SECRET-key-openrouter\"\n[providers]\n");
     for keyed in leviath_runtime::KEYED_PROVIDERS {
         let provider = keyed.provider;
@@ -53,10 +54,13 @@ SEARCH = "SECRET-tool"
 /// The type cannot leak, so nobody has to remember not to print it.
 #[test]
 fn debug_prints_no_secret_wherever_the_config_holds_one() {
-    let config = config_full_of_secrets();
-    // The secrets are really there: the same config written out has them.
-    let written = toml::to_string(&config).expect("serializes");
-    assert!(written.matches("SECRET-").count() >= 20, "{written}");
+    let config = config_with_a_marker_everywhere();
+    // The markers are really there: the same config written out has them.
+    let planted = toml::to_string(&config)
+        .expect("serializes")
+        .matches("SECRET-")
+        .count();
+    assert!(planted >= 20, "only {planted} markers were planted");
 
     for rendered in [format!("{config:?}"), format!("{config:#?}")] {
         assert!(!rendered.contains("SECRET"), "a secret leaked:\n{rendered}");
