@@ -1,9 +1,10 @@
 //! Decoupled provider credentials + registry construction.
 //!
 //! [`ProviderCreds`] is the plain-data seam that lets the run engine build a
-//! [`ProviderRegistry`] without depending on the CLI's `Config`/`ProviderConfig`
-//! types. The CLI owns the `Config -> Vec<ProviderCreds>` translation
-//! (`provider_creds_from_config`); this module owns everything downstream of it.
+//! [`ProviderRegistry`] without knowing where a provider's settings came from.
+//! [`user_creds`](crate::user_creds) turns the user's `config.toml` into a
+//! list of them, for `lev` and for an embedding host alike; this module owns
+//! everything downstream of that list.
 
 use crate::ProviderRegistry;
 use std::sync::Arc;
@@ -11,8 +12,8 @@ use std::sync::Arc;
 /// Decoupled provider credentials.
 ///
 /// Plain data so [`build_provider_registry`] can instantiate providers without
-/// depending on the CLI's `Config`/`ProviderConfig` types. Build one per
-/// provider that should be registered.
+/// reading any configuration itself. Build one per provider that should be
+/// registered.
 /// `Debug` is hand-written (below) so `api_key` cannot be printed.
 /// `PartialEq` is what lets the daemon tell whether a config edit changed a
 /// provider at all, key included, without printing one.

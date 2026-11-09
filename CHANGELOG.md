@@ -54,9 +54,15 @@ same list.
   `ProviderCreds` list `build_provider_registry` takes, the `ModelDefaults` a stage
   resolves against, and where each key came from. The host chooses the data directory
   and whether the environment and the keychain are read; the keychain is asked only for
-  keys still missing. `[model_providers]` entries are not covered. `KEYED_PROVIDERS` is
-  the one table of keyed providers and their variables, looked up by name, and `lev`
-  reads it too. The stage resolver's ranked list (`resolve_stage_candidates_for`,
+  keys still missing. `[model_providers]` endpoints (`kind = "openai-compatible"` and
+  `"openai"`) are registered under their own names and the retention words on every
+  entry are read; an entry that cannot work fails the load, and a script entry is left
+  to the host. A key that changed name is read under its new one and named in the
+  warnings. `lev` builds its own providers through the same code: `UserSettings`,
+  `ProviderConfig`, `ModelProviderConfig`, `provider_creds`, `model_defaults` and
+  `retention_settings` in `leviath_runtime::user_creds` are public, and
+  `KEYED_PROVIDERS` is the one table of keyed providers and their variables, looked up
+  by name. The stage resolver's ranked list (`resolve_stage_candidates_for`,
   `resolve_stage_candidates_named`, `Candidate`) and `with_effort` are public too, so a
   host can rank models as a stage does.
 

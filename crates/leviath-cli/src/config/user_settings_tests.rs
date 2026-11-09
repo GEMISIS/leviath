@@ -1,13 +1,14 @@
-//! The runtime's `load_user_creds` against this crate's own loader, for one
-//! config that reaches every provider both of them cover.
+//! One file read two ways: by `lev`, through [`Config`] and
+//! [`Config::user_settings`], and by the runtime's `load_user_creds`, which
+//! deserializes the same settings directly.
 //!
-//! The runtime copy of `provider_creds_from_config` and `model_defaults`
-//! exists so an embedder can build the registry `lev` builds without the
-//! CLI's `Config`. A copy drifts, so this holds the two to one answer: a
-//! setting added here and not there fails this test rather than routing an
-//! embedder's stages somewhere `lev` would not.
+//! Both build providers with the same code, so the only way they can differ
+//! is the copy in `user_settings`: a top-level field read from the wrong
+//! place, or a fill whose result is not carried back. One config that sets
+//! every field the copy carries holds the two readings to one answer.
 
 use super::*;
+use crate::commands::run::session::{ProviderCreds, provider_creds_from_config};
 
 /// Every keyed provider with a host and a header, Ollama, both sign-ins,
 /// limits, overrides and routing preferences, in the file backend, plus one
@@ -64,10 +65,35 @@ X-Gateway = "gw"
 [providers.xai_headers]
 X-Tenant = "t"
 
-# The one documented exclusion: the runtime loader does not read these.
 [model_providers.groq]
 kind = "openai-compatible"
-base_url = "https://groq.example/v1"
+base_url = " https://groq.example/v1 "
+api_key = " gsk "
+models = ["llama-x"]
+serves = ["llama-y"]
+retention = "30d"
+rate_limit = { requests_per_minute = 5, tokens_per_minute = 6 }
+headers = { X-Org = "research" }
+
+[model_providers.azure-east]
+kind = "openai"
+base_url = "https://east.openai.azure.com/openai/v1"
+api_key = "east"
+auth_header = "api-key"
+serves = ["prod-gpt"]
+models = ["prod-gpt-mini"]
+retention = "zero"
+zero_retention_request = "openai"
+
+[model_providers.local]
+kind = "openai-compatible"
+base_url = "http://localhost:8080/v1"
+
+# A script entry is no provider of the loader's, and its retention word counts.
+[model_providers.scripted]
+script = "scripted.rhai"
+base_url = "https://scripted.example"
+retention = "indefinite"
 "#;
 
 /// The variables the two loaders read, each set or cleared explicitly so the
@@ -108,10 +134,10 @@ fn environment(home: &std::path::Path) -> Vec<(String, Option<String>)> {
     vars
 }
 
-/// The two loaders register the same providers with the same settings, and
-/// hand a stage the same defaults.
+/// `lev` and an embedding host register the same providers with the same
+/// settings from one file, and hand a stage the same defaults.
 #[test]
-fn the_runtime_loader_matches_the_cli_for_every_covered_provider() {
+fn lev_and_an_embedding_host_read_one_file_the_same_way() {
     let home = tempfile::tempdir().unwrap();
     let data_dir = home.path().join(".leviath");
     std::fs::create_dir_all(&data_dir).unwrap();
@@ -141,24 +167,17 @@ fn the_runtime_loader_matches_the_cli_for_every_covered_provider() {
                 "xai",
                 "meta",
                 "ollama",
+                "azure-east",
+                "groq",
+                "local",
                 "codex",
                 "grok"
             ],
-            "every covered provider is exercised"
+            "every kind of provider is exercised"
         );
-        // Everything the CLI registers, less only the `[model_providers]`
-        // entries the runtime loader documents it does not read: a provider
-        // the CLI registers and the runtime omits fails here.
-        let cli: Vec<ProviderCreds> = provider_creds_from_config(&config)
-            .into_iter()
-            .filter(|c| !config.model_providers.contains_key(&c.name))
-            .collect();
-        assert!(
-            provider_creds_from_config(&config)
-                .iter()
-                .any(|c| c.name == "groq"),
-            "the exclusion is exercised"
-        );
+        // Everything the CLI registers: a provider one side registers and
+        // the other omits fails here.
+        let cli: Vec<ProviderCreds> = provider_creds_from_config(&config);
         let cli_names: Vec<&str> = cli.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(cli_names, names, "the same providers, in the same order");
         for (cli, runtime) in cli.iter().zip(&loaded.creds) {
@@ -173,6 +192,8 @@ fn the_runtime_loader_matches_the_cli_for_every_covered_provider() {
             loaded.defaults,
             crate::daemon::spawn::model_defaults(&config)
         );
+        assert_eq!(loaded.defaults.retention.provider_declarations.len(), 3);
+        assert_eq!(loaded.defaults.retention.request_knob_aliases.len(), 1);
         assert_eq!(
             Some(loaded.grants_path.clone()),
             leviath_providers::oauth::ProviderAuthStore::default_path()

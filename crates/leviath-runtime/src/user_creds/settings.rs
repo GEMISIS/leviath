@@ -7,7 +7,7 @@
 //! deserializes them directly. Anything the file holds that this does not
 //! name (MCP servers, permissions, limits) is ignored rather than refused.
 
-use super::ProviderConfig;
+use super::{ModelProviderConfig, ProviderConfig};
 use leviath_core::CredentialStoreKind;
 use leviath_providers::{ModelCapabilityOverride, RateLimitConfig};
 use serde::Deserialize;
@@ -40,6 +40,9 @@ pub struct UserSettings {
     pub rate_limits: HashMap<String, RateLimitConfig>,
     /// `[providers]`.
     pub providers: ProviderConfig,
+    /// `[model_providers.<name>]`: the endpoints registered under their own
+    /// names, and the script entries, read here for their retention words.
+    pub model_providers: HashMap<String, ModelProviderConfig>,
     /// `[security]`, for where the keys are kept.
     pub security: SecuritySettings,
 }
@@ -58,6 +61,7 @@ impl Default for UserSettings {
             request_timeout_secs: None,
             rate_limits: HashMap::new(),
             providers: ProviderConfig::default(),
+            model_providers: HashMap::new(),
             security: SecuritySettings::default(),
         }
     }

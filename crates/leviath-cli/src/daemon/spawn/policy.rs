@@ -1,34 +1,27 @@
 //! Turning `config.toml` into the shapes the spawn path needs.
 //!
-//! Three small translations that have nothing to do with each other except
-//! their direction: the user's default model, the shell environment policy, and
-//! the provider fallback chain. They are here rather than beside the code that
-//! consumes them because each is a pure function of the config and none of them
-//! is about spawning - keeping them together stops the assembly below from
-//! reading like it also parses settings.
+//! Two small translations that have nothing to do with each other except
+//! their direction: the user's model defaults and the shell environment
+//! policy. They are here rather than beside the code that consumes them
+//! because each is a pure function of the config and neither is about
+//! spawning - keeping them together stops the assembly below from reading
+//! like it also parses settings.
 
 use super::*;
 
 /// The user's default provider and model settings from `config.toml`, in the
-/// plain form the runtime's stage resolver takes.
+/// plain form the runtime's stage resolver takes: the runtime's own
+/// [`model_defaults`](leviath_runtime::user_creds::model_defaults) over this
+/// config's provider settings. A malformed `[providers] fallback_order` entry
+/// is dropped with a warning that names it.
 pub(crate) fn model_defaults(config: &Config) -> ModelDefaults {
-    ModelDefaults {
-        provider: config.default_provider.clone(),
-        override_model: config.override_model.clone(),
-        fallback_model: config.fallback_model.clone(),
-        fallback_order: parse_fallback_order(&config.providers.fallback_order),
-        provider_order: config.providers.provider_order.clone(),
-        retention: crate::commands::run::session::retention_settings(config),
-    }
+    let mut warnings = Vec::new();
+    let defaults =
+        leviath_runtime::user_creds::model_defaults(&config.user_settings(), &mut warnings);
+    crate::config::log_warnings(&warnings);
+    defaults
 }
 
-/// Parse `[providers] fallback_order` entries (`"provider/model"`) into the
-/// runtime's own form.
-///
-/// A malformed entry is dropped with a warning rather than failing the load: a
-/// typo in a *safety net* should not stop the daemon from starting, and the
-/// warning says which entry went nowhere. Splitting on the first `/` keeps
-/// model ids that contain one (`deepseek/deepseek-v4-flash`) intact.
 /// The `[security] shell_env` decision for this daemon, in the shape the tools
 /// layer wants.
 ///
@@ -42,24 +35,4 @@ pub(crate) fn shell_env_policy(config: &Config) -> leviath_tools::ShellEnvPolicy
         allow_env_vars: config.security.allow_env_vars.clone(),
         withhold: config.security.shell_env_withhold.clone(),
     }
-}
-
-pub(super) fn parse_fallback_order(
-    entries: &[String],
-) -> Vec<leviath_runtime::spec::names::ModelRef> {
-    entries
-        .iter()
-        .filter_map(
-            |raw| match leviath_runtime::spec::names::ModelRef::parse(raw) {
-                Ok(route) if route.provider.is_some() => Some(route),
-                _ => {
-                    tracing::warn!(
-                        entry = %raw,
-                        "ignoring [providers] fallback_order entry: expected \"provider/model\""
-                    );
-                    None
-                }
-            },
-        )
-        .collect()
 }

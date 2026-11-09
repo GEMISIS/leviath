@@ -626,3 +626,290 @@ fn with_mock_keychain() -> std::sync::MutexGuard<'static, ()> {
     keyring_core::set_default_store(keyring_core::mock::Store::new().expect("mock store"));
     guard
 }
+
+/// A `[model_providers]` endpoint is a provider under its own name, built
+/// with the constructor its kind names, and listed by name between Ollama
+/// and the sign-in transports. A script entry is not a provider here.
+#[test]
+fn endpoints_register_under_their_own_names_in_name_order() {
+    let dir = with_config(
+        r#"
+ollama_base_url = "http://o"
+request_timeout_secs = 9
+
+[model_capabilities.m]
+max_output_tokens = 1
+
+[providers]
+openai_api_key = "k"
+codex_enabled = true
+grok_enabled = true
+
+[model_providers.zeta]
+kind = "openai-compatible"
+base_url = " http://z/v1 "
+api_key = " zk "
+models = ["m1"]
+serves = ["s1"]
+rate_limit = { requests_per_minute = 5, tokens_per_minute = 6 }
+headers = { X-Org = "r" }
+
+[model_providers.alpha]
+kind = "openai"
+base_url = "https://a/v1"
+api_key = "ak"
+auth_header = "api-key"
+serves = ["dep"]
+models = ["dep2"]
+
+[model_providers.keyless]
+kind = "openai-compatible"
+base_url = "http://l/v1"
+
+[model_providers.scripted]
+script = "s.rhai"
+base_url = "http://ignored"
+
+[rate_limits.zeta]
+requests_per_minute = 99
+tokens_per_minute = 99
+"#,
+    );
+    let loaded = load_user_creds(&bare(dir.path())).unwrap();
+    let names: Vec<&str> = loaded.creds.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "openai", "ollama", "alpha", "keyless", "zeta", "codex", "grok"
+        ]
+    );
+    assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+
+    // What every endpoint carries from the top of the file.
+    let shared = |mut cred: ProviderCreds| {
+        cred.model_capabilities = cred_caps(&loaded);
+        cred.request_timeout_secs = Some(9);
+        cred
+    };
+    // OpenAI's own API at another host: `models` routes there as `serves`
+    // does, and the key goes in the header the entry names.
+    assert_eq!(
+        cred(&loaded, "alpha"),
+        &shared(
+            ProviderCreds::openai_host(
+                "alpha",
+                "https://a/v1",
+                "ak".to_string(),
+                Vec::new(),
+                vec!["dep".to_string(), "dep2".to_string()],
+            )
+            .with_auth_header(Some("api-key".to_string()))
+        )
+    );
+    // A key is optional for an OpenAI-compatible server.
+    assert_eq!(
+        cred(&loaded, "keyless"),
+        &shared(ProviderCreds::openai_compatible(
+            "keyless",
+            "http://l/v1",
+            None,
+            Vec::new(),
+            None,
+            Vec::new(),
+        ))
+    );
+    // Trimmed address and key, the entry's own headers and lists, and the
+    // entry's own rate limit rather than a `[rate_limits]` row of its name.
+    let mut zeta = shared(ProviderCreds::openai_compatible(
+        "zeta",
+        "http://z/v1",
+        Some("zk".to_string()),
+        vec![("X-Org".to_string(), "r".to_string())],
+        Some(vec!["m1".to_string()]),
+        vec!["s1".to_string()],
+    ));
+    zeta.rate_limit = Some(leviath_providers::RateLimitConfig {
+        requests_per_minute: 5,
+        tokens_per_minute: 6,
+    });
+    assert_eq!(cred(&loaded, "zeta"), &zeta);
+}
+
+/// The capability overrides every provider in `loaded` was handed.
+fn cred_caps(loaded: &UserCreds) -> HashMap<String, leviath_providers::ModelCapabilityOverride> {
+    loaded.creds[0].model_capabilities.clone()
+}
+
+/// Settings built by hand skip what a file would have been refused for: an
+/// endpoint with no address, and OpenAI's API with no key. With no grants
+/// path the sign-in providers are still listed, carrying no
+/// `auth_store_path`, which is how the registry knows to skip them.
+#[test]
+fn hand_built_settings_skip_endpoints_that_cannot_work() {
+    let endpoint = |kind, base_url: Option<&str>, api_key: Option<&str>| ModelProviderConfig {
+        kind: Some(kind),
+        base_url: base_url.map(str::to_string),
+        api_key: api_key.map(str::to_string),
+        ..Default::default()
+    };
+    let settings = UserSettings {
+        providers: ProviderConfig {
+            codex_enabled: true,
+            grok_enabled: true,
+            ..Default::default()
+        },
+        model_providers: HashMap::from([
+            (
+                "nowhere".to_string(),
+                endpoint(ModelProviderKind::OpenaiCompatible, Some("  "), None),
+            ),
+            (
+                "unaddressed".to_string(),
+                endpoint(ModelProviderKind::OpenaiCompatible, None, Some("k")),
+            ),
+            (
+                "keyless".to_string(),
+                endpoint(ModelProviderKind::Openai, Some("https://h/v1"), Some(" ")),
+            ),
+            (
+                "works".to_string(),
+                endpoint(ModelProviderKind::Openai, Some("https://h/v1"), Some("k")),
+            ),
+        ]),
+        ..Default::default()
+    };
+    let creds = provider_creds(&settings, None);
+    let names: Vec<&str> = creds.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["works", "codex", "grok"]);
+    assert!(!creds[1].options.contains_key("auth_store_path"));
+    assert!(!creds[2].options.contains_key("auth_store_path"));
+}
+
+/// A credential check builds a sign-in provider with the options a run
+/// gives it: Codex's own, Grok's, and nothing for any other name.
+#[test]
+fn signin_options_are_the_ones_a_run_builds_the_provider_with() {
+    let settings = UserSettings {
+        providers: ProviderConfig {
+            codex_enabled: true,
+            grok_enabled: true,
+            codex_originator: Some("o".to_string()),
+            ..Default::default()
+        },
+        security: SecuritySettings {
+            credential_store: CredentialStoreKind::Keychain,
+        },
+        ..Default::default()
+    };
+    let grants = std::path::Path::new("/data/provider-auth.json");
+    let creds = provider_creds(&settings, Some(grants));
+    let options = |name: &str| &creds.iter().find(|c| c.name == name).unwrap().options;
+
+    let codex = signin_options(&settings, Some(grants), "codex");
+    assert_eq!(&codex, options("codex"));
+    assert_eq!(codex["originator"], "o");
+    assert_eq!(codex["auth_store_path"], "/data/provider-auth.json");
+    let grok = signin_options(&settings, Some(grants), "grok");
+    assert_eq!(&grok, options("grok"));
+    assert_eq!(grok["credential_store"], "keychain");
+    assert!(!grok.contains_key("replay_reasoning"));
+    assert!(signin_options(&settings, Some(grants), "openai").is_empty());
+}
+
+/// The retention words on `[model_providers]` entries reach the defaults,
+/// from script entries as well as endpoints. A word that is not a retention,
+/// and a request field named after a provider that has none, are warnings in
+/// name order; a value that is not text at all is some script's own key.
+#[test]
+fn retention_words_on_model_providers_reach_the_defaults() {
+    use leviath_providers::retention::Retention;
+
+    let dir = with_config(
+        r#"
+[model_providers.azure]
+kind = "openai-compatible"
+base_url = "https://r.openai.azure.com/openai/v1"
+retention = "zero"
+zero_retention_request = "openai"
+
+[model_providers.scripted]
+script = "s.rhai"
+retention = "30d"
+
+[model_providers.b-typo]
+script = "t.rhai"
+retention = "sometimes"
+zero_retention_request = "nobody"
+
+[model_providers.a-numeric]
+script = "n.rhai"
+retention = 5
+zero_retention_request = true
+"#,
+    );
+    let loaded = load_user_creds(&bare(dir.path())).unwrap();
+    let retention = &loaded.defaults.retention;
+    assert_eq!(
+        retention.provider_declarations,
+        HashMap::from([
+            ("azure".to_string(), Retention::Zero),
+            ("scripted".to_string(), Retention::Days(30)),
+        ])
+    );
+    assert_eq!(
+        retention.request_knob_aliases,
+        HashMap::from([("azure".to_string(), "openai".to_string())])
+    );
+    assert_eq!(loaded.warnings.len(), 2, "{:?}", loaded.warnings);
+    assert!(
+        loaded.warnings[0].starts_with("ignoring [model_providers.b-typo] retention: "),
+        "{:?}",
+        loaded.warnings
+    );
+    assert!(
+        loaded.warnings[1]
+            .starts_with("ignoring [model_providers.b-typo] zero_retention_request = \"nobody\""),
+        "{:?}",
+        loaded.warnings
+    );
+
+    // The same answer without the defaults around it, for a caller that
+    // wants only this.
+    let mut warnings = Vec::new();
+    let settings: UserSettings =
+        toml::from_str("[model_providers.x]\nretention = \"zero\"\n").unwrap();
+    assert_eq!(
+        retention_settings(&settings, &mut warnings).provider_declarations,
+        HashMap::from([("x".to_string(), Retention::Zero)])
+    );
+    assert!(warnings.is_empty());
+}
+
+/// An entry that cannot work fails the load as it does for `lev`, naming the
+/// table; with two of them it is always the first by name.
+#[test]
+fn a_model_provider_entry_that_cannot_work_is_an_error() {
+    use std::error::Error;
+
+    let dir = with_config(
+        "[model_providers.b]\nkind = \"openai\"\nbase_url = \"https://h/v1\"\n\
+         [model_providers.a]\nkind = \"openai-compatible\"\n\
+         [providers]\nopenai_api_key = \"k\"\n",
+    );
+    let e = load_user_creds(&bare(dir.path())).unwrap_err();
+    let UserCredsError::Invalid { path, message } = &e else {
+        panic!("{e:?}");
+    };
+    assert_eq!(path, &dir.path().join("config.toml"));
+    assert!(message.starts_with("[model_providers.a] "), "{message}");
+    assert!(
+        e.to_string().contains("config.toml cannot be used: "),
+        "{e}"
+    );
+    assert!(e.source().is_none());
+
+    // A kind nothing implements is refused by the parse, before any of that.
+    let dir = with_config("[model_providers.x]\nkind = \"vllm\"\nbase_url = \"http://h\"\n");
+    let e = load_user_creds(&bare(dir.path())).unwrap_err();
+    assert!(matches!(e, UserCredsError::Parse { .. }), "{e:?}");
+}

@@ -15,21 +15,36 @@
 //! all three for the real install; a sandbox passes its own directory and
 //! leaves the rest out.
 //!
+//! # One reading of the file
+//!
+//! `lev` builds its providers through this module too. The tables are read
+//! through the types here ([`ProviderConfig`], [`ModelProviderConfig`]), the
+//! environment and the credential store fill [`UserSettings`] through its
+//! own methods, and [`provider_creds`], [`model_defaults`] and
+//! [`retention_settings`] are the only code that turns settings into
+//! providers. What `lev` adds is on top: its wider config, a `.env` file, and
+//! the layer that runs Rhai script providers.
+//!
 //! # Scope
 //!
-//! The built-in providers only: the API-keyed ones in [`KEYED_PROVIDERS`],
-//! Ollama, and the Codex and Grok sign-ins. `[model_providers]` entries
-//! (OpenAI-compatible endpoints and Rhai script providers) are not read, nor
-//! the retention words they carry, and no `.env` file is loaded: a host that
-//! wants either reads them itself. Unknown keys in the file are ignored, since
-//! the CLI's configuration is a superset of what this reads.
+//! Every provider that needs nothing but settings: the API-keyed ones in
+//! [`KEYED_PROVIDERS`], Ollama, the Codex and Grok sign-ins, and each
+//! `[model_providers]` entry that is an endpoint (`kind = "openai-compatible"`
+//! or `"openai"`). The retention words on every `[model_providers]` entry are
+//! read. A script entry is not turned into a provider, since running a Rhai
+//! provider script is a host's own layer, and no `.env` file is loaded.
+//! Unknown keys in the file are ignored, since `lev`'s configuration is a
+//! superset of what this reads.
 
 mod creds;
+mod defaults;
 mod model_provider;
 mod provider_config;
 pub mod renamed;
 mod settings;
 
+pub use creds::{provider_creds, signin_options};
+pub use defaults::{model_defaults, retention_settings};
 pub use model_provider::{ModelProviderConfig, ModelProviderKind};
 pub use provider_config::ProviderConfig;
 pub use settings::{SecuritySettings, UserSettings};
@@ -246,6 +261,15 @@ pub enum UserCredsError {
         /// What parsing it said.
         source: toml::de::Error,
     },
+    /// The file parses, and holds an entry that cannot work: a
+    /// `[model_providers]` endpoint with no address, say. `lev` refuses the
+    /// same file for the same reason.
+    Invalid {
+        /// The config file.
+        path: PathBuf,
+        /// What is wrong, naming the table to fix.
+        message: String,
+    },
 }
 
 impl std::fmt::Display for UserCredsError {
@@ -257,6 +281,9 @@ impl std::fmt::Display for UserCredsError {
             Self::Parse { path, source } => {
                 write!(f, "could not parse {}: {source}", path.display())
             }
+            Self::Invalid { path, message } => {
+                write!(f, "{} cannot be used: {message}", path.display())
+            }
         }
     }
 }
@@ -266,6 +293,7 @@ impl std::error::Error for UserCredsError {
         match self {
             Self::Read { source, .. } => Some(source),
             Self::Parse { source, .. } => Some(source),
+            Self::Invalid { .. } => None,
         }
     }
 }
@@ -273,7 +301,8 @@ impl std::error::Error for UserCredsError {
 /// Read the user's provider credentials from `source`.
 ///
 /// A config file that does not exist is the defaults, as it is for `lev`;
-/// one that exists and cannot be read or parsed is an error. A keychain that
+/// one that exists and cannot be read or parsed, or that holds a
+/// `[model_providers]` entry that cannot work, is an error. A keychain that
 /// cannot be opened is a warning, never an error: keys from the file and the
 /// environment still load. The keychain is opened only when a key is still
 /// missing after the file and the environment.
@@ -312,11 +341,11 @@ pub fn load_user_creds(source: &UserCredsSource<'_>) -> Result<UserCreds, UserCr
     }
 
     let grants_path = source.data_dir.join(GRANTS_FILE);
-    let creds = creds::provider_creds(&settings, &grants_path);
+    let creds = provider_creds(&settings, Some(&grants_path));
     // Only providers that made it into the registry list: a blank key is
     // not a key, wherever it came from.
     origins.retain(|provider, _| creds.iter().any(|c| &c.name == provider));
-    let defaults = creds::model_defaults(&settings, &mut warnings);
+    let defaults = model_defaults(&settings, &mut warnings);
     Ok(UserCreds {
         creds,
         defaults,
@@ -352,8 +381,18 @@ fn read_settings(
         source,
     })?;
     let (text, renames) = renamed::rename_in_text(&text);
-    let settings =
-        toml::from_str(&text).map_err(|source| UserCredsError::Parse { path, source })?;
+    let settings: UserSettings = match toml::from_str(&text) {
+        Ok(settings) => settings,
+        Err(source) => return Err(UserCredsError::Parse { path, source }),
+    };
+    // In name order, so a file with two bad entries always names the same one.
+    let mut entries: Vec<_> = settings.model_providers.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    for (name, entry) in entries {
+        if let Err(message) = entry.validate(name) {
+            return Err(UserCredsError::Invalid { path, message });
+        }
+    }
     warnings.extend(
         renames
             .iter()
