@@ -59,7 +59,10 @@ pub enum MCPTransport {
 /// map fields because this struct is round-tripped through
 /// `toml::to_string_pretty` when the CLI rewrites the config, and TOML rejects
 /// bare values emitted after a table.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+///
+/// `Debug` is written by hand (below) so the values in `env` and `headers`
+/// cannot be printed.
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct MCPServerConfig {
     /// Server name (used as an identifier)
     pub name: String,
@@ -82,6 +85,34 @@ pub struct MCPServerConfig {
     /// as `${NAME}`, so a token need not be written into the config file.
     #[serde(default)]
     pub headers: HashMap<String, String>,
+}
+
+/// Hand-written so a server's credentials cannot be printed.
+///
+/// `env` and `headers` are where a server's token goes: a personal access
+/// token for the child process, a bearer header for an HTTP server. A
+/// derived `Debug` prints both, and a config holding these servers is the
+/// kind of thing one `tracing::debug!(?config)` puts in a log. This names
+/// what is set and prints none of the values.
+impl std::fmt::Debug for MCPServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Sorted: a `HashMap` iterates differently between two calls, and a
+        // debug line that reorders itself is one nobody can diff.
+        let names = |map: &HashMap<String, String>| -> Vec<String> {
+            let mut names: Vec<String> = map.keys().cloned().collect();
+            names.sort_unstable();
+            names
+        };
+        f.debug_struct("MCPServerConfig")
+            .field("name", &self.name)
+            .field("transport", &self.transport)
+            .field("command", &self.command)
+            .field("url", &self.url)
+            .field("args", &self.args)
+            .field("env", &names(&self.env))
+            .field("headers", &names(&self.headers))
+            .finish()
+    }
 }
 
 /// A validated [`MCPServerConfig`], narrowed to the fields its transport uses.
@@ -289,6 +320,36 @@ impl ToolDiscovery {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A server's `env` and `headers` are where its token goes, so a debug
+    /// print names them, in one order, and prints neither value.
+    #[test]
+    fn debug_names_the_env_and_headers_and_prints_neither_value() {
+        let server = MCPServerConfig {
+            name: "github".to_string(),
+            command: Some("gh-mcp".to_string()),
+            args: vec!["--stdio".to_string()],
+            env: HashMap::from([
+                ("GITHUB_TOKEN".to_string(), "SECRET-env".to_string()),
+                ("API_URL".to_string(), "SECRET-url".to_string()),
+            ]),
+            headers: HashMap::from([("Authorization".to_string(), "SECRET-hdr".to_string())]),
+            ..Default::default()
+        };
+        let rendered = format!("{server:?}");
+        assert!(!rendered.contains("SECRET"), "a value leaked: {rendered}");
+        assert!(rendered.contains("name: \"github\""), "{rendered}");
+        assert!(rendered.contains("command: Some(\"gh-mcp\")"), "{rendered}");
+        assert!(rendered.contains("args: [\"--stdio\"]"), "{rendered}");
+        assert!(
+            rendered.contains("env: [\"API_URL\", \"GITHUB_TOKEN\"]"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("headers: [\"Authorization\"]"),
+            "{rendered}"
+        );
+    }
     use crate::test_support::{McpStub, always_on_tracing_guard, echo_tool_stub};
 
     // --- configured credentials ---
