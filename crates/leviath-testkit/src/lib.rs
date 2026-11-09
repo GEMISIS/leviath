@@ -78,6 +78,55 @@ pub fn with_tracing<T>(f: impl FnOnce() -> T) -> T {
     f()
 }
 
+/// A `tracing::Subscriber` that keeps the message of every event it sees,
+/// for [`captured_logs`].
+struct CapturingSubscriber(std::sync::Arc<Mutex<Vec<String>>>);
+
+impl tracing::Subscriber for CapturingSubscriber {
+    fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        struct Message(String);
+        impl tracing::field::Visit for Message {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.0 = format!("{value:?}");
+                }
+            }
+        }
+        let mut message = Message(String::new());
+        event.record(&mut message);
+        self.0
+            .lock()
+            .expect("log capture lock poisoned")
+            .push(format!("{} {}", event.metadata().level(), message.0));
+    }
+    fn enter(&self, _span: &tracing::span::Id) {}
+    fn exit(&self, _span: &tracing::span::Id) {}
+    fn max_level_hint(&self) -> Option<tracing::metadata::LevelFilter> {
+        Some(tracing::metadata::LevelFilter::TRACE)
+    }
+}
+
+/// Run `f` and return what it logged on this thread, one line per event as
+/// `LEVEL message`, in order.
+///
+/// Installed as the thread's default for the call, so it sees only `f`'s own
+/// events whatever another test is logging, and the process-global
+/// subscriber [`with_tracing`] installs does not get them instead.
+pub fn captured_logs<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
+    let lines = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let out = tracing::subscriber::with_default(CapturingSubscriber(lines.clone()), f);
+    let lines = std::mem::take(&mut *lines.lock().expect("log capture lock poisoned"));
+    (out, lines)
+}
+
 /// Serializes tests that swap the process-global panic hook. Under the
 /// parallel test runner, two such tests interleave: one test's `set_hook`
 /// replaces the other's silencing closure before the other's panic fires, so

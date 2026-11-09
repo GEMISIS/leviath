@@ -103,15 +103,14 @@ pub(crate) fn build_provider_registry_from_config_probing(
 /// The data retention settings `config.toml` carries, in the registry's
 /// form: the request for zero retention, the declared agreements, and the
 /// `retention` keys on `[model_capabilities]` and `[model_providers]`
-/// entries. A word that is not a retention is warned about and ignored.
+/// entries.
+///
+/// A word that is not a retention is ignored, and was named when the config
+/// was loaded. Not again here: the daemon asks every two seconds.
 pub(crate) fn retention_settings(
     config: &Config,
 ) -> leviath_providers::retention::RetentionSettings {
-    let mut warnings = Vec::new();
-    let retention =
-        leviath_runtime::user_creds::retention_settings(&config.user_settings(), &mut warnings);
-    crate::config::log_warnings(&warnings);
-    retention
+    leviath_runtime::user_creds::retention_settings(&config.user_settings(), &mut Vec::new())
 }
 
 /// [`build_provider_registry_from_config_with`], with the script-provider

@@ -62,21 +62,28 @@ impl Config {
         self.adopt_filled(settings);
     }
 
+    /// Say which provider settings are being ignored: a `fallback_order`
+    /// entry that is not `provider/model`, a `[model_providers]` retention
+    /// word that is not one.
+    ///
+    /// Said here, where the file is loaded, beside the unread-key warning,
+    /// and nowhere else. The daemon asks for the retention settings every
+    /// two seconds and for the model defaults at every stage; a warning
+    /// from there is one line repeated for as long as the daemon runs.
+    pub(super) fn warn_ignored_provider_settings(&self) {
+        let mut warnings = Vec::new();
+        leviath_runtime::user_creds::model_defaults(&self.user_settings(), &mut warnings);
+        for warning in &warnings {
+            tracing::warn!("{warning}");
+        }
+    }
+
     /// Take back the three places a fill writes: the one key and the one
     /// address at the top of the file, and `[providers]`.
     fn adopt_filled(&mut self, settings: UserSettings) {
         self.openrouter_api_key = settings.openrouter_api_key;
         self.ollama_base_url = settings.ollama_base_url;
         self.providers = settings.providers;
-    }
-}
-
-/// Log each of `warnings`, which the runtime returns as text rather than
-/// logging itself: an embedding host decides where they go, and for `lev`
-/// that is the log.
-pub(crate) fn log_warnings(warnings: &[String]) {
-    for warning in warnings {
-        tracing::warn!("{warning}");
     }
 }
 
