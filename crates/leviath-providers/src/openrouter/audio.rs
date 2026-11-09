@@ -117,29 +117,43 @@ impl AudioStreamAccumulator {
     }
 }
 
+/// One event of an audio answer's stream. The reasoning the model wrote is
+/// kept for replay the same way a text stream's is, since an audio answer can
+/// call a tool too: it goes out with whatever audio is still held, at the end.
 pub(super) fn openrouter_audio_sse_event(
     buffer: &mut String,
     audio: &mut AudioStreamAccumulator,
+    kept: &crate::openai_compat::details::SharedDetails,
+    asked: &str,
 ) -> Option<Option<Result<StreamChunk>>> {
+    if leviath_core::sync::lock(kept).is_sealed() {
+        return Some(None);
+    }
     let event = leviath_net::sse::next_event(buffer)?;
     let data = event.data.trim();
     if data == "[DONE]" {
-        return Some(audio.take_blob().map(|blob| {
-            Ok(StreamChunk {
-                reasoning_delta: None,
-                delta: String::new(),
-                tool_calls: Vec::new(),
-                tokens: None,
-                finish_reason: None,
-                reasoning: None,
-                parts: vec![blob],
-            })
-        }));
+        let last = crate::openai_compat::sealed_chunk(kept, asked);
+        let blob = audio.take_blob();
+        return Some(match (last, blob) {
+            (None, None) => None,
+            (last, blob) => Some(Ok(StreamChunk {
+                parts: blob.into_iter().collect(),
+                ..last.unwrap_or_else(|| StreamChunk {
+                    reasoning_delta: None,
+                    delta: String::new(),
+                    tool_calls: Vec::new(),
+                    tokens: None,
+                    finish_reason: None,
+                    reasoning: None,
+                    parts: Vec::new(),
+                })
+            })),
+        });
     }
 
     let json = serde_json::from_str::<serde_json::Value>(data).ok()?;
     let mut framed = format!("data: {data}\n\n");
-    let mut parsed = crate::openai_compat::parse_openai_sse_event(&mut framed)?;
+    let mut parsed = crate::openai_compat::parse_sse_event_keeping(&mut framed, kept, asked)?;
     audio.observe(&json);
     if let Some(Ok(chunk)) = &mut parsed
         && chunk.finish_reason.is_some()

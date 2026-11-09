@@ -29,9 +29,14 @@ same list.
   never shown), Anthropic (`thinking_delta`), and Gemini (thought summaries, which are now
   requested whenever a `thinking_level` is set and are kept out of the answer text).
 - OpenRouter keeps a model's reasoning across a tool call: the `reasoning_details` a reply
-  carries (streamed or buffered, fragments merged by `index`) are sealed to `openrouter` and the
-  model that wrote them, and sent back unmodified on that assistant turn. Gemini's thought
-  signature, which OpenRouter delivers as an encrypted block, is carried this way.
+  carries (streamed, audio or buffered; fragments merged by `type`, `index` and `id`, and a null
+  never erasing text or a signature) are sealed once, at the end of the stream, to the model the
+  reply says answered, and sent back unmodified on the assistant message of the turn. They go
+  back only to a request that names that same concrete model (a `:variant` suffix aside), never
+  to `openrouter/auto` or a request with a `models` list. Gemini's thought signature, which
+  OpenRouter delivers as an encrypted block, is carried this way.
+- A buffered reply carries `reasoning_summary` as a stream does: from OpenRouter and the
+  openai-compat routes, and from Anthropic's thinking blocks.
 - The `codex` provider serves the gpt-6 family (`gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-6-sol`,
   `gpt-6-astra`, `gpt-6-luna`) and reads the route's own `/models` listing for the signed-in
   account, falling back to the compiled catalog when it does not answer. `gpt-5.5` is no longer
@@ -79,9 +84,9 @@ same list.
 
 ### Fixed
 
-- OpenRouter looks a bare model name (`claude-sonnet-5.5`) up in its listing the way `serves_model`
-  does, so `mime()`, `capabilities()` and `pricing()` see the real modalities, limits and rates
-  instead of text-only defaults.
+- OpenRouter looks a bare model name (`claude-sonnet-5.5`) up in its listing, so routing, rates,
+  limits, modalities and cache markers all describe one model. An exact id wins; of several ids
+  sharing a last segment the smallest is taken, so the answer no longer depends on map order.
 - Under the default `shell_env = "filtered"`, every git command in a shell tool
   failed with `missing config key GIT_CONFIG_KEY_0` when the daemon's
   environment carried git's `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` /
