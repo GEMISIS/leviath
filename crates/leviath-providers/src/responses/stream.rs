@@ -52,6 +52,11 @@ pub(crate) struct Turn {
     dialect: super::Dialect,
     /// Every reasoning item so far, in order, sealed when the response ends.
     reasoning: Vec<String>,
+    /// Whether the model refused, which decides the finish reason.
+    refused: bool,
+    /// Output slots whose refusal text already went out as deltas, so the
+    /// finished form of the same slot is not emitted a second time.
+    refusal_streamed: Vec<usize>,
 }
 
 #[cfg(any(
@@ -68,12 +73,31 @@ impl Turn {
             saw_tool_call: false,
             dialect,
             reasoning: Vec::new(),
+            refused: false,
+            refusal_streamed: Vec::new(),
         }
     }
 
     /// The sealed reasoning gathered so far, emptied.
     fn sealed_reasoning(&mut self) -> Option<String> {
         super::reasoning::seal(self.dialect.provider, &std::mem::take(&mut self.reasoning))
+    }
+
+    /// Record refusal text streaming into `slot`; it is shown as it arrives.
+    fn refusal_delta(&mut self, slot: usize) {
+        self.refused = true;
+        self.refusal_streamed.push(slot);
+    }
+
+    /// Record a finished refusal in `slot` and hand back the text still to be
+    /// shown: none when it already streamed or is empty.
+    fn refusal_text(&mut self, slot: usize, text: &str) -> Option<String> {
+        self.refused = true;
+        let fresh = !self.refusal_streamed.contains(&slot) && !text.is_empty();
+        fresh.then(|| {
+            self.refusal_streamed.push(slot);
+            text.to_string()
+        })
     }
 }
 
@@ -238,12 +262,43 @@ pub(crate) fn parse_event(
         // so every item of a multi-step thought is replayed, not the last.
         "response.output_item.done" => {
             let item = json.get("item")?;
+            if item.get("type").and_then(|t| t.as_str()) == Some("message") {
+                // A refusal that never streamed exists only here.
+                let slot = output_index(&json);
+                let mut shown = String::new();
+                for part in item.get("content").and_then(|c| c.as_array())? {
+                    if let Some(text) = refusal_of(part) {
+                        shown.extend(turn.refusal_text(slot, text));
+                    }
+                }
+                return (!shown.is_empty()).then(|| text_chunk(shown))?;
+            }
             if item.get("type").and_then(|t| t.as_str()) != Some("reasoning") {
                 return None;
             }
             let blob = item.get("encrypted_content").and_then(|v| v.as_str())?;
             turn.reasoning.push(blob.to_string());
             None
+        }
+
+        // A refusal is the model's answer, so it is shown as text and the
+        // finish reason says it was one.
+        "response.refusal.delta" => {
+            let text = json.get("delta").and_then(|d| d.as_str()).unwrap_or("");
+            turn.refusal_delta(output_index(&json));
+            text_chunk(text.to_string())
+        }
+
+        "response.refusal.done" => {
+            let text = json.get("refusal").and_then(|d| d.as_str()).unwrap_or("");
+            let shown = turn.refusal_text(output_index(&json), text)?;
+            text_chunk(shown)
+        }
+
+        "response.content_part.done" => {
+            let text = refusal_of(json.get("part")?)?;
+            let shown = turn.refusal_text(output_index(&json), text)?;
+            text_chunk(shown)
         }
 
         "response.completed" => {
@@ -253,9 +308,10 @@ pub(crate) fn parse_event(
                 delta: String::new(),
                 tool_calls: vec![],
                 tokens: Some(usage_of(response, &turn.dialect)),
-                finish_reason: Some(match turn.saw_tool_call {
-                    true => FinishReason::ToolCall,
-                    false => FinishReason::Complete,
+                finish_reason: Some(match (turn.saw_tool_call, turn.refused) {
+                    (true, _) => FinishReason::ToolCall,
+                    (false, true) => FinishReason::Unknown("refusal".into()),
+                    (false, false) => FinishReason::Complete,
                 }),
                 reasoning: turn.sealed_reasoning(),
                 parts: Vec::new(),
@@ -269,7 +325,7 @@ pub(crate) fn parse_event(
                 delta: String::new(),
                 tool_calls: vec![],
                 tokens: Some(usage_of(response, &turn.dialect)),
-                finish_reason: Some(FinishReason::TokenLimit),
+                finish_reason: Some(incomplete_reason(response)),
                 reasoning: turn.sealed_reasoning(),
                 parts: Vec::new(),
             })))
@@ -284,6 +340,58 @@ pub(crate) fn parse_event(
         ))))),
 
         _ => None,
+    }
+}
+
+/// A chunk carrying only visible text.
+#[cfg(any(
+    feature = "openai",
+    feature = "openai-subscription",
+    feature = "xai",
+    feature = "xai-subscription",
+    feature = "meta"
+))]
+fn text_chunk(text: String) -> Option<Option<crate::provider::Result<StreamChunk>>> {
+    Some(Some(Ok(StreamChunk {
+        reasoning_delta: None,
+        delta: text,
+        tool_calls: vec![],
+        tokens: None,
+        finish_reason: None,
+        reasoning: None,
+        parts: Vec::new(),
+    })))
+}
+
+/// The refusal text of a finished content part, when it is one.
+#[cfg(any(
+    feature = "openai",
+    feature = "openai-subscription",
+    feature = "xai",
+    feature = "xai-subscription",
+    feature = "meta"
+))]
+fn refusal_of(part: &serde_json::Value) -> Option<&str> {
+    (part.get("type").and_then(|t| t.as_str()) == Some("refusal"))
+        .then(|| part.get("refusal").and_then(|r| r.as_str()).unwrap_or(""))
+}
+
+/// Why an incomplete response stopped.
+#[cfg(any(
+    feature = "openai",
+    feature = "openai-subscription",
+    feature = "xai",
+    feature = "xai-subscription",
+    feature = "meta"
+))]
+fn incomplete_reason(response: &serde_json::Value) -> FinishReason {
+    match response
+        .get("incomplete_details")
+        .and_then(|d| d.get("reason"))
+        .and_then(|r| r.as_str())
+    {
+        Some("content_filter") => FinishReason::Unknown("content_filter".into()),
+        _ => FinishReason::TokenLimit,
     }
 }
 
