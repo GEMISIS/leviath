@@ -770,6 +770,40 @@ fn reasoning_text(message: &serde_json::Value) -> Option<String> {
     (!joined.trim().is_empty()).then_some(joined)
 }
 
+/// The incremental reasoning text a streamed `delta` carries, for an embedder's
+/// "thinking" line.
+///
+/// Three shapes, in order of preference so one chunk never says it twice:
+/// the `reasoning_details` blocks OpenRouter sends (`reasoning.text`'s `text`
+/// and `reasoning.summary`'s `summary`), then the flat `reasoning` string it
+/// normalises them to, then DeepSeek and Kimi's `reasoning_content`. An
+/// encrypted block (`reasoning.encrypted`) is an opaque token for replay and
+/// is never text. Deltas keep their whitespace: a lone space is a word break.
+fn reasoning_delta_text(delta: &serde_json::Value) -> Option<String> {
+    let from_details: String = delta
+        .get("reasoning_details")
+        .and_then(|d| d.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|block| match block.get("type").and_then(|t| t.as_str()) {
+            Some("reasoning.text") => block.get("text").and_then(|v| v.as_str()),
+            Some("reasoning.summary") => block.get("summary").and_then(|v| v.as_str()),
+            _ => None,
+        })
+        .collect();
+    let flat = |key: &str| {
+        delta
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .filter(|t| !t.is_empty())
+    };
+    Some(from_details)
+        .filter(|t| !t.is_empty())
+        .or_else(|| flat("reasoning"))
+        .or_else(|| flat("reasoning_content"))
+}
+
 /// Read an OpenAI chat-completions response back into an [`InferenceResponse`].
 ///
 /// The counterpart to [`build_openai_request_body`], and shared for the same
@@ -920,6 +954,24 @@ where
     crate::provider::stream::FramedStream::new(inner, Box::new(parse_openai_sse_event), None)
 }
 
+/// [`openai_sse_stream`] for a route that replays its reasoning: the
+/// `reasoning_details` the stream carries are merged and sealed to `model` on
+/// the chunk that finishes the answer (see [`details`]).
+pub(crate) fn openai_sse_stream_sealing<S>(
+    inner: S,
+    model: &str,
+) -> crate::provider::stream::FramedStream
+where
+    S: Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
+{
+    let mut kept = details::Details::for_model(model);
+    crate::provider::stream::FramedStream::new(
+        inner,
+        Box::new(move |buffer| parse_sse_event_keeping(buffer, &mut kept)),
+        None,
+    )
+}
+
 /// Parse a single SSE event from the buffer.
 ///
 /// Returns `Some(Some(Ok(chunk)))` for data, `Some(Some(Err(..)))` for an error
@@ -934,6 +986,15 @@ where
 /// the usage-only shape, and falling through there ends the stream cleanly -
 /// a truncated answer with nothing anywhere saying why.
 pub fn parse_openai_sse_event(buffer: &mut String) -> Option<Option<Result<StreamChunk>>> {
+    parse_sse_event_keeping(buffer, &mut details::Details::default())
+}
+
+/// [`parse_openai_sse_event`], keeping the reasoning blocks it reads in `kept`
+/// and sealing them onto the chunk that carries the finish reason.
+fn parse_sse_event_keeping(
+    buffer: &mut String,
+    kept: &mut details::Details,
+) -> Option<Option<Result<StreamChunk>>> {
     // `None` until a whole event has arrived; the caller polls again with
     // more bytes.
     let event = leviath_net::sse::next_event(buffer)?;
@@ -1075,16 +1136,21 @@ pub fn parse_openai_sse_event(buffer: &mut String) -> Option<Option<Result<Strea
         .with_reported_cost(usage.get("cost").and_then(|v| v.as_f64()))
     });
 
+    kept.absorb(delta);
+    let reasoning = finish_reason.is_some().then(|| kept.seal()).flatten();
+
     Some(Some(Ok(StreamChunk {
-        reasoning_delta: None,
+        reasoning_delta: reasoning_delta_text(delta),
         delta: content,
         tool_calls: tool_call_deltas,
         tokens,
         finish_reason,
-        reasoning: None,
+        reasoning,
         parts: crate::mime_output::message_blobs(delta),
     })))
 }
+
+pub(crate) mod details;
 
 #[cfg(test)]
 mod mime_tests;
@@ -2085,6 +2151,133 @@ mod tests {
             resp.finish_reason,
             crate::provider::FinishReason::TokenLimit
         );
+    }
+
+    // ─── streamed reasoning text ───────────────────────────────────────────
+
+    /// Every chunk a run of SSE `data:` payloads yields, in order.
+    fn sse_chunks(payloads: &[serde_json::Value]) -> Vec<StreamChunk> {
+        let mut buf: String = payloads.iter().map(|p| format!("data: {p}\n\n")).collect();
+        let mut out = Vec::new();
+        while let Some(Some(chunk)) = parse_openai_sse_event(&mut buf) {
+            out.push(chunk.unwrap());
+        }
+        out
+    }
+
+    fn delta_of(delta: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({ "choices": [{ "index": 0, "delta": delta }] })
+    }
+
+    /// OpenRouter's normalised `reasoning` string is the thinking line.
+    #[test]
+    fn a_streamed_reasoning_string_is_the_thinking_text() {
+        let chunks = sse_chunks(&[delta_of(
+            serde_json::json!({ "role": "assistant", "content": "", "reasoning": "Let me think" }),
+        )]);
+        assert_eq!(chunks[0].reasoning_delta.as_deref(), Some("Let me think"));
+        assert_eq!(chunks[0].delta, "");
+    }
+
+    /// DeepSeek and Kimi name it `reasoning_content`.
+    #[test]
+    fn a_streamed_reasoning_content_is_the_thinking_text() {
+        let chunks = sse_chunks(&[delta_of(serde_json::json!({ "reasoning_content": "hm" }))]);
+        assert_eq!(chunks[0].reasoning_delta.as_deref(), Some("hm"));
+    }
+
+    /// OpenRouter sends the same text as `reasoning` and as `reasoning_details`
+    /// in one chunk; it is said once, from the details.
+    #[test]
+    fn reasoning_and_its_details_in_one_chunk_are_not_said_twice() {
+        let chunks = sse_chunks(&[delta_of(serde_json::json!({
+            "content": "",
+            "reasoning": "step one ",
+            "reasoning_details": [
+                { "type": "reasoning.text", "text": "step ", "index": 0 },
+                { "type": "reasoning.text", "text": "one ", "index": 0 },
+                { "type": "reasoning.summary", "summary": "(brief)" }
+            ]
+        }))]);
+        assert_eq!(
+            chunks[0].reasoning_delta.as_deref(),
+            Some("step one (brief)")
+        );
+    }
+
+    /// An encrypted block is an opaque token for replay, never text; alone it
+    /// yields no thinking, and beside text it adds none.
+    #[test]
+    fn encrypted_reasoning_is_never_shown() {
+        let encrypted = serde_json::json!({
+            "type": "reasoning.encrypted", "data": "gAAAAABk-opaque", "format": "anthropic-claude-v1"
+        });
+        let chunks = sse_chunks(&[
+            delta_of(
+                serde_json::json!({ "content": "", "reasoning_details": [encrypted.clone()] }),
+            ),
+            delta_of(serde_json::json!({
+                "reasoning_details": [{ "type": "reasoning.text", "text": "ok" }, encrypted]
+            })),
+            delta_of(serde_json::json!({ "reasoning": "", "reasoning_details": "odd" })),
+        ]);
+        assert!(chunks[0].reasoning_delta.is_none());
+        assert_eq!(chunks[1].reasoning_delta.as_deref(), Some("ok"));
+        assert!(chunks[2].reasoning_delta.is_none());
+    }
+
+    /// Whitespace is a word break in a delta, so it is kept; an empty string is
+    /// nothing.
+    #[test]
+    fn a_lone_space_of_reasoning_is_kept_and_an_empty_one_is_not() {
+        let chunks = sse_chunks(&[
+            delta_of(serde_json::json!({ "reasoning": " " })),
+            delta_of(serde_json::json!({ "reasoning": "" })),
+        ]);
+        assert_eq!(chunks[0].reasoning_delta.as_deref(), Some(" "));
+        assert!(chunks[1].reasoning_delta.is_none());
+    }
+
+    /// A realistic reasoning-then-answer-then-tool-call stream, collected: the
+    /// summary joins the thinking, the answer and the call are untouched, and the
+    /// call's signature still arrives.
+    #[tokio::test]
+    async fn a_reasoning_stream_collects_its_summary_and_keeps_the_rest() {
+        let chunks = sse_chunks(&[
+            delta_of(
+                serde_json::json!({ "role": "assistant", "content": "", "reasoning": "Need " }),
+            ),
+            delta_of(serde_json::json!({
+                "content": "",
+                "reasoning": "the weather.",
+                "reasoning_details": [{ "type": "reasoning.text", "text": "the weather." }]
+            })),
+            delta_of(serde_json::json!({
+                "reasoning_details": [{ "type": "reasoning.encrypted", "data": "xyz" }]
+            })),
+            delta_of(serde_json::json!({ "content": "Checking." })),
+            delta_of(serde_json::json!({ "tool_calls": [{
+                "index": 0, "id": "call_1", "type": "function",
+                "function": { "name": "weather", "arguments": "{}" },
+                "extra_content": { "google": { "thought_signature": "sig" } }
+            }] })),
+            serde_json::json!({ "choices": [{ "index": 0, "delta": {}, "finish_reason": "tool_calls" }] }),
+        ]);
+        assert_eq!(
+            chunks[4].tool_calls[0].thought_signature.as_deref(),
+            Some("sig")
+        );
+        let response = crate::provider::collect_stream(Box::pin(tokio_stream::iter(
+            chunks.into_iter().map(Ok),
+        )))
+        .await
+        .unwrap();
+        assert_eq!(
+            response.reasoning_summary.as_deref(),
+            Some("Need the weather.")
+        );
+        assert_eq!(response.content, "Checking.");
+        assert_eq!(response.tool_calls.len(), 1);
     }
 
     // ─── parse_openai_sse_event ─────────────────────────────────────────────

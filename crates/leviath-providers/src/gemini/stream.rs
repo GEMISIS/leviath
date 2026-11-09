@@ -102,7 +102,7 @@ pub(crate) fn parse_event(
                 }
                 "thought" => {
                     remember_signature(turn, step);
-                    None
+                    thought_chunk(step.get("summary"))
                 }
                 _ => content_chunk(step.get("content"), turn),
             }
@@ -116,6 +116,9 @@ pub(crate) fn parse_event(
                     remember_signature(turn, delta);
                     None
                 }
+                // A summary of the model's thinking: shown as thinking, never
+                // mixed into the answer.
+                "thought_summary" => thought_chunk(delta.get("content")),
                 "function_call" => {
                     let call = turn.calls.entry(index).or_default();
                     if let Some(id) = delta.get("id").and_then(Value::as_str) {
@@ -252,6 +255,26 @@ fn record_usage(turn: &mut Turn, usage: Option<&Value>) {
         0,
         count("total_output_tokens") + count("total_thought_tokens"),
     ));
+}
+
+/// A thought's summary text as a chunk of `reasoning_delta`. The summary is a
+/// text item, or a list of them, and nothing else in it is words to show.
+fn thought_chunk(summary: Option<&Value>) -> Option<Option<crate::provider::Result<StreamChunk>>> {
+    let items = match summary? {
+        Value::Array(items) => items.iter().collect(),
+        one => vec![one],
+    };
+    let text: String = items
+        .into_iter()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("text"))
+        .map(|item| str_of(item, "text"))
+        .collect();
+    (!text.is_empty()).then(|| {
+        Some(Ok(StreamChunk {
+            reasoning_delta: Some(text),
+            ..text_chunk(String::new())
+        }))
+    })
 }
 
 /// A step's content items as a chunk: text joined, images and audio as parts.

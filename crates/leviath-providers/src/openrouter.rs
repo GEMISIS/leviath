@@ -15,7 +15,7 @@ use crate::provider::{LimitsSource, ModelCapabilities};
 #[cfg(feature = "openrouter")]
 use {
     crate::learned::LearnedModels,
-    crate::openai_compat::{openai_sse_stream, parse_openai_response},
+    crate::openai_compat::{details, openai_sse_stream_sealing, parse_openai_response},
     crate::provider::{
         InferenceRequest, InferenceResponse, ModelCapabilityOverride, ModelInfo, Provider,
         ProviderError, Result, StreamChunk,
@@ -39,6 +39,30 @@ use {
 /// `tool` message takes on this route as well as a user or assistant one. A
 /// turn that only calls tools has no text at all, and is left as it is.
 #[cfg(feature = "openrouter")]
+/// Send an assistant turn's reasoning back on it, the way OpenRouter documents
+/// for keeping a model's thinking across a tool call: its `reasoning_details`,
+/// unmodified. Only the blob OpenRouter sealed for `model` opens; another
+/// provider's, or another model's, is left off, since a block one model signed
+/// is refused or wasted on any other.
+///
+/// A tool call's own `thought_signature` is not sent a second time for it:
+/// OpenRouter delivers Gemini's signature as an encrypted block in these
+/// details and never as `extra_content`, so a call that came through this
+/// route carries none to repeat.
+#[cfg(feature = "openrouter")]
+fn replay_reasoning(turn: &mut serde_json::Value, msg: &crate::provider::Message, model: &str) {
+    if turn["role"] != "assistant" {
+        return;
+    }
+    if let Some(blocks) = msg
+        .reasoning
+        .as_deref()
+        .and_then(|blob| details::replay(model, blob))
+    {
+        turn["reasoning_details"] = serde_json::Value::Array(blocks);
+    }
+}
+
 fn mark_last_text(messages: &mut [serde_json::Value]) -> bool {
     let marker = serde_json::json!({ "type": "ephemeral" });
     for message in messages.iter_mut().rev() {
@@ -274,14 +298,16 @@ impl OpenRouterProvider {
                 crate::provider::MessageContent::Text(text) if mark => {
                     breakpoint_count += 1;
                     owed = false;
-                    messages.push(serde_json::json!({
+                    let mut turn = serde_json::json!({
                         "role": msg.role,
                         "content": [{
                             "type": "text",
                             "text": text,
                             "cache_control": { "type": "ephemeral" }
                         }],
-                    }));
+                    });
+                    replay_reasoning(&mut turn, msg, &request.model);
+                    messages.push(turn);
                 }
                 // Everything else - including tool_use/tool_result block history -
                 // goes through the OpenAI-format conversion so it round-trips on
@@ -295,6 +321,10 @@ impl OpenRouterProvider {
                         owed = !mark_last_text(&mut converted);
                         breakpoint_count += usize::from(!owed);
                     }
+                    converted
+                        .last_mut()
+                        .into_iter()
+                        .for_each(|turn| replay_reasoning(turn, msg, &request.model));
                     messages.extend(converted);
                 }
             }
@@ -712,6 +742,15 @@ impl OpenRouterProvider {
         Some(models.contains(model) || models.contains(plain))
     }
 
+    /// The id the listing keys the model `spelled` by: the full gateway id
+    /// (`anthropic/claude-sonnet-5.5`) for a bare name, as `serves_model`
+    /// resolves it, else the name as written.
+    fn listed_id(&self, spelled: &str) -> String {
+        self.learned
+            .find_by_key(spelled)
+            .unwrap_or_else(|| spelled.to_string())
+    }
+
     /// Say so when a model falls through to [`FALLBACK_CAPABILITIES`].
     ///
     /// OpenRouter fronts hundreds of models and this build's table names a few
@@ -779,6 +818,11 @@ impl Provider for OpenRouterProvider {
         let response_body: serde_json::Value = crate::provider::decode_json(response).await?;
 
         let mut result = parse_openai_response(&response_body)?;
+        // The model's reasoning blocks, kept for the turn that answers a tool
+        // call it made here.
+        result.reasoning = response_body
+            .pointer("/choices/0/message")
+            .and_then(|message| details::seal_message(&request.model, message));
         if let Some(message) = response_body.pointer("/choices/0/message")
             && let Some(audio) =
                 crate::mime_output::message_audio_blob(message, request_audio_mime(request))
@@ -830,7 +874,7 @@ impl Provider for OpenRouterProvider {
             )
             .sent_by(peer)
         } else {
-            openai_sse_stream(byte_stream).sent_by(peer)
+            openai_sse_stream_sealing(byte_stream, &request.model).sent_by(peer)
         };
 
         Ok(crate::rate_limit::meter_stream(
@@ -912,7 +956,9 @@ impl Provider for OpenRouterProvider {
         // says, what this build was compiled with.
         let written = model;
         let model = gateway_id(model);
-        let base = self.learned.corrected(model, builtin_capabilities(model));
+        let base = self
+            .learned
+            .corrected(&self.listed_id(model), builtin_capabilities(model));
         // Merged, not swapped: an entry names only what it corrects.
         let mut caps = match self
             .capability_overrides
@@ -938,10 +984,11 @@ impl Provider for OpenRouterProvider {
     fn mime(&self, model: &str) -> crate::capabilities::ModelMime {
         // The listing's `architecture` block says outright what a model
         // takes; before priming, the vendor prefix is the best guess.
-        let listed = gateway_id(model);
+        let spelled = gateway_id(model);
+        let listed = self.listed_id(spelled);
         let base = self
             .learned
-            .mime_corrected(listed, crate::mime_tables::by_prefix(listed));
+            .mime_corrected(&listed, crate::mime_tables::by_prefix(&listed));
         let mime = match self.capability_overrides.get(model) {
             Some(o) => o.apply_mime(base),
             None => base,
@@ -1000,7 +1047,9 @@ impl Provider for OpenRouterProvider {
     }
 
     fn pricing(&self, model: &str) -> Option<crate::ModelPricing> {
-        self.learned.get(gateway_id(model)).and_then(|m| m.pricing)
+        self.learned
+            .get(&self.listed_id(gateway_id(model)))
+            .and_then(|m| m.pricing)
     }
 
     /// Read the gateway's listing into `Self::learned`.
@@ -1058,6 +1107,10 @@ impl Provider for OpenRouterProvider {
 #[cfg(feature = "openrouter")]
 #[cfg(test)]
 mod mime_tests;
+
+#[cfg(feature = "openrouter")]
+#[cfg(test)]
+mod reasoning_tests;
 
 #[cfg(feature = "openrouter")]
 #[cfg(test)]

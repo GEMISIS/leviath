@@ -361,3 +361,28 @@ fn a_call_signed_on_its_own_step_keeps_its_signature() {
         Some("own")
     );
 }
+
+/// A thought's summary is the thinking line, and never part of the answer.
+#[test]
+fn thought_summaries_are_reasoning_text_not_answer_text() {
+    let chunks = run(&[
+        json!({ "event_type": "step.start", "index": 0, "step": { "type": "thought" } }),
+        json!({ "event_type": "step.delta", "index": 0,
+            "delta": { "type": "thought_summary", "content": { "type": "text", "text": "**Weighing** " } } }),
+        json!({ "event_type": "step.delta", "index": 0,
+            "delta": { "type": "thought_summary", "content": { "type": "image", "data": "AA==" } } }),
+        json!({ "event_type": "step.delta", "index": 0,
+            "delta": { "type": "thought_summary", "content": { "type": "text", "text": "" } } }),
+        json!({ "event_type": "step.delta", "index": 0, "delta": { "type": "thought_signature", "signature": "s" } }),
+        json!({ "event_type": "step.start", "index": 1, "step": { "type": "thought",
+            "summary": [{ "type": "text", "text": "the " }, { "type": "text", "text": "options" }] } }),
+        json!({ "event_type": "step.delta", "index": 2, "delta": { "type": "text", "text": "Answer" } }),
+    ]);
+    let chunks: Vec<_> = chunks.into_iter().map(Result::unwrap).collect();
+    assert_eq!(chunks.len(), 3);
+    assert_eq!(chunks[0].reasoning_delta.as_deref(), Some("**Weighing** "));
+    assert_eq!(chunks[0].delta, "");
+    assert_eq!(chunks[1].reasoning_delta.as_deref(), Some("the options"));
+    assert_eq!(chunks[2].delta, "Answer");
+    assert!(chunks[2].reasoning_delta.is_none());
+}
