@@ -1,12 +1,11 @@
-//! Turning [`Settings`] into the providers a registry is built from and the
-//! defaults a stage resolves against.
+//! Turning [`UserSettings`] into the providers a registry is built from and
+//! the defaults a stage resolves against.
 //!
-//! Mirrors the CLI's `provider_creds_from_config` and `model_defaults` for
-//! every provider the narrow settings cover. A test in `leviath-cli` holds the
-//! two to the same answer for one config that exercises all of them, so the
-//! copy cannot drift without a failing build.
+//! The one place this is done: `lev` calls these with the settings it copied
+//! out of its own config, and [`load_user_creds`](super::load_user_creds)
+//! with the ones it read from the file.
 
-use super::settings::{Settings, slots};
+use super::settings::{UserSettings, slots};
 use crate::pipeline::ModelDefaults;
 use crate::provider_creds::ProviderCreds;
 use crate::spec::names::ModelRef;
@@ -31,9 +30,9 @@ fn cache_ttl_key(ttl: leviath_providers::anthropic::CacheTtl) -> &'static str {
     }
 }
 
-/// Every provider `settings` opts in, in the order the CLI registers them:
+/// Every provider `settings` opts in, in the order they are registered:
 /// the keyed ones with a non-blank key, then Ollama, Codex and Grok.
-pub(super) fn provider_creds(settings: &Settings, grants_path: &Path) -> Vec<ProviderCreds> {
+pub(super) fn provider_creds(settings: &UserSettings, grants_path: &Path) -> Vec<ProviderCreds> {
     let mut creds = Vec::new();
     for keyed in super::KEYED_PROVIDERS {
         let name = keyed.provider;
@@ -71,7 +70,7 @@ pub(super) fn provider_creds(settings: &Settings, grants_path: &Path) -> Vec<Pro
         );
     }
 
-    // Opt-in by the switch or by naming an address, as in the CLI.
+    // Opt-in by the switch or by naming an address.
     if settings.providers.ollama_enabled || settings.ollama_base_url.is_some() {
         creds.push(ProviderCreds {
             name: "ollama".to_string(),
@@ -131,7 +130,7 @@ pub(super) fn provider_creds(settings: &Settings, grants_path: &Path) -> Vec<Pro
 
 /// What every sign-in provider's options carry: where the grant is, and
 /// whether it is in the OS credential store.
-fn grant_options(settings: &Settings, grants_path: &Path) -> HashMap<String, String> {
+fn grant_options(settings: &UserSettings, grants_path: &Path) -> HashMap<String, String> {
     let mut options = HashMap::new();
     options.insert(
         "auth_store_path".to_string(),
@@ -144,7 +143,7 @@ fn grant_options(settings: &Settings, grants_path: &Path) -> HashMap<String, Str
 }
 
 /// The `options` a Codex [`ProviderCreds`] carries.
-fn codex_options(settings: &Settings, grants_path: &Path) -> HashMap<String, String> {
+fn codex_options(settings: &UserSettings, grants_path: &Path) -> HashMap<String, String> {
     let mut options = grant_options(settings, grants_path);
     let codex = &settings.providers;
     options.extend(
@@ -172,13 +171,12 @@ fn codex_options(settings: &Settings, grants_path: &Path) -> HashMap<String, Str
     options
 }
 
-/// The defaults a stage resolves against, as the CLI's `model_defaults`
-/// builds them. A malformed `fallback_order` entry is dropped and named in
-/// `warnings`.
+/// The defaults a stage resolves against. A malformed `fallback_order` entry
+/// is dropped and named in `warnings`.
 ///
 /// The retention words a `[model_providers]` entry carries are not read,
 /// since those entries are out of this loader's scope.
-pub(super) fn model_defaults(settings: &Settings, warnings: &mut Vec<String>) -> ModelDefaults {
+pub(super) fn model_defaults(settings: &UserSettings, warnings: &mut Vec<String>) -> ModelDefaults {
     let fallback_order = settings
         .providers
         .fallback_order
@@ -196,10 +194,7 @@ pub(super) fn model_defaults(settings: &Settings, warnings: &mut Vec<String>) ->
     ModelDefaults {
         provider: settings.default_provider.clone(),
         override_model: settings.override_model.clone(),
-        fallback_model: settings
-            .fallback_model
-            .clone()
-            .or_else(|| settings.default_model.clone()),
+        fallback_model: settings.fallback_model.clone(),
         fallback_order,
         provider_order: settings.providers.provider_order.clone(),
         retention: leviath_providers::retention::RetentionSettings {

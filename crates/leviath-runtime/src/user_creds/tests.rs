@@ -475,7 +475,9 @@ fn the_sign_in_transports_and_ollama_register_on_their_switches() {
 }
 
 /// The defaults carry what a stage resolves against, a malformed fallback
-/// entry is a warning, and the old `default_model` name still loads.
+/// entry is a warning, and the old `default_model` name loads as
+/// `fallback_model` with a notice saying so. A renamed key in a table this
+/// loader does not read (`[sandbox] persist`) is not its to report.
 #[test]
 fn the_defaults_carry_the_routing_preferences() {
     let dir = with_config(
@@ -484,7 +486,8 @@ fn the_defaults_carry_the_routing_preferences() {
          [model_capabilities.plain]\nmax_output_tokens = 1\n\
          [providers]\nprovider_order = [\"codex\", \"openai\"]\n\
          fallback_order = [\"openrouter/a/b\", \"bare\"]\n\
-         zero_retention = true\nzero_retention_agreements = [\"openai\"]\nfile_uploads = false\n",
+         zero_retention = true\nzero_retention_agreements = [\"openai\"]\nfile_uploads = false\n\
+         [sandbox]\npersist = true\n",
     );
     let loaded = load_user_creds(&bare(dir.path())).unwrap();
     let defaults = &loaded.defaults;
@@ -494,9 +497,15 @@ fn the_defaults_carry_the_routing_preferences() {
     assert_eq!(defaults.provider_order, ["codex", "openai"]);
     assert_eq!(defaults.fallback_order.len(), 1);
     assert_eq!(defaults.fallback_order[0].model.to_string(), "a/b");
-    assert_eq!(loaded.warnings.len(), 1);
+    assert_eq!(loaded.warnings.len(), 2, "{:?}", loaded.warnings);
     assert!(
-        loaded.warnings[0].contains("\"bare\""),
+        loaded.warnings[0].contains("`default_model = \"old\"`")
+            && loaded.warnings[0].contains("`fallback_model = \"old\"`"),
+        "{:?}",
+        loaded.warnings
+    );
+    assert!(
+        loaded.warnings[1].contains("\"bare\""),
         "{:?}",
         loaded.warnings
     );
@@ -512,9 +521,12 @@ fn the_defaults_carry_the_routing_preferences() {
         ["kept"]
     );
 
+    // The current name wins when the file has both, and nothing was read
+    // under another name, so there is nothing to say.
     let dir = with_config("fallback_model = \"new\"\ndefault_model = \"old\"\n");
     let loaded = load_user_creds(&bare(dir.path())).unwrap();
     assert_eq!(loaded.defaults.fallback_model.as_deref(), Some("new"));
+    assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
 }
 
 /// Keys this loader does not read are ignored, so the CLI's full config

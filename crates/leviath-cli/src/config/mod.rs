@@ -39,8 +39,9 @@ mod fault;
 pub(crate) use fault::ConfigFault;
 
 // Keys that changed name: one table, read by the loader, the unread-key
-// warning, `lev doctor` and `lev update`.
-pub(crate) mod renamed;
+// warning, `lev doctor` and `lev update`. It lives in the runtime, whose own
+// loader reads the same file through it.
+pub(crate) use leviath_runtime::user_creds::renamed;
 
 // Two helpers with no `[table]` of their own: reading a repository's `.env`,
 // and hardening the config file's permissions. Private to this module; the
@@ -846,7 +847,7 @@ impl Config {
                 Box::new(ConfigFault::validation(
                     path,
                     &format!("model_providers.{name}"),
-                    &e.to_string(),
+                    &e,
                 ))
             })?;
         }
@@ -1799,7 +1800,7 @@ some_custom_thing = \"forwarded to the script\"
             ),
             (
                 "ProviderConfig",
-                "src/config/providers.rs",
+                "../leviath-runtime/src/user_creds/provider_config.rs",
                 &["properties", "providers", "properties"],
                 true,
             ),
@@ -1808,7 +1809,7 @@ some_custom_thing = \"forwarded to the script\"
             // held to it.
             (
                 "ModelProviderConfig",
-                "src/config/providers.rs",
+                "../leviath-runtime/src/user_creds/model_provider.rs",
                 &[
                     "properties",
                     "model_providers",
@@ -3143,54 +3144,6 @@ meshy_api_key = "msy-existing"
         );
     }
 
-    /// One `tracing::debug!(?config)` would otherwise put every provider key in
-    /// the logs.
-    #[test]
-    fn provider_config_debug_never_prints_the_keys() {
-        let providers = ProviderConfig {
-            anthropic_api_key: Some("sk-ant-SECRET-VALUE".to_string()),
-            anthropic_headers: std::collections::BTreeMap::from([(
-                "X-Gateway-Token".to_string(),
-                "hdr-SECRET-VALUE".to_string(),
-            )]),
-            openai_api_key: Some("sk-openai-SECRET-VALUE".to_string()),
-            google_api_key: Some("AIza-SECRET-VALUE".to_string()),
-            anthropic_base_url: None,
-            openai_base_url: None,
-            google_base_url: None,
-            openrouter_base_url: None,
-            codex_enabled: true,
-            anthropic_cache_ttl: None,
-            fallback_order: Vec::new(),
-            ..Default::default()
-        };
-        let rendered = format!("{providers:?}");
-        assert!(!rendered.contains("SECRET-VALUE"), "key leaked: {rendered}");
-        // "is it configured" is what a debug line is actually asking.
-        assert!(rendered.contains("<set>"), "{rendered}");
-        assert!(rendered.contains("codex_enabled: true"), "{rendered}");
-        // A header's name says what is configured; its value is a credential
-        // as often as not.
-        assert!(rendered.contains("X-Gateway-Token"), "{rendered}");
-
-        let empty = format!(
-            "{:?}",
-            ProviderConfig {
-                anthropic_api_key: None,
-                openai_api_key: None,
-                google_api_key: None,
-                anthropic_base_url: None,
-                openai_base_url: None,
-                google_base_url: None,
-                openrouter_base_url: None,
-                anthropic_cache_ttl: None,
-                fallback_order: Vec::new(),
-                ..Default::default()
-            }
-        );
-        assert!(empty.contains("<unset>"), "{empty}");
-    }
-
     /// The Bedrock key rides every keychain path the other keys do, and the
     /// region, which is not a secret, is printed.
     #[test]
@@ -3355,113 +3308,6 @@ bedrock_base_url = "https://gw/from-file"
                     Some("ap-south-1")
                 );
             },
-        );
-    }
-
-    /// A gateway's key and its `extra` table are both credential-carrying:
-    /// `extra` is forwarded verbatim into a provider script's `initialize`,
-    /// which is where a second credential goes when the gateway wants one under
-    /// its own name. Names, never values.
-    #[test]
-    fn model_provider_config_debug_never_prints_the_keys() {
-        let gateway = ModelProviderConfig {
-            script: Some("groq.rhai".to_string()),
-            api_key: Some("gsk-SECRET-VALUE".to_string()),
-            base_url: Some("https://api.groq.example".to_string()),
-            rate_limit: None,
-            serves: None,
-            extra: HashMap::from([
-                (
-                    "org_token".to_string(),
-                    toml::Value::String("org-SECRET-VALUE".to_string()),
-                ),
-                ("region".to_string(), toml::Value::String("eu".to_string())),
-            ]),
-            ..Default::default()
-        };
-        let rendered = format!("{gateway:?}");
-        assert!(!rendered.contains("SECRET-VALUE"), "key leaked: {rendered}");
-        assert!(rendered.contains("api_key: \"<set>\""), "{rendered}");
-        // Sorted, so two runs of the same daemon print the same line.
-        assert!(
-            rendered.contains("extra_keys: [\"org_token\", \"region\"]"),
-            "{rendered}"
-        );
-        // What is not a secret is still worth reading.
-        assert!(rendered.contains("api.groq.example"), "{rendered}");
-
-        let bare = format!("{:?}", ModelProviderConfig::default());
-        assert!(bare.contains("api_key: \"<unset>\""), "{bare}");
-        assert!(bare.contains("kind: Script"), "{bare}");
-    }
-
-    /// An endpoint's headers are where its second credential goes, so the
-    /// debug line names them and never prints them.
-    #[test]
-    fn an_endpoints_header_values_never_reach_the_debug_line() {
-        let endpoint = ModelProviderConfig {
-            kind: Some(ModelProviderKind::OpenaiCompatible),
-            base_url: Some("http://localhost:8080/v1".to_string()),
-            headers: Some(
-                [("X-Api-Key".to_string(), "hdr-SECRET-VALUE".to_string())]
-                    .into_iter()
-                    .collect(),
-            ),
-            models: Some(vec!["llama-3".to_string()]),
-            ..Default::default()
-        };
-        let rendered = format!("{endpoint:?}");
-        assert!(
-            !rendered.contains("SECRET-VALUE"),
-            "header leaked: {rendered}"
-        );
-        assert!(rendered.contains("kind: OpenaiCompatible"), "{rendered}");
-        assert!(
-            rendered.contains("header_names: [\"X-Api-Key\"]"),
-            "{rendered}"
-        );
-        assert!(rendered.contains("llama-3"), "{rendered}");
-    }
-
-    /// The kind is spelled the way the file spells it, both ways.
-    #[test]
-    fn a_model_provider_kind_round_trips_through_its_spelling() {
-        for kind in [
-            ModelProviderKind::Script,
-            ModelProviderKind::OpenaiCompatible,
-            ModelProviderKind::Openai,
-        ] {
-            assert_eq!(ModelProviderKind::parse(kind.as_str()), Some(kind));
-        }
-        assert_eq!(ModelProviderKind::parse("vllm"), None);
-        assert_eq!(
-            ModelProviderConfig::default().kind(),
-            ModelProviderKind::Script
-        );
-        assert!(!ModelProviderConfig::default().is_endpoint());
-    }
-
-    /// The headers reach a provider constructor as an ordered list.
-    #[test]
-    fn header_pairs_are_listed_in_name_order_and_empty_when_unset() {
-        assert!(ModelProviderConfig::default().header_pairs().is_empty());
-        let endpoint = ModelProviderConfig {
-            headers: Some(
-                [
-                    ("X-Org".to_string(), "research".to_string()),
-                    ("Authorization".to_string(), "Bearer t".to_string()),
-                ]
-                .into_iter()
-                .collect(),
-            ),
-            ..Default::default()
-        };
-        assert_eq!(
-            endpoint.header_pairs(),
-            vec![
-                ("Authorization".to_string(), "Bearer t".to_string()),
-                ("X-Org".to_string(), "research".to_string()),
-            ]
         );
     }
 
