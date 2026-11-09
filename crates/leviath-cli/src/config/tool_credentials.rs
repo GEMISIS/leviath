@@ -31,8 +31,8 @@ const MAX_NAME_LEN: usize = 128;
 #[serde(transparent)]
 pub struct ToolCredentials(BTreeMap<String, String>);
 
-/// Names only. `Config` derives `Debug`, and a debug print of it is the kind
-/// of thing that ends up in a log.
+/// Names only. A debug print of a `Config`, which holds this, is the kind of
+/// thing that ends up in a log.
 impl std::fmt::Debug for ToolCredentials {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_set().entries(self.0.keys()).finish()

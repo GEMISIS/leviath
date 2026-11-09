@@ -35,6 +35,9 @@ mod user_settings;
 pub(crate) mod tool_credentials;
 pub use tool_credentials::ToolCredentials;
 
+// `Debug` for `Config`, written by hand so a credential cannot be printed.
+mod debug;
+
 // Why a config file would not load, kept structured rather than flattened into
 // a string, so the surfaces that have to explain a broken file can point at
 // the line or the key instead of pasting a paragraph.
@@ -95,7 +98,10 @@ fn collect_dropped_keys(
 }
 
 /// CLI configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Debug` is written by hand, in `debug.rs`, so that a key cannot be
+/// printed.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Config {
     /// Default provider
     #[serde(default = "default_provider_name")]
