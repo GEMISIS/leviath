@@ -40,33 +40,29 @@ pub(crate) mod tests {
 
     #[test]
     fn fallback_order_parses_provider_slash_model_and_drops_junk() {
-        // The warning for each rejected entry is formatted only under a real
-        // subscriber.
-        crate::test_support::with_tracing(|| {
-            let mut config = Config::default();
-            config.providers.fallback_order = vec![
-                // A model id containing a slash must survive intact, which is
-                // the common OpenRouter shape.
-                "openrouter/deepseek/deepseek-v4-flash".to_string(),
-                "anthropic/claude-sonnet-5".to_string(),
-                // Rejected: a bare provider gives us no model to send.
-                "anthropic".to_string(),
-                "/no-provider".to_string(),
-                "no-model/".to_string(),
-                String::new(),
-            ];
-            let parsed = model_defaults(&config).fallback_order;
-            assert_eq!(
-                parsed
-                    .iter()
-                    .map(|e| (e.provider_or_empty(), e.model.as_str()))
-                    .collect::<Vec<_>>(),
-                vec![
-                    ("openrouter", "deepseek/deepseek-v4-flash"),
-                    ("anthropic", "claude-sonnet-5"),
-                ]
-            );
-        });
+        let mut config = Config::default();
+        config.providers.fallback_order = vec![
+            // A model id containing a slash must survive intact, which is
+            // the common OpenRouter shape.
+            "openrouter/deepseek/deepseek-v4-flash".to_string(),
+            "anthropic/claude-sonnet-5".to_string(),
+            // Rejected: a bare provider gives us no model to send.
+            "anthropic".to_string(),
+            "/no-provider".to_string(),
+            "no-model/".to_string(),
+            String::new(),
+        ];
+        let parsed = model_defaults(&config).fallback_order;
+        assert_eq!(
+            parsed
+                .iter()
+                .map(|e| (e.provider_or_empty(), e.model.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("openrouter", "deepseek/deepseek-v4-flash"),
+                ("anthropic", "claude-sonnet-5"),
+            ]
+        );
     }
 
     #[test]

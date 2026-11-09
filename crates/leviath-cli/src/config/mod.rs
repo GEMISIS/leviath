@@ -30,7 +30,6 @@ pub(crate) use secrets::{PROVIDER_KEYS, ProviderKey};
 // The provider settings in the form the runtime builds providers from, and
 // the fills that put the environment's and the credential store's values in.
 mod user_settings;
-pub(crate) use user_settings::log_warnings;
 // `[tool_credentials]`: the secrets script tools read by name, kept in the
 // same credential store as the provider keys.
 pub(crate) mod tool_credentials;
@@ -813,6 +812,7 @@ impl Config {
         }
         Self::warn_unknown_config_keys(&content);
         c.warn_qualified_user_models();
+        c.warn_ignored_provider_settings();
 
         // Catch a malformed MCP server entry here, at load, rather than at
         // the first tool call: a typo that drops a server's tools should

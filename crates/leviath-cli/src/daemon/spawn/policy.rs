@@ -12,14 +12,12 @@ use super::*;
 /// The user's default provider and model settings from `config.toml`, in the
 /// plain form the runtime's stage resolver takes: the runtime's own
 /// [`model_defaults`](leviath_runtime::user_creds::model_defaults) over this
-/// config's provider settings. A malformed `[providers] fallback_order` entry
-/// is dropped with a warning that names it.
+/// config's provider settings.
+///
+/// A malformed `[providers] fallback_order` entry is dropped, and was named
+/// when the config was loaded. Not again here: this is asked at every stage.
 pub(crate) fn model_defaults(config: &Config) -> ModelDefaults {
-    let mut warnings = Vec::new();
-    let defaults =
-        leviath_runtime::user_creds::model_defaults(&config.user_settings(), &mut warnings);
-    crate::config::log_warnings(&warnings);
-    defaults
+    leviath_runtime::user_creds::model_defaults(&config.user_settings(), &mut Vec::new())
 }
 
 /// The `[security] shell_env` decision for this daemon, in the shape the tools

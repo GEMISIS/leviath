@@ -26,6 +26,11 @@ same list.
   finishes as `Unknown("refusal")`; a `response.incomplete` with reason `content_filter` finishes as
   `Unknown("content_filter")` instead of `TokenLimit`. Buffered calls agree, as they collect the
   same stream.
+- The daemon no longer writes the same warning to its log every two seconds. A
+  `[model_providers]` `retention` or `zero_retention_request` word it could not use, or a
+  `[providers] fallback_order` entry that is not `provider/model`, was logged each time the
+  setting was asked for: every two seconds for the first two, at every stage for the third. Each
+  is now said once, when `config.toml` is loaded, beside the unread-key warning.
 
 ### Added
 

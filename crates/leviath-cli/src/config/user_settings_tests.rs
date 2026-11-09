@@ -206,3 +206,54 @@ fn lev_and_an_embedding_host_read_one_file_the_same_way() {
         assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
     });
 }
+
+/// A provider setting that is being ignored is said once, where the file is
+/// loaded. The daemon asks for the retention settings every two seconds and
+/// for the model defaults at every stage, so saying it where it is asked for
+/// fills the log with one line.
+#[test]
+fn an_ignored_provider_setting_is_said_once_where_the_file_is_loaded() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "[providers]\nfallback_order = [\"bare\"]\n\
+         [model_providers.x]\nscript = \"x.rhai\"\nretention = \"sometimes\"\n\
+         zero_retention_request = \"nobody\"\n",
+    )
+    .unwrap();
+
+    let (config, at_load) = leviath_testkit::captured_logs(|| Config::read_file(&path));
+    let config = config.expect("the file loads");
+    let said = |lines: &[String], what: &str| {
+        lines
+            .iter()
+            .filter(|line| line.starts_with("WARN ") && line.contains(what))
+            .count()
+    };
+    assert_eq!(
+        said(&at_load, "fallback_order entry \"bare\""),
+        1,
+        "{at_load:?}"
+    );
+    assert_eq!(
+        said(&at_load, "[model_providers.x] retention"),
+        1,
+        "{at_load:?}"
+    );
+    assert_eq!(
+        said(&at_load, "[model_providers.x] zero_retention_request"),
+        1,
+        "{at_load:?}"
+    );
+
+    // Asked for again, as the daemon asks, they say nothing.
+    let ((), asked) = leviath_testkit::captured_logs(|| {
+        for _ in 0..3 {
+            crate::commands::run::session::retention_settings(&config);
+            crate::daemon::spawn::model_defaults(&config);
+            provider_creds_from_config(&config);
+        }
+    });
+    assert_eq!(said(&asked, "ignoring"), 0, "{asked:?}");
+}
