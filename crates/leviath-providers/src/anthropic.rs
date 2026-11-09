@@ -781,10 +781,18 @@ impl AnthropicProvider {
     fn parse_response(&self, body: &serde_json::Value) -> Result<InferenceResponse> {
         let mut content = String::new();
         let mut tool_calls = Vec::new();
+        // The thinking blocks' text, as a stream shows it while it is written.
+        let mut thinking = String::new();
 
         if let Some(content_blocks) = body.get("content").and_then(|c| c.as_array()) {
             for block in content_blocks {
                 match block.get("type").and_then(|t| t.as_str()) {
+                    Some("thinking") => {
+                        thinking
+                            .push_str(block.get("thinking").and_then(|t| t.as_str()).unwrap_or(""));
+                    }
+                    // Opaque by design: there is no text in it to show.
+                    Some("redacted_thinking") => {}
                     Some("text") => match block.get("text").and_then(|t| t.as_str()) {
                         Some(text) => content.push_str(text),
                         None => {
@@ -848,7 +856,7 @@ impl AnthropicProvider {
             .unwrap_or(0) as usize;
 
         Ok(InferenceResponse {
-            reasoning_summary: None,
+            reasoning_summary: (!thinking.trim().is_empty()).then_some(thinking),
             content,
             tool_calls,
             // `input_tokens` is already exclusive of both cache counts here, so
@@ -3044,6 +3052,38 @@ mod tests {
         let mut tool_index: Option<usize> = None;
         let result = parse_sse_event(&mut buffer, &mut tool_index);
         assert!(result.is_none());
+    }
+
+    /// A buffered reply's thinking blocks are its reasoning summary; a redacted
+    /// block has no text, and a reply with none has no summary.
+    #[test]
+    fn test_parse_response_thinking_blocks_are_the_reasoning_summary() {
+        let provider = AnthropicProvider::new(reqwest::Client::new(), "k".to_string());
+        let body = serde_json::json!({
+            "content": [
+                { "type": "thinking", "thinking": "Let me ", "signature": "s" },
+                { "type": "redacted_thinking", "data": "EmwK" },
+                { "type": "thinking", "signature": "s2" },
+                { "type": "thinking", "thinking": "see." },
+                { "type": "text", "text": "Done." }
+            ],
+            "stop_reason": "end_turn",
+            "usage": { "input_tokens": 1, "output_tokens": 1 }
+        });
+        let parsed = provider.parse_response(&body).unwrap();
+        assert_eq!(parsed.reasoning_summary.as_deref(), Some("Let me see."));
+        assert_eq!(parsed.content, "Done.");
+        let plain = serde_json::json!({
+            "content": [{ "type": "text", "text": "Hi" }],
+            "usage": { "input_tokens": 1, "output_tokens": 1 }
+        });
+        assert!(
+            provider
+                .parse_response(&plain)
+                .unwrap()
+                .reasoning_summary
+                .is_none()
+        );
     }
 
     /// A thinking block streams its text as `thinking_delta`s, which are the

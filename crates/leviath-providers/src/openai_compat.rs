@@ -913,7 +913,9 @@ pub fn parse_openai_response(body: &serde_json::Value) -> Result<InferenceRespon
     let reported_cost_usd = usage.and_then(|u| u.get("cost")).and_then(|v| v.as_f64());
 
     Ok(InferenceResponse {
-        reasoning_summary: None,
+        // The same text, by the same precedence, that a stream shows as it
+        // arrives.
+        reasoning_summary: reasoning_delta_text(message).filter(|t| !t.trim().is_empty()),
         content,
         tool_calls,
         parts: crate::mime_output::message_blobs(message),
@@ -955,8 +957,11 @@ where
 }
 
 /// [`openai_sse_stream`] for a route that replays its reasoning: the
-/// `reasoning_details` the stream carries are merged and sealed to `model` on
-/// the chunk that finishes the answer (see [`details`]).
+/// `reasoning_details` the stream carries are merged and, once the stream is
+/// over (`[DONE]`, or the connection closing), sealed onto one last chunk to
+/// the model the replies say answered, `model` when they name none (see
+/// [`details`]).
+#[cfg(feature = "openrouter")]
 pub(crate) fn openai_sse_stream_sealing<S>(
     inner: S,
     model: &str,
@@ -964,12 +969,28 @@ pub(crate) fn openai_sse_stream_sealing<S>(
 where
     S: Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
 {
-    let mut kept = details::Details::for_model(model);
+    let kept = details::keeping();
+    let (asked, closing, closed) = (model.to_string(), kept.clone(), model.to_string());
     crate::provider::stream::FramedStream::new(
         inner,
-        Box::new(move |buffer| parse_sse_event_keeping(buffer, &mut kept)),
-        None,
+        Box::new(move |buffer| parse_sse_event_keeping(buffer, &kept, &asked)),
+        Some(Box::new(move |_| sealed_chunk(&closing, &closed))),
     )
+}
+
+/// The last chunk of a keeping stream, carrying the sealed reasoning; `None`
+/// when there is none, or it has already gone out.
+pub(crate) fn sealed_chunk(kept: &details::SharedDetails, asked: &str) -> Option<StreamChunk> {
+    let blob = leviath_core::sync::lock(kept).finish(asked)?;
+    Some(StreamChunk {
+        reasoning_delta: None,
+        delta: String::new(),
+        tool_calls: Vec::new(),
+        tokens: None,
+        finish_reason: None,
+        reasoning: Some(blob),
+        parts: Vec::new(),
+    })
 }
 
 /// Parse a single SSE event from the buffer.
@@ -986,21 +1007,28 @@ where
 /// the usage-only shape, and falling through there ends the stream cleanly -
 /// a truncated answer with nothing anywhere saying why.
 pub fn parse_openai_sse_event(buffer: &mut String) -> Option<Option<Result<StreamChunk>>> {
-    parse_sse_event_keeping(buffer, &mut details::Details::default())
+    parse_sse_event_keeping(buffer, &details::discarding(), "")
 }
 
-/// [`parse_openai_sse_event`], keeping the reasoning blocks it reads in `kept`
-/// and sealing them onto the chunk that carries the finish reason.
-fn parse_sse_event_keeping(
+/// [`parse_openai_sse_event`], keeping the reasoning blocks it reads in `kept`.
+/// They go out once, on a last chunk at `[DONE]` (see [`sealed_chunk`]), so
+/// blocks that arrive after the finish reason are in it; that chunk is the end
+/// of the stream.
+pub(crate) fn parse_sse_event_keeping(
     buffer: &mut String,
-    kept: &mut details::Details,
+    kept: &details::SharedDetails,
+    asked: &str,
 ) -> Option<Option<Result<StreamChunk>>> {
+    if leviath_core::sync::lock(kept).is_sealed() {
+        return Some(None);
+    }
     // `None` until a whole event has arrived; the caller polls again with
     // more bytes.
     let event = leviath_net::sse::next_event(buffer)?;
     let data = event.data.trim();
     if data == "[DONE]" {
-        return Some(None); // Stream finished
+        // Finished: with a last chunk if there is reasoning to hand on.
+        return Some(sealed_chunk(kept, asked).map(Ok));
     }
 
     // An event that is not JSON - a keepalive, a comment - carries nothing.
@@ -1136,8 +1164,7 @@ fn parse_sse_event_keeping(
         .with_reported_cost(usage.get("cost").and_then(|v| v.as_f64()))
     });
 
-    kept.absorb(delta);
-    let reasoning = finish_reason.is_some().then(|| kept.seal()).flatten();
+    leviath_core::sync::lock(kept).absorb(&json, delta);
 
     Some(Some(Ok(StreamChunk {
         reasoning_delta: reasoning_delta_text(delta),
@@ -1145,7 +1172,7 @@ fn parse_sse_event_keeping(
         tool_calls: tool_call_deltas,
         tokens,
         finish_reason,
-        reasoning,
+        reasoning: None,
         parts: crate::mime_output::message_blobs(delta),
     })))
 }
@@ -2151,6 +2178,45 @@ mod tests {
             resp.finish_reason,
             crate::provider::FinishReason::TokenLimit
         );
+    }
+
+    // ─── buffered reasoning text ───────────────────────────────────────────
+
+    /// A buffered reply shows its thinking the way a stream does, by the same
+    /// precedence: the details' text and summary, else `reasoning`, else
+    /// `reasoning_content`; an encrypted block or a blank is nothing.
+    #[test]
+    fn a_buffered_reply_carries_its_reasoning_summary() {
+        let reply = |message: serde_json::Value| {
+            parse_openai_response(&serde_json::json!({
+                "choices": [{ "message": message, "finish_reason": "stop" }]
+            }))
+            .unwrap()
+            .reasoning_summary
+        };
+        assert_eq!(
+            reply(serde_json::json!({
+                "content": "42",
+                "reasoning": "flat",
+                "reasoning_details": [
+                    { "type": "reasoning.text", "text": "from " },
+                    { "type": "reasoning.summary", "summary": "details" },
+                    { "type": "reasoning.encrypted", "data": "x" }
+                ]
+            }))
+            .as_deref(),
+            Some("from details")
+        );
+        assert_eq!(
+            reply(serde_json::json!({ "content": "42", "reasoning": "flat" })).as_deref(),
+            Some("flat")
+        );
+        assert_eq!(
+            reply(serde_json::json!({ "content": "42", "reasoning_content": "kimi" })).as_deref(),
+            Some("kimi")
+        );
+        assert!(reply(serde_json::json!({ "content": "42", "reasoning": "  " })).is_none());
+        assert!(reply(serde_json::json!({ "content": "42" })).is_none());
     }
 
     // ─── streamed reasoning text ───────────────────────────────────────────

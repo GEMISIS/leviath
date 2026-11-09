@@ -185,12 +185,19 @@ impl LearnedModels {
     /// The listed id that `key` names, whole or by its last path segment.
     ///
     /// A gateway namespaces its ids (`openai/gpt-5.5`) and a blueprint names
-    /// the model (`gpt-5.5`), so both spellings find the entry.
+    /// the model (`gpt-5.5`), so both spellings find the entry. An exact id
+    /// wins outright; of several ids sharing the last segment the smallest is
+    /// taken, so what a name means never depends on the order a map was read in.
     pub fn find_by_key(&self, key: &str) -> Option<String> {
-        leviath_core::sync::lock(&self.0)
-            .keys()
-            .find(|id| id.as_str() == key || id.rsplit('/').next() == Some(key))
-            .cloned()
+        let store = leviath_core::sync::lock(&self.0);
+        match store.contains_key(key) {
+            true => Some(key.to_string()),
+            false => store
+                .keys()
+                .filter(|id| id.rsplit('/').next() == Some(key))
+                .min()
+                .cloned(),
+        }
     }
 
     /// What the listing said about the model `key` names (see

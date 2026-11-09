@@ -32,6 +32,40 @@ use {
     std::pin::Pin,
 };
 
+/// Send an assistant turn's reasoning back on it, the way OpenRouter documents
+/// for keeping a model's thinking across a tool call: its `reasoning_details`,
+/// unmodified, on the assistant message among those the turn converted to (a
+/// tool-call turn is `[assistant, tool, ...]`, and a result may carry a user
+/// message after it). Only a blob OpenRouter sealed for the model being asked
+/// opens, and not on a request that lets the gateway pick the model; see
+/// [`details`]. A tool call's own `thought_signature` is not sent a second time
+/// for it: Gemini's signature arrives as an encrypted block in these details,
+/// never as `extra_content`.
+#[cfg(feature = "openrouter")]
+fn replay_reasoning(
+    converted: &mut [serde_json::Value],
+    msg: &crate::provider::Message,
+    request: &InferenceRequest,
+    asked: &str,
+) {
+    let routed = request.model.starts_with("openrouter/")
+        || request
+            .extra
+            .get("models")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|models| !models.is_empty());
+    let Some(blocks) = msg
+        .reasoning
+        .as_deref()
+        .and_then(|blob| details::replay(asked, routed, blob))
+    else {
+        return;
+    };
+    if let Some(turn) = converted.iter_mut().find(|m| m["role"] == "assistant") {
+        turn["reasoning_details"] = serde_json::Value::Array(blocks);
+    }
+}
+
 /// Put an ephemeral `cache_control` on the last text in `messages`, the chat
 /// messages one turn converted to, and say whether there was any.
 ///
@@ -39,30 +73,6 @@ use {
 /// `tool` message takes on this route as well as a user or assistant one. A
 /// turn that only calls tools has no text at all, and is left as it is.
 #[cfg(feature = "openrouter")]
-/// Send an assistant turn's reasoning back on it, the way OpenRouter documents
-/// for keeping a model's thinking across a tool call: its `reasoning_details`,
-/// unmodified. Only the blob OpenRouter sealed for `model` opens; another
-/// provider's, or another model's, is left off, since a block one model signed
-/// is refused or wasted on any other.
-///
-/// A tool call's own `thought_signature` is not sent a second time for it:
-/// OpenRouter delivers Gemini's signature as an encrypted block in these
-/// details and never as `extra_content`, so a call that came through this
-/// route carries none to repeat.
-#[cfg(feature = "openrouter")]
-fn replay_reasoning(turn: &mut serde_json::Value, msg: &crate::provider::Message, model: &str) {
-    if turn["role"] != "assistant" {
-        return;
-    }
-    if let Some(blocks) = msg
-        .reasoning
-        .as_deref()
-        .and_then(|blob| details::replay(model, blob))
-    {
-        turn["reasoning_details"] = serde_json::Value::Array(blocks);
-    }
-}
-
 fn mark_last_text(messages: &mut [serde_json::Value]) -> bool {
     let marker = serde_json::json!({ "type": "ephemeral" });
     for message in messages.iter_mut().rev() {
@@ -156,7 +166,7 @@ impl OpenRouterProvider {
     /// plain text so an unknown field cannot be refused.
     fn explicit_cache_control(&self, model: &str) -> bool {
         self.learned
-            .get(model)
+            .get(&self.listed_id(gateway_id(model)))
             .and_then(|m| m.explicit_cache_control)
             .unwrap_or_else(|| model.contains("claude") || model.contains("gemini"))
     }
@@ -248,6 +258,9 @@ impl OpenRouterProvider {
     /// exists and is tested.
     fn build_request_body(&self, request: &InferenceRequest) -> serde_json::Value {
         let is_anthropic = self.explicit_cache_control(&request.model);
+        // The id the listing keys the model by, which is how a bare name is
+        // told to be the model a sealed reply names in full.
+        let asked = self.listed_id(gateway_id(&request.model));
         // Anthropic allows four `cache_control` markers per request across
         // system and messages together. System takes its claim first and the
         // conversation gets the rest, matching the direct provider. Gemini
@@ -306,7 +319,7 @@ impl OpenRouterProvider {
                             "cache_control": { "type": "ephemeral" }
                         }],
                     });
-                    replay_reasoning(&mut turn, msg, &request.model);
+                    replay_reasoning(std::slice::from_mut(&mut turn), msg, request, &asked);
                     messages.push(turn);
                 }
                 // Everything else - including tool_use/tool_result block history -
@@ -321,10 +334,7 @@ impl OpenRouterProvider {
                         owed = !mark_last_text(&mut converted);
                         breakpoint_count += usize::from(!owed);
                     }
-                    converted
-                        .last_mut()
-                        .into_iter()
-                        .for_each(|turn| replay_reasoning(turn, msg, &request.model));
+                    replay_reasoning(&mut converted, msg, request, &asked);
                     messages.extend(converted);
                 }
             }
@@ -822,7 +832,7 @@ impl Provider for OpenRouterProvider {
         // call it made here.
         result.reasoning = response_body
             .pointer("/choices/0/message")
-            .and_then(|message| details::seal_message(&request.model, message));
+            .and_then(|message| details::seal_message(&request.model, &response_body, message));
         if let Some(message) = response_body.pointer("/choices/0/message")
             && let Some(audio) =
                 crate::mime_output::message_audio_blob(message, request_audio_mime(request))
@@ -867,10 +877,17 @@ impl Provider for OpenRouterProvider {
                 request_audio_mime(request),
                 &request_audio_format(request),
             );
+            let kept = details::keeping();
+            let (asked, closing, closed) =
+                (request.model.clone(), kept.clone(), request.model.clone());
             crate::provider::stream::FramedStream::new(
                 byte_stream,
-                Box::new(move |buffer| openrouter_audio_sse_event(buffer, &mut audio)),
-                None,
+                Box::new(move |buffer| {
+                    openrouter_audio_sse_event(buffer, &mut audio, &kept, &asked)
+                }),
+                Some(Box::new(move |_| {
+                    crate::openai_compat::sealed_chunk(&closing, &closed)
+                })),
             )
             .sent_by(peer)
         } else {
@@ -956,9 +973,10 @@ impl Provider for OpenRouterProvider {
         // says, what this build was compiled with.
         let written = model;
         let model = gateway_id(model);
+        let listed = self.listed_id(model);
         let base = self
             .learned
-            .corrected(&self.listed_id(model), builtin_capabilities(model));
+            .corrected(&listed, builtin_capabilities(&listed));
         // Merged, not swapped: an entry names only what it corrects.
         let mut caps = match self
             .capability_overrides
@@ -967,7 +985,7 @@ impl Provider for OpenRouterProvider {
         {
             Some(o) => o.apply_to(base),
             None => {
-                self.warn_if_unknown(model, &base);
+                self.warn_if_unknown(&listed, &base);
                 base
             }
         };
@@ -1003,7 +1021,8 @@ impl Provider for OpenRouterProvider {
         // Matching on the last path segment because the gateway prefixes a
         // vendor namespace (`openai/gpt-5.5`) that the blueprint does not name.
         let spelled = gateway_id(model_key);
-        let primed = self.learned.find_by_key(spelled);
+        let resolved = self.listed_id(spelled);
+        let primed = self.learned.contains(&resolved).then_some(resolved);
         // An empty catalogue means priming failed or has not run, and answering
         // "no" to everything there would deny models this gateway plainly
         // carries. The compiled-in table is the fallback, read directly rather
@@ -2371,24 +2390,42 @@ mod tests {
     fn streamed_audio_is_emitted_on_done_when_no_finish_event_carries_it() {
         let mut audio = AudioStreamAccumulator::new(None, "wav");
         let mut event = "data: {\"choices\":[{\"delta\":{\"audio\":{\"data\":\"AQID\",\"mime_type\":\"audio/x-future-model\"}}}]}\n\n".to_string();
-        let first = openrouter_audio_sse_event(&mut event, &mut audio)
-            .unwrap()
-            .unwrap()
-            .unwrap();
+        let first = openrouter_audio_sse_event(
+            &mut event,
+            &mut audio,
+            &crate::openai_compat::details::discarding(),
+            "",
+        )
+        .unwrap()
+        .unwrap()
+        .unwrap();
         assert!(first.parts.is_empty());
 
         let mut done = "data: [DONE]\n\n".to_string();
-        let final_chunk = openrouter_audio_sse_event(&mut done, &mut audio)
-            .unwrap()
-            .unwrap()
-            .unwrap();
+        let final_chunk = openrouter_audio_sse_event(
+            &mut done,
+            &mut audio,
+            &crate::openai_compat::details::discarding(),
+            "",
+        )
+        .unwrap()
+        .unwrap()
+        .unwrap();
         assert_eq!(final_chunk.parts.len(), 1);
         assert_eq!(
             final_chunk.parts[0].mime_type.as_str(),
             "audio/x-future-model"
         );
         assert_eq!(final_chunk.parts[0].bytes, [1, 2, 3]);
-        assert!(openrouter_audio_sse_event(&mut done, &mut audio).is_none());
+        assert!(
+            openrouter_audio_sse_event(
+                &mut done,
+                &mut audio,
+                &crate::openai_compat::details::discarding(),
+                ""
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -2396,9 +2433,14 @@ mod tests {
         let mut audio = AudioStreamAccumulator::new(Some("audio/wav"), "wav");
         let mut done = "data: [DONE]\n\n".to_string();
         assert!(
-            openrouter_audio_sse_event(&mut done, &mut audio)
-                .unwrap()
-                .is_none()
+            openrouter_audio_sse_event(
+                &mut done,
+                &mut audio,
+                &crate::openai_compat::details::discarding(),
+                ""
+            )
+            .unwrap()
+            .is_none()
         );
     }
 
@@ -2409,25 +2451,51 @@ mod tests {
             "data: {\"choices\":[{\"delta\":{\"audio\":{\"mime_type\":\"audio/wav\"}}}]}\n\n"
                 .to_string();
         assert!(
-            openrouter_audio_sse_event(&mut no_data, &mut audio)
-                .unwrap()
-                .unwrap()
-                .unwrap()
-                .parts
-                .is_empty()
+            openrouter_audio_sse_event(
+                &mut no_data,
+                &mut audio,
+                &crate::openai_compat::details::discarding(),
+                ""
+            )
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .parts
+            .is_empty()
         );
         let mut done = "data: [DONE]\n\n".to_string();
         assert!(
-            openrouter_audio_sse_event(&mut done, &mut audio)
-                .unwrap()
-                .is_none()
+            openrouter_audio_sse_event(
+                &mut done,
+                &mut audio,
+                &crate::openai_compat::details::discarding(),
+                ""
+            )
+            .unwrap()
+            .is_none()
         );
 
         let mut malformed = "data: not-json\n\n".to_string();
-        assert!(openrouter_audio_sse_event(&mut malformed, &mut audio).is_none());
+        assert!(
+            openrouter_audio_sse_event(
+                &mut malformed,
+                &mut audio,
+                &crate::openai_compat::details::discarding(),
+                ""
+            )
+            .is_none()
+        );
 
         let mut unsupported = "data: {}\n\n".to_string();
-        assert!(openrouter_audio_sse_event(&mut unsupported, &mut audio).is_none());
+        assert!(
+            openrouter_audio_sse_event(
+                &mut unsupported,
+                &mut audio,
+                &crate::openai_compat::details::discarding(),
+                ""
+            )
+            .is_none()
+        );
     }
 
     fn simple_request() -> InferenceRequest {

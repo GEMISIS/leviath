@@ -37,10 +37,15 @@ fn the_prefix_guesses_and_the_listing_corrects() {
 fn streamed_audio_asked_for_as_wav_is_typed_by_its_mp3_bytes() {
     let mut audio = AudioStreamAccumulator::new(Some("audio/wav"), "wav");
     let mut event = "data: {\"choices\":[{\"delta\":{\"audio\":{\"data\":\"//uQZAA=\",\"format\":\"wav\"}},\"finish_reason\":\"stop\"}]}\n\n".to_string();
-    let chunk = openrouter_audio_sse_event(&mut event, &mut audio)
-        .unwrap()
-        .unwrap()
-        .unwrap();
+    let chunk = openrouter_audio_sse_event(
+        &mut event,
+        &mut audio,
+        &crate::openai_compat::details::discarding(),
+        "",
+    )
+    .unwrap()
+    .unwrap()
+    .unwrap();
     assert_eq!(chunk.parts.len(), 1);
     assert_eq!(chunk.parts[0].mime_type.as_str(), "audio/mpeg");
     assert_eq!(chunk.parts[0].bytes, b"\xFF\xFB\x90\x64\x00");
