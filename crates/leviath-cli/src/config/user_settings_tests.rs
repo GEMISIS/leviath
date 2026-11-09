@@ -410,3 +410,31 @@ fn a_keychain_save_stores_no_key_the_environment_supplied() {
     assert!(text.contains("sk-openai-kept"), "{text}");
     assert!(!text.contains("sk-ant-env"), "{text}");
 }
+
+/// A key variable that is set but empty fills its slot, so the provider is
+/// not registered and the credential store is not asked for it. A pipeline
+/// that exports every secret it might have does this on every command, so
+/// it is noted at debug level and never as a warning.
+#[test]
+fn an_empty_key_variable_is_noted_at_debug_level() {
+    let (config, lines) = leviath_testkit::captured_logs(|| {
+        let mut config = Config::default();
+        config.fill_from_env(&|name| (name == "OPENAI_API_KEY").then(String::new));
+        config
+    });
+    assert_eq!(config.providers.openai_api_key.as_deref(), Some(""));
+    assert!(provider_creds_from_config(&config).is_empty());
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("DEBUG ")
+                && line.contains("OPENAI_API_KEY is set but empty")),
+        "{lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.starts_with("WARN ")),
+        "{lines:?}"
+    );
+    // Nothing of it is kept: an empty variable is the environment's too.
+    assert_eq!(config.as_stored().providers.openai_api_key, None);
+}
