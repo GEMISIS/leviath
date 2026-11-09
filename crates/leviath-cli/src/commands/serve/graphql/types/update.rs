@@ -360,6 +360,17 @@ pub(crate) struct UpdateJob {
     /// `SKIPPED` rather than absent, so a client renders the same rows
     /// whatever the request was.
     pub(crate) steps: Vec<UpdateJobStep>,
+    /// When the job was started.
+    pub(crate) started_at: Timestamp,
+    /// When it reached `COMPLETE` or `FAILED`. Null while it is still going.
+    pub(crate) finished_at: Option<Timestamp>,
+    /// Whether the binary on disk is now newer than the processes serving
+    /// this. Both keep running the old build until they are restarted.
+    ///
+    /// Decided when the job finishes, so it is false on one still going, and
+    /// true only when the binary step ran and succeeded. The same answer the
+    /// job's last frame carries, for a client that polls.
+    pub(crate) restart_required: bool,
 }
 
 impl super::super::connection::Paged for UpdateJob {
@@ -397,8 +408,16 @@ impl From<super::super::super::update_job::UpdateJob> for UpdateJob {
                     detail: step.detail,
                 })
                 .collect(),
+            started_at: seconds(job.started_at),
+            finished_at: job.finished_at.map(seconds),
+            restart_required: job.restart_required,
         }
     }
+}
+
+/// A clock reading the job registry keeps unsigned, as a `Timestamp`.
+fn seconds(at: u64) -> Timestamp {
+    Timestamp(i64::try_from(at).unwrap_or(i64::MAX))
 }
 
 #[cfg(test)]

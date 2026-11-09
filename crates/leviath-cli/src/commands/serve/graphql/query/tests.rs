@@ -4496,6 +4496,9 @@ async fn every_export_mirrored_function_runs() {
         written: 3,
         error: None,
         download_url: Some("https://example/export.jsonl".to_string()),
+        download_url_expires_at: Some(super::super::scalars::Timestamp(1_788_000_300)),
+        started_at: super::super::scalars::Timestamp(1_788_000_000),
+        expires_at: super::super::scalars::Timestamp(1_788_003_600),
     };
     exercise(std::slice::from_ref(&export)).await;
 }
