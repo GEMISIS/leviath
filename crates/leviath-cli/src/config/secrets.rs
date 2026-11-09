@@ -392,7 +392,7 @@ mod tests {
             config.providers.openai_api_key = Some("from-file".to_string());
             config.keys_from_env();
             for key in PROVIDER_KEYS.iter().filter(|key| key.provider != "openai") {
-                assert_eq!((key.get)(&config), Some(key.provider), "{}", key.env());
+                assert_eq!((key.get)(&config), Some(key.provider), "{}", key.provider);
             }
             assert_eq!(
                 config.providers.openai_api_key.as_deref(),
