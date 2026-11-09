@@ -1551,11 +1551,7 @@ mod tests {
         Config::default().save_to_path(&path).unwrap();
 
         // Nor in the environment, which the loader reads keys from too.
-        let unset: Vec<&str> = crate::config::PROVIDER_KEYS
-            .iter()
-            .map(|key| key.env())
-            .collect();
-        temp_env::with_vars_unset(unset, || {
+        temp_env::with_vars_unset(leviath_runtime::user_creds::env_names(), || {
             run_auth(&path, AuthArgs::migrate_for_test(false, false))
                 .expect("nothing to do succeeds")
         });
