@@ -1023,3 +1023,25 @@ fn what_the_environment_filled_can_be_taken_back_out() {
     assert_eq!(untouched.providers.bedrock_region, None);
     assert_eq!(untouched.ollama_base_url, None);
 }
+
+/// Each keyed provider's extra headers are reached by its table entry, so a
+/// host that walks the table to scrub or redact them misses none.
+#[test]
+fn every_keyed_providers_headers_are_reached_through_the_table() {
+    let text: String = std::iter::once("[providers]\n".to_string())
+        .chain(
+            KEYED_PROVIDERS
+                .iter()
+                .map(|k| format!("{p}_headers = {{ h = \"hdr-{p}\" }}\n", p = k.provider)),
+        )
+        .collect();
+    let settings: UserSettings = toml::from_str(&text).unwrap();
+    for keyed in KEYED_PROVIDERS {
+        assert_eq!(
+            settings.headers(keyed).get("h").map(String::as_str),
+            Some(format!("hdr-{}", keyed.provider).as_str()),
+            "{}",
+            keyed.provider
+        );
+    }
+}

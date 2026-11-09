@@ -315,6 +315,15 @@ impl UserSettings {
         }
     }
 
+    /// The extra headers `keyed`'s provider sends on every request.
+    ///
+    /// A header's value is a credential as often as not, so this is what a
+    /// host that scrubs or redacts secrets walks, over
+    /// [`KEYED_PROVIDERS`](super::KEYED_PROVIDERS), to reach every one.
+    pub fn headers(&self, keyed: &super::KeyedProvider) -> &BTreeMap<String, String> {
+        (slots(keyed.provider).headers)(self)
+    }
+
     /// The keyed providers whose key is still unset after the file and the
     /// environment: the only accounts worth asking a credential store for.
     pub fn missing_keys(&self) -> Vec<&'static str> {

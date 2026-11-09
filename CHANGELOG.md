@@ -39,6 +39,10 @@ same list.
   `credential_store = "keychain"`. A save now leaves those out unless they were changed after
   the load. `lev setup` shows such a key as coming from the environment, and `lev auth migrate`
   no longer moves it.
+- `lev rage` scrubs the xAI and Meta API keys and the values of `[providers] xai_headers` and
+  `meta_headers` from the bundle it writes. Its list of provider secrets had stopped at the
+  providers that existed when it was written; it now reads the same provider table the loader
+  does.
 
 ### Added
 
