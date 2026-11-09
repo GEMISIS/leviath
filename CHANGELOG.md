@@ -13,6 +13,14 @@ same list.
 
 ## Unreleased
 
+### Fixed
+
+- The Responses providers (`openai`, `meta`, `codex`, `xai`) no longer hide a refusal. Refusal text
+  (`response.refusal.delta`, or a refusal content part) streams as ordinary text and the turn
+  finishes as `Unknown("refusal")`; a `response.incomplete` with reason `content_filter` finishes as
+  `Unknown("content_filter")` instead of `TokenLimit`. Buffered calls agree, as they collect the
+  same stream.
+
 ### Added
 
 - The `codex` provider serves the gpt-6 family (`gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-6-sol`,

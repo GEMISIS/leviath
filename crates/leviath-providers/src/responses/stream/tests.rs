@@ -578,3 +578,147 @@ async fn a_reasoning_blob_survives_collection() {
         ["sealed"]
     );
 }
+
+/// Feed several events through one turn, returning every chunk produced.
+fn run(events: Vec<serde_json::Value>) -> Vec<StreamChunk> {
+    let mut turn = Turn::new(crate::codex::DIALECT);
+    events
+        .into_iter()
+        .filter_map(|value| {
+            let mut buffer = event(value);
+            parse_event(&mut buffer, &mut turn)?.map(|r| r.expect("not an error"))
+        })
+        .collect()
+}
+
+fn completed() -> serde_json::Value {
+    serde_json::json!({"type": "response.completed", "response": {"status": "completed"}})
+}
+
+fn unknown(reason: &str) -> Option<FinishReason> {
+    Some(FinishReason::Unknown(reason.into()))
+}
+
+#[test]
+fn a_content_filtered_response_finishes_as_content_filter() {
+    let c = chunk(serde_json::json!({
+        "type": "response.incomplete",
+        "response": {"incomplete_details": {"reason": "content_filter"}},
+    }));
+    assert_eq!(c.finish_reason, unknown("content_filter"));
+}
+
+#[test]
+fn an_incomplete_response_with_no_reason_is_a_token_limit() {
+    let c = chunk(serde_json::json!({"type": "response.incomplete", "response": {}}));
+    assert_eq!(c.finish_reason, Some(FinishReason::TokenLimit));
+}
+
+#[test]
+fn streamed_refusal_text_is_shown_and_finishes_as_refusal() {
+    let chunks = run(vec![
+        serde_json::json!({"type": "response.refusal.delta", "output_index": 0, "delta": "I can't "}),
+        serde_json::json!({"type": "response.refusal.delta", "output_index": 0, "delta": "help."}),
+        serde_json::json!({"type": "response.refusal.done", "output_index": 0, "refusal": "I can't help."}),
+        serde_json::json!({"type": "response.content_part.done", "output_index": 0,
+            "part": {"type": "refusal", "refusal": "I can't help."}}),
+        serde_json::json!({"type": "response.output_item.done", "output_index": 0,
+            "item": {"type": "message", "content": [{"type": "refusal", "refusal": "I can't help."}]}}),
+        completed(),
+    ]);
+    let text: String = chunks.iter().map(|c| c.delta.as_str()).collect();
+    assert_eq!(text, "I can't help.");
+    assert_eq!(chunks.last().unwrap().finish_reason, unknown("refusal"));
+}
+
+#[test]
+fn a_refusal_that_only_arrives_as_a_content_part_is_shown_once() {
+    let chunks = run(vec![
+        serde_json::json!({"type": "response.content_part.done", "output_index": 1,
+            "part": {"type": "refusal", "refusal": "No."}}),
+        serde_json::json!({"type": "response.output_item.done", "output_index": 1,
+            "item": {"type": "message", "content": [{"type": "refusal", "refusal": "No."}]}}),
+        completed(),
+    ]);
+    let text: String = chunks.iter().map(|c| c.delta.as_str()).collect();
+    assert_eq!(text, "No.");
+    assert_eq!(chunks.last().unwrap().finish_reason, unknown("refusal"));
+}
+
+#[test]
+fn a_refusal_that_only_arrives_in_the_finished_item_is_shown() {
+    let chunks = run(vec![
+        serde_json::json!({"type": "response.output_item.done", "output_index": 0,
+            "item": {"type": "message", "content": [
+                {"type": "output_text", "text": "x"},
+                {"type": "refusal", "refusal": "Nope."}]}}),
+        completed(),
+    ]);
+    assert_eq!(chunks[0].delta, "Nope.");
+    assert_eq!(chunks[1].finish_reason, unknown("refusal"));
+}
+
+#[test]
+fn a_refusal_done_alone_is_shown() {
+    let chunks = run(vec![
+        serde_json::json!({"type": "response.refusal.done", "output_index": 0, "refusal": "Nope."}),
+        completed(),
+    ]);
+    assert_eq!(chunks[0].delta, "Nope.");
+}
+
+#[test]
+fn empty_or_malformed_refusal_events_show_nothing_but_still_count() {
+    let chunks = run(vec![
+        serde_json::json!({"type": "response.refusal.done", "output_index": 0}),
+        serde_json::json!({"type": "response.content_part.done", "output_index": 0,
+            "part": {"type": "refusal"}}),
+        serde_json::json!({"type": "response.content_part.done", "output_index": 0,
+            "part": {"type": "output_text", "text": "hi"}}),
+        serde_json::json!({"type": "response.content_part.done", "output_index": 0}),
+        serde_json::json!({"type": "response.output_item.done", "output_index": 0,
+            "item": {"type": "message", "content": [{"type": "output_text", "text": "hi"}]}}),
+        serde_json::json!({"type": "response.output_item.done", "output_index": 0,
+            "item": {"type": "message"}}),
+        serde_json::json!({"type": "response.refusal.delta", "output_index": 0}),
+        completed(),
+    ]);
+    assert!(chunks.iter().all(|c| c.delta.is_empty()));
+    assert_eq!(chunks.last().unwrap().finish_reason, unknown("refusal"));
+}
+
+#[test]
+fn a_tool_call_outranks_a_refusal() {
+    let chunks = run(vec![
+        serde_json::json!({"type": "response.output_item.added", "output_index": 0,
+            "item": {"type": "function_call", "call_id": "c", "name": "n"}}),
+        serde_json::json!({"type": "response.refusal.delta", "output_index": 1, "delta": "x"}),
+        completed(),
+    ]);
+    assert_eq!(
+        chunks.last().unwrap().finish_reason,
+        Some(FinishReason::ToolCall)
+    );
+}
+
+#[tokio::test]
+async fn a_refusal_survives_collection() {
+    let framed = [
+        serde_json::json!({"type": "response.refusal.delta", "output_index": 0, "delta": "No."}),
+        completed(),
+    ]
+    .into_iter()
+    .map(|v| Ok(bytes::Bytes::from(event(v))))
+    .collect::<Vec<_>>();
+    let response = crate::provider::collect_stream(Box::pin(sse_stream(
+        tokio_stream::iter(framed),
+        crate::codex::DIALECT,
+    )))
+    .await
+    .expect("collects");
+    assert_eq!(response.content, "No.");
+    assert_eq!(
+        response.finish_reason,
+        FinishReason::Unknown("refusal".into())
+    );
+}
