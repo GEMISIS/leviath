@@ -1,17 +1,18 @@
 //! The provider API keys a config holds, and keeping them in the credential
 //! store the user chose.
 //!
-//! [`PROVIDER_KEYS`] is the one list of them. The environment fallbacks, the
-//! credential store overlay, the copy saved in keychain mode and `lev auth`
-//! all read it, so a key listed there is a key every one of them handles, and
-//! a key left out of it would sit in `config.toml` in plaintext under a
-//! keychain the user asked for.
+//! [`PROVIDER_KEYS`] is the list of them as [`Config`] holds them. The copy
+//! saved in keychain mode and `lev auth` read it, so a key listed there is a
+//! key both handle, and a key left out of it would sit in `config.toml` in
+//! plaintext under a keychain the user asked for. Filling a key from the
+//! environment or the credential store is the runtime's, in
+//! `leviath_runtime::user_creds`; a test holds this table to that one by name.
 
 use super::Config;
 
 /// One provider API key: where it sits in [`Config`], and the provider it
-/// belongs to. The variable that stands in for it and the account the
-/// credential store files it under are looked up by that name.
+/// belongs to. The account the credential store files it under is looked up
+/// by that name, as the variable that stands in for it is in the runtime.
 pub(crate) struct ProviderKey {
     /// The provider, as the credential store's account and the runtime's
     /// [`leviath_runtime::KEYED_PROVIDERS`] name it.
@@ -26,15 +27,6 @@ impl ProviderKey {
     /// The credential store account this key is filed under.
     pub(crate) fn account(&self) -> String {
         leviath_core::provider_account(self.provider)
-    }
-
-    /// The environment variable read when the file leaves the key unset,
-    /// from the runtime's table, which is the one place it is spelled: an
-    /// embedder loading the same keys reads it there too.
-    pub(crate) fn env(&self) -> &'static str {
-        leviath_runtime::keyed_provider(self.provider)
-            .expect("every config key names a provider the runtime's table lists")
-            .key_env
     }
 }
 
@@ -92,17 +84,6 @@ pub(crate) const PROVIDER_KEYS: &[ProviderKey] = &[
 ];
 
 impl Config {
-    /// Fill each provider key the file left unset from its environment
-    /// variable.
-    pub(super) fn keys_from_env(&mut self) {
-        for key in PROVIDER_KEYS {
-            let slot = (key.slot)(self);
-            if slot.is_none() {
-                *slot = std::env::var(key.env()).ok();
-            }
-        }
-    }
-
     /// Fill any provider key still unset from the configured credential store.
     pub(super) fn fill_from_credential_store(&mut self) {
         let resolved = crate::credentials::store_for(self.security.credential_store);
@@ -142,21 +123,19 @@ impl Config {
 
     /// Overlay `store`'s secrets onto whichever provider keys are still unset,
     /// and onto each tool credential the file names without a value.
+    ///
+    /// The provider keys are the runtime's to fill, the way it fills them for
+    /// a host embedding it: only the accounts of keys still missing are read.
+    /// The tool credentials are `lev`'s own.
     pub(super) fn apply_credential_store(&mut self, store: &dyn leviath_core::CredentialStore) {
-        let mut accounts: Vec<String> = PROVIDER_KEYS.iter().map(ProviderKey::account).collect();
-        accounts.extend(
-            self.tool_credentials
-                .unfilled()
-                .iter()
-                .map(|name| super::tool_credentials::account(name)),
-        );
+        self.fill_keys_from_store(store);
+        let accounts: Vec<String> = self
+            .tool_credentials
+            .unfilled()
+            .iter()
+            .map(|name| super::tool_credentials::account(name))
+            .collect();
         let mut found = store.read_all(&accounts);
-        for key in PROVIDER_KEYS {
-            let slot = (key.slot)(self);
-            if slot.is_none() {
-                *slot = found.remove(&key.account());
-            }
-        }
         for (name, value) in self.tool_credentials.entries_mut() {
             if let Some(secret) = found.remove(&super::tool_credentials::account(name)) {
                 *value = secret;
@@ -282,7 +261,9 @@ mod tests {
         use leviath_providers::directory::{Credential, PROVIDERS, meta};
         for key in PROVIDER_KEYS {
             let row = meta(key.provider).expect("in the directory");
-            assert_eq!(row.env_var, Some(key.env()), "{}", key.provider);
+            let keyed = leviath_runtime::keyed_provider(key.provider)
+                .expect("every config key names a provider the runtime's table lists");
+            assert_eq!(row.env_var, Some(keyed.key_env), "{}", key.provider);
         }
         for row in PROVIDERS
             .iter()
@@ -374,10 +355,6 @@ mod tests {
         assert_eq!(ours, runtime);
         for key in PROVIDER_KEYS {
             let provider = key.provider;
-            assert_eq!(
-                key.env(),
-                leviath_runtime::keyed_provider(provider).unwrap().key_env
-            );
             let mut config = Config::default();
             *(key.slot)(&mut config) = Some("set".to_string());
             let value = serde_json::to_value(&config).unwrap();
@@ -393,22 +370,22 @@ mod tests {
     /// left alone.
     #[test]
     fn a_key_the_file_left_unset_comes_from_its_variable() {
-        let vars: Vec<(&str, Option<&str>)> = PROVIDER_KEYS
-            .iter()
-            .map(|key| (key.env(), Some(key.provider)))
-            .collect();
-        temp_env::with_vars(vars, || {
-            let mut config = Config::default();
-            config.providers.openai_api_key = Some("from-file".to_string());
-            config.keys_from_env();
-            for key in PROVIDER_KEYS.iter().filter(|key| key.provider != "openai") {
-                assert_eq!((key.get)(&config), Some(key.provider), "{}", key.provider);
-            }
-            assert_eq!(
-                config.providers.openai_api_key.as_deref(),
-                Some("from-file")
-            );
-        });
+        let env = |name: &str| {
+            leviath_runtime::KEYED_PROVIDERS
+                .iter()
+                .find(|keyed| keyed.key_env == name)
+                .map(|keyed| keyed.provider.to_string())
+        };
+        let mut config = Config::default();
+        config.providers.openai_api_key = Some("from-file".to_string());
+        config.fill_from_env(&env);
+        for key in PROVIDER_KEYS.iter().filter(|key| key.provider != "openai") {
+            assert_eq!((key.get)(&config), Some(key.provider), "{}", key.provider);
+        }
+        assert_eq!(
+            config.providers.openai_api_key.as_deref(),
+            Some("from-file")
+        );
     }
 
     /// A store the test keeps a handle on after handing it to `write_to`.

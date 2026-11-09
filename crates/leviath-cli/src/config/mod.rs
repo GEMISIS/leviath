@@ -882,52 +882,8 @@ impl Config {
     /// then from the credential store. A value in the file wins.
     fn with_env_fallbacks(self) -> Self {
         let mut config = self;
-
-        config.keys_from_env();
-        // The region AWS's own tooling reads, so a machine set up for the AWS
-        // CLI is set up for this. Blank is unset: an exported empty variable
-        // is not a region.
-        if config.providers.bedrock_region.is_none() {
-            config.providers.bedrock_region = std::env::var("AWS_REGION")
-                .ok()
-                .or_else(|| std::env::var("AWS_DEFAULT_REGION").ok())
-                .map(|r| r.trim().to_string())
-                .filter(|r| !r.is_empty());
-        }
-        // OLLAMA_HOST is the standard env var for Ollama
-        if config.ollama_base_url.is_none() {
-            config.ollama_base_url = std::env::var("OLLAMA_HOST").ok();
-        }
-        // The same override without a config file, which is how a machine
-        // behind an enterprise gateway is usually set up: the gateway is a
-        // property of the host, not of the checkout.
-        if config.providers.anthropic_base_url.is_none() {
-            config.providers.anthropic_base_url = std::env::var("ANTHROPIC_BASE_URL").ok();
-        }
-        if config.providers.openai_base_url.is_none() {
-            config.providers.openai_base_url = std::env::var("OPENAI_BASE_URL").ok();
-        }
-        if config.providers.google_base_url.is_none() {
-            config.providers.google_base_url = std::env::var("GOOGLE_BASE_URL").ok();
-        }
-        if config.providers.openrouter_base_url.is_none() {
-            config.providers.openrouter_base_url = std::env::var("OPENROUTER_BASE_URL").ok();
-        }
-        if config.providers.meshy_base_url.is_none() {
-            config.providers.meshy_base_url = std::env::var("MESHY_BASE_URL").ok();
-        }
-        if config.providers.bedrock_base_url.is_none() {
-            config.providers.bedrock_base_url = std::env::var("BEDROCK_BASE_URL").ok();
-        }
-        if config.providers.xai_base_url.is_none() {
-            config.providers.xai_base_url = std::env::var("XAI_BASE_URL").ok();
-        }
-        if config.providers.meta_base_url.is_none() {
-            config.providers.meta_base_url = std::env::var("META_AI_BASE_URL").ok();
-        }
-
+        config.fill_from_env(&|name| std::env::var(name).ok());
         config.fill_from_credential_store();
-
         config
     }
 
@@ -1089,24 +1045,14 @@ pub(crate) fn isolate_cwd_for_test() -> CwdTestGuard {
     }
 }
 
-/// Provider API key env vars that `Config::load()` (via `dotenvy::dotenv()`)
-/// loads into the process env regardless of which config file path is used --
-/// so redirecting the config path alone isn't enough; these must be cleared
-/// too by [`config_isolation_vars`].
+/// The variables a config load reads provider settings from, whichever file
+/// it is pointed at: redirecting the config path alone is not isolation, so
+/// [`config_isolation_vars`] clears these too. The runtime's own list of what
+/// its fill reads, so a provider added there is cleared here.
 #[cfg(test)]
-const PROVIDER_KEY_ENV_VARS: &[&str] = &[
-    "ANTHROPIC_API_KEY",
-    "OPENAI_API_KEY",
-    "GOOGLE_API_KEY",
-    "OPENROUTER_API_KEY",
-    "MESHY_API_KEY",
-    "AWS_BEARER_TOKEN_BEDROCK",
-    // Not keys, but read the same way: a developer with a region exported
-    // would otherwise see it in a config the test expects blank.
-    "AWS_REGION",
-    "AWS_DEFAULT_REGION",
-    "BEDROCK_BASE_URL",
-];
+pub(crate) fn provider_env_vars() -> Vec<&'static str> {
+    leviath_runtime::user_creds::env_names()
+}
 
 /// Create a fresh, empty temp directory to stand in for the config directory.
 #[cfg(test)]
@@ -1139,7 +1085,7 @@ pub(crate) fn config_isolation_vars(
         ("LEVIATH_SKIP_DOTENV", Some(std::ffi::OsString::from("1"))),
         ("LEVIATH_LOAD_DOTENV", None),
     ];
-    for &key in PROVIDER_KEY_ENV_VARS {
+    for key in provider_env_vars() {
         vars.push((key, None));
     }
     vars
@@ -2762,10 +2708,9 @@ meshy_base_url = "https://gw/from-file"
         // the env lookup) arm. `temp_env::with_vars` clears these process-global
         // env vars for the closure (and serializes against every other temp-env
         // test), so no concurrently-running test can be mid-set when we read.
-        let unset: Vec<(&str, Option<&str>)> = PROVIDER_KEY_ENV_VARS
-            .iter()
-            .chain(["OLLAMA_HOST"].iter())
-            .map(|&key| (key, None))
+        let unset: Vec<(&str, Option<&str>)> = provider_env_vars()
+            .into_iter()
+            .map(|key| (key, None))
             .collect();
         temp_env::with_vars(unset, || {
             let dir = tempfile::tempdir().unwrap();

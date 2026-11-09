@@ -170,6 +170,26 @@ pub(super) fn slots(provider: &str) -> &'static Slots {
         .expect("every keyed provider has its fields in UserSettings")
 }
 
+/// The variables that stand in for Bedrock's region, in the order they are
+/// asked: the two AWS's own tooling reads.
+const REGION_ENV: [&str; 2] = ["AWS_REGION", "AWS_DEFAULT_REGION"];
+/// The variable that stands in for Ollama's address, the one Ollama reads.
+const OLLAMA_ENV: &str = "OLLAMA_HOST";
+
+/// Every environment variable [`UserSettings::fill_from_env`] reads: each
+/// keyed provider's key and host, Bedrock's region, and Ollama's address.
+///
+/// For a host that wants to show which variables count, and for a test that
+/// has to keep the machine's own out of a load.
+pub fn env_names() -> Vec<&'static str> {
+    super::KEYED_PROVIDERS
+        .iter()
+        .flat_map(|keyed| std::iter::once(keyed.key_env).chain(keyed.base_url_env))
+        .chain(REGION_ENV)
+        .chain([OLLAMA_ENV])
+        .collect()
+}
+
 impl UserSettings {
     /// Fill what the file left unset from the environment: each key from its
     /// variable, each host from its own,
@@ -211,13 +231,14 @@ impl UserSettings {
         }
         // Blank is unset: an exported empty variable is not a region.
         if self.providers.bedrock_region.is_none() {
-            self.providers.bedrock_region = env("AWS_REGION")
-                .or_else(|| env("AWS_DEFAULT_REGION"))
+            self.providers.bedrock_region = REGION_ENV
+                .into_iter()
+                .find_map(env)
                 .map(|r| r.trim().to_string())
                 .filter(|r| !r.is_empty());
         }
         if self.ollama_base_url.is_none() {
-            self.ollama_base_url = env("OLLAMA_HOST");
+            self.ollama_base_url = env(OLLAMA_ENV);
         }
     }
 

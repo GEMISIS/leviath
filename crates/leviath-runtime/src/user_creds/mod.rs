@@ -47,7 +47,7 @@ pub use creds::{provider_creds, signin_options};
 pub use defaults::{model_defaults, retention_settings};
 pub use model_provider::{ModelProviderConfig, ModelProviderKind};
 pub use provider_config::ProviderConfig;
-pub use settings::{SecuritySettings, UserSettings};
+pub use settings::{SecuritySettings, UserSettings, env_names};
 
 use crate::pipeline::ModelDefaults;
 use crate::provider_creds::ProviderCreds;

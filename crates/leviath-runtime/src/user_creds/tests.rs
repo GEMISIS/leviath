@@ -913,3 +913,39 @@ fn a_model_provider_entry_that_cannot_work_is_an_error() {
     let e = load_user_creds(&bare(dir.path())).unwrap_err();
     assert!(matches!(e, UserCredsError::Parse { .. }), "{e:?}");
 }
+
+/// [`env_names`] is every variable the fill asks for and no other, so a host
+/// that lists them, or a test that clears them, covers exactly what counts.
+#[test]
+fn env_names_are_the_variables_the_fill_reads() {
+    let asked = std::sync::Mutex::new(Vec::new());
+    let recording = |name: &str| {
+        asked.lock().unwrap().push(name.to_string());
+        None
+    };
+    UserSettings::default().fill_from_env(&recording, &mut BTreeMap::new(), &mut Vec::new());
+    let mut asked = asked.into_inner().unwrap();
+    asked.sort_unstable();
+    let mut names = env_names();
+    names.sort_unstable();
+    assert_eq!(asked, names);
+    assert!(names.contains(&"AWS_DEFAULT_REGION") && names.contains(&"OLLAMA_HOST"));
+}
+
+/// `AWS_REGION` is asked before `AWS_DEFAULT_REGION`, as AWS's tooling does.
+#[test]
+fn the_region_comes_from_aws_region_first() {
+    let mut settings = UserSettings::default();
+    settings.fill_from_env(
+        &env_of(&[
+            ("AWS_REGION", "us-west-2"),
+            ("AWS_DEFAULT_REGION", "eu-west-1"),
+        ]),
+        &mut BTreeMap::new(),
+        &mut Vec::new(),
+    );
+    assert_eq!(
+        settings.providers.bedrock_region.as_deref(),
+        Some("us-west-2")
+    );
+}

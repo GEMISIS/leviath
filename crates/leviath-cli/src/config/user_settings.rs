@@ -8,6 +8,7 @@
 
 use super::Config;
 use leviath_runtime::user_creds::{SecuritySettings, UserSettings};
+use std::collections::BTreeMap;
 
 impl Config {
     /// The provider settings in this config, as the runtime reads them.
@@ -30,6 +31,43 @@ impl Config {
                 credential_store: self.security.credential_store,
             },
         }
+    }
+}
+
+impl Config {
+    /// Fill every provider setting the file left unset from `env`: each key
+    /// and each host from its variable, Bedrock's region from AWS's, and
+    /// Ollama's address from `OLLAMA_HOST`. A value in the file wins, a blank
+    /// one included.
+    ///
+    /// A key variable that is set but empty leaves its provider
+    /// unregistered. That is common where a pipeline exports every secret it
+    /// might have, so it is said at debug level rather than on every command.
+    pub(super) fn fill_from_env(&mut self, env: &dyn Fn(&str) -> Option<String>) {
+        let mut settings = self.user_settings();
+        let mut notes = Vec::new();
+        settings.fill_from_env(env, &mut BTreeMap::new(), &mut notes);
+        for note in &notes {
+            tracing::debug!("{note}");
+        }
+        self.adopt_filled(settings);
+    }
+
+    /// Fill each provider key still unset from `store`, reading only those
+    /// keys' accounts.
+    pub(super) fn fill_keys_from_store(&mut self, store: &dyn leviath_core::CredentialStore) {
+        let mut settings = self.user_settings();
+        let missing = settings.missing_keys();
+        settings.fill_from_store(store, &missing, &mut BTreeMap::new());
+        self.adopt_filled(settings);
+    }
+
+    /// Take back the three places a fill writes: the one key and the one
+    /// address at the top of the file, and `[providers]`.
+    fn adopt_filled(&mut self, settings: UserSettings) {
+        self.openrouter_api_key = settings.openrouter_api_key;
+        self.ollama_base_url = settings.ollama_base_url;
+        self.providers = settings.providers;
     }
 }
 
