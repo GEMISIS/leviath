@@ -40,10 +40,11 @@ pub(crate) mod tests {
 
     #[test]
     fn fallback_order_parses_provider_slash_model_and_drops_junk() {
-        // The `tracing::warn!` on the reject path evaluates its field
-        // expressions only under a real subscriber.
+        // The warning for each rejected entry is formatted only under a real
+        // subscriber.
         crate::test_support::with_tracing(|| {
-            let parsed = parse_fallback_order(&[
+            let mut config = Config::default();
+            config.providers.fallback_order = vec![
                 // A model id containing a slash must survive intact, which is
                 // the common OpenRouter shape.
                 "openrouter/deepseek/deepseek-v4-flash".to_string(),
@@ -53,7 +54,8 @@ pub(crate) mod tests {
                 "/no-provider".to_string(),
                 "no-model/".to_string(),
                 String::new(),
-            ]);
+            ];
+            let parsed = model_defaults(&config).fallback_order;
             assert_eq!(
                 parsed
                     .iter()

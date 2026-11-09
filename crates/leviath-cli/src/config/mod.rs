@@ -27,6 +27,10 @@ pub(crate) use nudge::NudgeSettings;
 // credential store the user chose.
 mod secrets;
 pub(crate) use secrets::{PROVIDER_KEYS, ProviderKey};
+// The provider settings in the form the runtime builds providers from, and
+// the fills that put the environment's and the credential store's values in.
+mod user_settings;
+pub(crate) use user_settings::log_warnings;
 // `[tool_credentials]`: the secrets script tools read by name, kept in the
 // same credential store as the provider keys.
 pub(crate) mod tool_credentials;

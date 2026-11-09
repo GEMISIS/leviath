@@ -6,369 +6,41 @@
 use crate::config::Config;
 use leviath_runtime::ProviderRegistry;
 
-// `ProviderCreds` + `build_provider_registry(&[ProviderCreds])` live in
-// `leviath-runtime` (plain data + provider instantiation, no `Config`
-// dependency). Re-exported here so `commands::run`'s public re-export and all
-// existing call sites keep resolving. The `Config`-based translators
-// (`provider_creds_from_config` / `build_provider_registry_from_config`) stay
-// below because they need the CLI's `Config`.
+// `ProviderCreds`, `build_provider_registry(&[ProviderCreds])` and the code
+// that turns provider settings into that list live in `leviath-runtime`, which
+// a host embedding the runtime calls too. Re-exported here so `commands::run`'s
+// public re-export and every call site keep resolving.
 pub(crate) use leviath_runtime::provider_creds::ProviderCreds;
-
-/// The `options` spelling of a cache TTL, matching what the config accepts.
-///
-/// The map is `String -> String`, so the enum has to be named somehow; using
-/// the same spelling the TOML uses keeps one vocabulary rather than two.
-fn cache_ttl_key(ttl: leviath_providers::anthropic::CacheTtl) -> &'static str {
-    match ttl {
-        leviath_providers::anthropic::CacheTtl::Ephemeral5m => "5m",
-        leviath_providers::anthropic::CacheTtl::Ephemeral1h => "1h",
-    }
-}
 
 /// Build the list of [`ProviderCreds`] a [`Config`] implies.
 ///
-/// Every provider here is opt-in: an API-key one when its key is configured,
-/// `codex` when it is enabled, and `ollama` when it was
-/// chosen or given an address. This is the sole point that reads provider
-/// settings out of `Config`.
+/// The runtime's [`provider_creds`](leviath_runtime::user_creds::provider_creds)
+/// over this config's provider settings: each API-keyed provider with a key,
+/// Ollama when it was chosen or given an address, each `[model_providers]`
+/// endpoint, and the sign-in transports that are enabled. Script providers are
+/// not in the list: they are attached to the registry as a layer, below.
 pub(crate) fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> {
-    let caps = &config.model_capabilities;
-    let timeout = config.request_timeout_secs;
-    let mut creds = Vec::new();
-
-    // The third column is the host this provider is reached on, when it is not
-    // the vendor's own. Per provider, because a gateway usually fronts one
-    // family and pointing the others at it would break them.
-    // The fourth is the extra headers that host wants on every request: a
-    // gateway's own token, a tenant tag. Per provider for the same reason.
-    let keyed = [
-        (
-            "anthropic",
-            config.providers.anthropic_api_key.as_deref(),
-            config.providers.anthropic_base_url.as_deref(),
-            &config.providers.anthropic_headers,
-        ),
-        (
-            "openai",
-            config.providers.openai_api_key.as_deref(),
-            config.providers.openai_base_url.as_deref(),
-            &config.providers.openai_headers,
-        ),
-        (
-            "google",
-            config.providers.google_api_key.as_deref(),
-            config.providers.google_base_url.as_deref(),
-            &config.providers.google_headers,
-        ),
-        (
-            "openrouter",
-            config.openrouter_api_key.as_deref(),
-            config.providers.openrouter_base_url.as_deref(),
-            &config.providers.openrouter_headers,
-        ),
-        (
-            "meshy",
-            config.providers.meshy_api_key.as_deref(),
-            config.providers.meshy_base_url.as_deref(),
-            &config.providers.meshy_headers,
-        ),
-        (
-            leviath_providers::bedrock::PROVIDER_NAME,
-            config.providers.bedrock_api_key.as_deref(),
-            config.providers.bedrock_base_url.as_deref(),
-            &config.providers.bedrock_headers,
-        ),
-        (
-            leviath_providers::xai::PROVIDER_NAME,
-            config.providers.xai_api_key.as_deref(),
-            config.providers.xai_base_url.as_deref(),
-            &config.providers.xai_headers,
-        ),
-        (
-            leviath_providers::meta::PROVIDER_NAME,
-            config.providers.meta_api_key.as_deref(),
-            config.providers.meta_base_url.as_deref(),
-            &config.providers.meta_headers,
-        ),
-    ];
-    for (name, key, base_url, headers) in keyed {
-        // A blank key is not a key: `lev setup` writes empty strings for
-        // providers the user skipped, and registering one produces a provider
-        // that authenticates as nobody and fails at the first call.
-        if let Some(key) = key.map(str::trim).filter(|k| !k.is_empty()) {
-            // The options map rather than a named field, for the reason it
-            // exists: one provider's settings should not accrete onto every
-            // provider's struct.
-            let mut options = std::collections::HashMap::new();
-            if name == "anthropic"
-                && let Some(ttl) = config.providers.anthropic_cache_ttl
-            {
-                options.insert("cache_ttl".to_string(), cache_ttl_key(ttl).to_string());
-            }
-            // Only when set: the provider applies its own default otherwise,
-            // and not writing it keeps a config that says nothing comparing
-            // equal to itself on reload.
-            if name == leviath_providers::bedrock::PROVIDER_NAME
-                && let Some(region) = config
-                    .providers
-                    .bedrock_region
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|r| !r.is_empty())
-            {
-                options.insert("region".to_string(), region.to_string());
-            }
-            creds.push(
-                ProviderCreds {
-                    name: name.to_string(),
-                    api_key: Some(key.to_string()),
-                    // Blank is not a URL, for the same reason blank is not a key:
-                    // `lev setup` writes empty strings for what the user skipped.
-                    base_url: base_url
-                        .map(str::trim)
-                        .filter(|u| !u.is_empty())
-                        .map(str::to_string),
-                    model_capabilities: caps.clone(),
-                    request_timeout_secs: timeout,
-                    rate_limit: config.rate_limits.get(name).cloned(),
-                    options,
-                }
-                .with_headers(
-                    headers
-                        .iter()
-                        .map(|(header, value)| (header.clone(), value.clone()))
-                        .collect(),
-                ),
-            );
-        }
-    }
-
-    // Ollama is opt-in like every other provider, by the switch `lev setup`
-    // writes or by naming an address (an install that configured it before
-    // the switch existed has the address). Needing no key and answering on a
-    // well-known local port is not a reason to register it unasked: that
-    // makes a bare model name in a blueprint resolvable against whatever
-    // happens to be running locally, a place a run should end up only when
-    // the user chose it.
-    if config.providers.ollama_enabled || config.ollama_base_url.is_some() {
-        creds.push(ProviderCreds {
-            name: "ollama".to_string(),
-            api_key: None,
-            base_url: Some(
-                config
-                    .ollama_base_url
-                    .as_deref()
-                    .unwrap_or("http://localhost:11434")
-                    .to_string(),
-            ),
-            model_capabilities: caps.clone(),
-            request_timeout_secs: timeout,
-            rate_limit: config.rate_limits.get("ollama").cloned(),
-            options: std::collections::HashMap::new(),
-        });
-    }
-
-    // Every `[model_providers.<name>]` entry that is an endpoint rather than a
-    // script. Registered natively, under its own name, so it needs no `.rhai`
-    // on disk and answers `lev models list` like the built-ins do. The script
-    // layer below never sees these: `script_provider_config` filters them.
-    let mut endpoints: Vec<(&String, &crate::config::ModelProviderConfig)> = config
-        .model_providers
-        .iter()
-        .filter(|(_, mp)| mp.is_endpoint())
-        .collect();
-    // Name order, so the registry is built the same way from one config
-    // whatever the map's iteration order was.
-    endpoints.sort_by(|a, b| a.0.cmp(b.0));
-    for (name, mp) in endpoints {
-        // Validated at load, so an endpoint without an address is not a
-        // config this function is handed; one built by hand is skipped rather
-        // than registered pointing nowhere.
-        let Some(base_url) = mp
-            .base_url
-            .as_deref()
-            .map(str::trim)
-            .filter(|u| !u.is_empty())
-        else {
-            continue;
-        };
-        let api_key = mp
-            .api_key
-            .as_deref()
-            .map(str::trim)
-            .filter(|k| !k.is_empty())
-            .map(str::to_string);
-        let mut cred = match (mp.is_openai(), api_key) {
-            // OpenAI's own API at a host of its own. A deployment name does
-            // not look like an OpenAI model id, so `models` routes here the
-            // way `serves` does.
-            (true, Some(key)) => ProviderCreds::openai_host(
-                name.clone(),
-                base_url,
-                key,
-                mp.header_pairs(),
-                mp.serves
-                    .iter()
-                    .flatten()
-                    .chain(mp.models.iter().flatten())
-                    .cloned()
-                    .collect(),
-            ),
-            // Refused at load; one built by hand is skipped rather than
-            // registered with nothing to authenticate with.
-            (true, None) => continue,
-            (false, api_key) => ProviderCreds::openai_compatible(
-                name.clone(),
-                base_url,
-                api_key,
-                mp.header_pairs(),
-                mp.models.clone(),
-                mp.serves.clone().unwrap_or_default(),
-            ),
-        }
-        .with_auth_header(mp.auth_header());
-        cred.model_capabilities = caps.clone();
-        cred.request_timeout_secs = timeout;
-        cred.rate_limit = mp.rate_limit.clone();
-        creds.push(cred);
-    }
-
-    // Codex needs no API key either: its credential is a browser sign-in whose
-    // grant lives outside the config entirely, so `api_key` stays `None` and
-    // the provider reads the grant itself. Opt-in because registering it
-    // without a sign-in would put a provider in the registry that cannot
-    // answer, and because selecting it changes what gets billed.
-    // Skipped rather than registered without one: the runtime has no business
-    // guessing where Leviath's files live, so the path is supplied here or the
-    // provider is not offered at all.
-    if config.providers.codex_enabled {
-        let options = codex_options(config);
-        creds.push(ProviderCreds {
-            name: leviath_providers::codex::PROVIDER_NAME.to_string(),
-            api_key: None,
-            base_url: None,
-            model_capabilities: caps.clone(),
-            // HTTP like the keyed providers, so the host-wide request
-            // timeout applies.
-            request_timeout_secs: config.request_timeout_secs,
-            rate_limit: config
-                .rate_limits
-                .get(leviath_providers::codex::PROVIDER_NAME)
-                .cloned(),
-            options,
-        });
-    }
-
-    // Grok billed to a subscription: the xAI API over a browser sign-in, so it
-    // takes xAI's host and headers, and the grant location a run reads.
-    if config.providers.grok_enabled {
-        creds.push(
-            ProviderCreds {
-                name: leviath_providers::grok::PROVIDER_NAME.to_string(),
-                api_key: None,
-                base_url: config
-                    .providers
-                    .xai_base_url
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|u| !u.is_empty())
-                    .map(str::to_string),
-                model_capabilities: caps.clone(),
-                request_timeout_secs: config.request_timeout_secs,
-                rate_limit: config
-                    .rate_limits
-                    .get(leviath_providers::grok::PROVIDER_NAME)
-                    .cloned(),
-                options: grok_options(config),
-            }
-            .with_headers(
-                config
-                    .providers
-                    .xai_headers
-                    .iter()
-                    .map(|(header, value)| (header.clone(), value.clone()))
-                    .collect(),
-            ),
-        );
-    }
-
-    creds
+    leviath_runtime::user_creds::provider_creds(
+        &config.user_settings(),
+        leviath_providers::oauth::ProviderAuthStore::default_path().as_deref(),
+    )
 }
 
 /// The `options` a browser sign-in provider's [`ProviderCreds`] carries, by
 /// provider id: Codex's own, Grok's, or none for anything else.
 ///
-/// Shared with `lev setup` and `lev serve`, whose credential checks have to
-/// build the provider the same way a run does.
+/// For `lev setup` and `lev serve`, whose credential checks have to build the
+/// provider the same way a run does: it reads the grant from disk, so a check
+/// that pointed somewhere else would be checking a sign-in no run would use.
 pub(crate) fn signin_options(
     config: &Config,
     id: &str,
 ) -> std::collections::HashMap<String, String> {
-    match id {
-        "codex" => codex_options(config),
-        "grok" => grok_options(config),
-        _ => std::collections::HashMap::new(),
-    }
-}
-
-/// What every sign-in provider's options carry: where the grant is, and
-/// whether it is in the OS credential store.
-fn grant_options(config: &Config) -> std::collections::HashMap<String, String> {
-    let mut options = std::collections::HashMap::new();
-    // Extended from an `Option` rather than branched on: with no home
-    // there is no path, the option is simply absent, and the registry
-    // skips the provider - which it is tested to do.
-    options.extend(
-        leviath_providers::oauth::ProviderAuthStore::default_path()
-            .map(|path| ("auth_store_path".to_string(), path.display().to_string())),
-    );
-    // The runtime has no view of `[security]`, and a grant only the CLI
-    // could read would leave the keychain backend silently signing the
-    // daemon out.
-    if config.security.credential_store == leviath_core::CredentialStoreKind::Keychain {
-        options.insert("credential_store".to_string(), "keychain".to_string());
-    }
-    options
-}
-
-/// The `options` a Grok [`ProviderCreds`] carries.
-fn grok_options(config: &Config) -> std::collections::HashMap<String, String> {
-    grant_options(config)
-}
-
-/// The `options` a Codex [`ProviderCreds`] carries.
-///
-/// Shared with `lev setup`, whose credential check has to build the provider
-/// the same way this does. It reads the grant from disk, so a wizard that
-/// pointed somewhere else would be checking a sign-in no run would ever use.
-pub(crate) fn codex_options(config: &Config) -> std::collections::HashMap<String, String> {
-    let mut options = grant_options(config);
-    options.extend(
-        config
-            .providers
-            .codex_originator
-            .clone()
-            .map(|v| ("originator".to_string(), v)),
-    );
-    options.extend(
-        config
-            .providers
-            .codex_reasoning_effort
-            .clone()
-            .map(|v| ("effort".to_string(), v)),
-    );
-    options.extend(
-        config
-            .providers
-            .codex_verbosity
-            .clone()
-            .map(|v| ("verbosity".to_string(), v)),
-    );
-    options.insert(
-        "replay_reasoning".to_string(),
-        config.providers.codex_replay_reasoning.to_string(),
-    );
-    options
+    leviath_runtime::user_creds::signin_options(
+        &config.user_settings(),
+        leviath_providers::oauth::ProviderAuthStore::default_path().as_deref(),
+        id,
+    )
 }
 
 /// Convenience wrapper: build a [`ProviderRegistry`] straight from a [`Config`].
@@ -431,57 +103,15 @@ pub(crate) fn build_provider_registry_from_config_probing(
 /// The data retention settings `config.toml` carries, in the registry's
 /// form: the request for zero retention, the declared agreements, and the
 /// `retention` keys on `[model_capabilities]` and `[model_providers]`
-/// entries. A `[model_providers]` entry spells it as any other key (they are
-/// forwarded to a script verbatim), so a word that is not a retention is
-/// warned about and ignored rather than failing the load.
+/// entries. A word that is not a retention is warned about and ignored.
 pub(crate) fn retention_settings(
     config: &Config,
 ) -> leviath_providers::retention::RetentionSettings {
-    let provider_declarations = config
-        .model_providers
-        .iter()
-        .filter_map(|(name, entry)| {
-            let word = entry.extra.get("retention")?.as_str()?;
-            match leviath_providers::retention::Retention::parse(word) {
-                Ok(retention) => Some((name.clone(), retention)),
-                Err(e) => {
-                    tracing::warn!(provider = %name, "ignoring [model_providers] retention: {e}");
-                    None
-                }
-            }
-        })
-        .collect();
-    // Which built-in's per-request fields an endpoint takes. Only names the
-    // table has fields for mean anything; another is a typo, said once.
-    let request_knob_aliases = config
-        .model_providers
-        .iter()
-        .filter_map(|(name, entry)| {
-            let target = entry.extra.get("zero_retention_request")?.as_str()?;
-            if leviath_providers::retention::request_knobs(target).is_none() {
-                tracing::warn!(
-                    provider = %name,
-                    "ignoring [model_providers] zero_retention_request = \"{target}\": no \
-                     built-in provider of that name takes a per-request field (openai, \
-                     openrouter)"
-                );
-                return None;
-            }
-            Some((name.clone(), target.to_string()))
-        })
-        .collect();
-    leviath_providers::retention::RetentionSettings {
-        zero_requested: config.providers.zero_retention,
-        agreements: config.providers.zero_retention_agreements.clone(),
-        model_overrides: config
-            .model_capabilities
-            .iter()
-            .filter_map(|(model, caps)| caps.retention.map(|r| (model.clone(), r)))
-            .collect(),
-        provider_declarations,
-        request_knob_aliases,
-        file_uploads: config.providers.file_uploads,
-    }
+    let mut warnings = Vec::new();
+    let retention =
+        leviath_runtime::user_creds::retention_settings(&config.user_settings(), &mut warnings);
+    crate::config::log_warnings(&warnings);
+    retention
 }
 
 /// [`build_provider_registry_from_config_with`], with the script-provider
@@ -1642,7 +1272,3 @@ mod tests {
         });
     }
 }
-
-#[cfg(test)]
-#[path = "user_creds_parity_tests.rs"]
-mod user_creds_parity_tests;
