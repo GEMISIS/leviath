@@ -62,14 +62,15 @@ impl ScalarType for BigInt {
     }
 }
 
-/// An exact decimal. The schema description is on the impl below.
+/// A decimal figure. The schema description is on the impl below.
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub(crate) struct Decimal(pub(crate) f64);
 
-/// An exact decimal, serialized as a JSON string. Money is never a `Float` on
+/// A decimal figure, serialized as a JSON string. Money is never a `Float` on
 /// the wire: a cost figure that a JSON parser silently re-rounds is a lie
-/// about spend. The daemon keeps costs as `f64`, so this carries that number's
-/// shortest round-tripping form rather than inventing precision.
+/// about spend. The daemon keeps costs as `f64`, so this is that number's
+/// shortest round-tripping form: exactly what the daemon holds, and no more
+/// precise than a double is.
 #[Scalar(name = "Decimal")]
 impl ScalarType for Decimal {
     /// Read one from the string it travels as.

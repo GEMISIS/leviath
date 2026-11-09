@@ -763,7 +763,7 @@ impl Blueprint {
         #[graphql(desc = "Sort keys, in priority order. Omitted means name ascending.")]
         order_by: Option<Vec<super::catalog::ToolOrder>>,
         #[graphql(
-            desc = "Page size; capped by the server's page-size cap.",
+            desc = "Page size, at most 500. A larger one is refused, not cut down.",
             default = 50
         )]
         first: i32,
@@ -799,7 +799,7 @@ impl Blueprint {
         #[graphql(desc = "Sort keys, in priority order. Omitted means id ascending.")]
         order_by: Option<Vec<super::machine::ScriptOrder>>,
         #[graphql(
-            desc = "Page size; capped by the server's page-size cap.",
+            desc = "Page size, at most 200. A larger one is refused, not cut down.",
             default = 50
         )]
         first: i32,

@@ -144,7 +144,12 @@ impl Run {
         Timestamp(self.meta.started_at)
     }
 
-    /// Last state change, unix epoch seconds.
+    /// When the run's record was last written, unix epoch seconds.
+    ///
+    /// Not when the run last changed: the daemon rewrites the record of a run
+    /// it holds every 30 seconds, so this stays fresh on a run that is stuck.
+    /// It says the daemon is alive and nothing about the run. Read
+    /// `lastProgressAt` for when the run last moved.
     #[filter(orderable)]
     async fn updated_at(&self) -> Timestamp {
         Timestamp(self.meta.updated_at)
@@ -337,7 +342,7 @@ impl Run {
         #[graphql(desc = "Sort keys, in priority order. Omitted means declared order.")]
         order_by: Option<Vec<StageRecordOrder>>,
         #[graphql(
-            desc = "Page size; capped by the server's page-size cap.",
+            desc = "Page size, at most 200. A larger one is refused, not cut down.",
             default = 50
         )]
         first: i32,
@@ -408,7 +413,7 @@ impl Run {
         #[graphql(desc = "Sort keys, in priority order. Omitted means newest first.")]
         order_by: Option<Vec<RunOrder>>,
         #[graphql(
-            desc = "Page size; capped by the server's page-size cap.",
+            desc = "Page size, at most 200. A larger one is refused, not cut down.",
             default = 50
         )]
         first: i32,
@@ -505,7 +510,7 @@ impl Run {
         #[graphql(desc = "Sort keys, in priority order. Omitted means declared order.")]
         order_by: Option<Vec<BlobEntryOrder>>,
         #[graphql(
-            desc = "Page size; capped by the server's page-size cap.",
+            desc = "Page size, at most 200. A larger one is refused, not cut down.",
             default = 50
         )]
         first: i32,
@@ -557,7 +562,7 @@ impl Run {
         #[graphql(desc = "Sort keys, in priority order. Omitted means declared order.")]
         order_by: Option<Vec<ArtifactOrder>>,
         #[graphql(
-            desc = "Page size; capped by the server's page-size cap.",
+            desc = "Page size, at most 200. A larger one is refused, not cut down.",
             default = 50
         )]
         first: i32,
@@ -693,7 +698,7 @@ impl Run {
             FileEntryFilter,
         >,
         #[graphql(
-            desc = "Page size; capped by the server's page-size cap.",
+            desc = "Page size, at most 1000. A larger one is refused, not cut down.",
             default = 50
         )]
         first: i32,
@@ -792,7 +797,7 @@ impl Run {
             Vec<super::execution::ToolExecutionOrder>,
         >,
         #[graphql(
-            desc = "Page size; capped by the server's page-size cap.",
+            desc = "Page size, at most 200. A larger one is refused, not cut down.",
             default = 50
         )]
         first: i32,
@@ -830,7 +835,7 @@ impl Run {
         #[graphql(desc = "Sort key and direction. Omitted means the order the run asked them.")]
         order_by: Option<Vec<InteractionOrder>>,
         #[graphql(
-            desc = "Page size; capped by the server's page-size cap.",
+            desc = "Page size, at most 200. A larger one is refused, not cut down.",
             default = 50
         )]
         first: i32,
@@ -861,7 +866,7 @@ impl Run {
         #[graphql(desc = "Sort key and direction. Omitted means the order they were made.")]
         order_by: Option<Vec<super::inference::InferenceAttemptOrder>>,
         #[graphql(
-            desc = "Page size; capped by the server's page-size cap.",
+            desc = "Page size, at most 200. A larger one is refused, not cut down.",
             default = 50
         )]
         first: i32,
@@ -896,7 +901,7 @@ impl Run {
         #[graphql(desc = "Sort key and direction. Omitted means the order they landed.")]
         order_by: Option<Vec<super::context_change::ContextChangeOrder>>,
         #[graphql(
-            desc = "Page size; capped by the server's page-size cap.",
+            desc = "Page size, at most 200. A larger one is refused, not cut down.",
             default = 50
         )]
         first: i32,
@@ -936,7 +941,7 @@ impl Run {
             Vec<ContextHistoryOrder>,
         >,
         #[graphql(
-            desc = "Page size; capped by the server's page-size cap.",
+            desc = "Page size, at most 100. A larger one is refused, not cut down.",
             default = 50
         )]
         first: i32,

@@ -1315,7 +1315,7 @@ type BlueprintOutput implements Node {
 		filter: ToolInput,
 		"Sort keys, in priority order. Omitted means name ascending."
 		orderBy: [ToolOrder!],
-		"Page size; capped by the server's page-size cap."
+		"Page size, at most 500. A larger one is refused, not cut down."
 		first: Int! = 50,
 		"Cursor from the previous page."
 		after: Cursor
@@ -1331,7 +1331,7 @@ type BlueprintOutput implements Node {
 		filter: ScriptInput,
 		"Sort keys, in priority order. Omitted means id ascending."
 		orderBy: [ScriptOrder!],
-		"Page size; capped by the server's page-size cap."
+		"Page size, at most 200. A larger one is refused, not cut down."
 		first: Int! = 50,
 		"Cursor from the previous page."
 		after: Cursor
@@ -3721,10 +3721,11 @@ type DaemonStatusOutput {
 }
 
 """
-An exact decimal, serialized as a JSON string. Money is never a `Float` on
+A decimal figure, serialized as a JSON string. Money is never a `Float` on
 the wire: a cost figure that a JSON parser silently re-rounds is a lie
-about spend. The daemon keeps costs as `f64`, so this carries that number's
-shortest round-tripping form rather than inventing precision.
+about spend. The daemon keeps costs as `f64`, so this is that number's
+shortest round-tripping form: exactly what the daemon holds, and no more
+precise than a double is.
 """
 scalar Decimal
 
@@ -7759,6 +7760,10 @@ input MimeRowInput {
 	Filter on `MimeRowOutput.check`.
 	
 	A script the bytes must pass before they are stored as this type.
+	
+	An empty string names no script: it lifts a check a broader row put on
+	the type. Null means the row says nothing about checks, which leaves a
+	broader row's check in place.
 	"""
 	check: StringFilter
 	"Every filter in this list has to hold."
@@ -7869,7 +7874,13 @@ type MimeRowOutput {
 	magic: String
 	"What a consumer that cannot take this type sees in the part's place."
 	standIn: String
-	"A script the bytes must pass before they are stored as this type."
+	"""
+	A script the bytes must pass before they are stored as this type.
+	
+	An empty string names no script: it lifts a check a broader row put on
+	the type. Null means the row says nothing about checks, which leaves a
+	broader row's check in place.
+	"""
 	check: String
 }
 
@@ -10156,7 +10167,7 @@ type Query {
 		filter: BlueprintInput,
 		"Sort keys, in priority order. Omitted means name ascending."
 		orderBy: [BlueprintOrder!],
-		"Page size; capped by the server's page-size cap."
+		"Page size, at most 200. A larger one is refused, not cut down."
 		first: Int! = 50,
 		"Cursor from the previous page."
 		after: Cursor
@@ -10203,7 +10214,7 @@ type Query {
 		filter: McpServerInput,
 		"Sort keys, in priority order. Omitted means name ascending."
 		orderBy: [McpServerOrder!],
-		"Page size; capped by the server's page-size cap."
+		"Page size, at most 200. A larger one is refused, not cut down."
 		first: Int! = 50,
 		"Cursor from the previous page."
 		after: Cursor
@@ -10234,7 +10245,7 @@ type Query {
 		filter: YoloProfileInput,
 		"Sort keys, in priority order. Omitted means name ascending."
 		orderBy: [YoloProfileOrder!],
-		"Page size; capped by the server's page-size cap."
+		"Page size, at most 200. A larger one is refused, not cut down."
 		first: Int! = 50,
 		"Cursor from the previous page."
 		after: Cursor
@@ -10261,7 +10272,7 @@ type Query {
 		filter: MimeRowInput,
 		"Sort keys, in priority order. Omitted means mime type ascending."
 		orderBy: [MimeRowOrder!],
-		"Page size; capped by the server's page-size cap."
+		"Page size, at most 200. A larger one is refused, not cut down."
 		first: Int! = 50,
 		"Cursor from the previous page."
 		after: Cursor
@@ -10278,7 +10289,7 @@ type Query {
 		filter: ScriptInput,
 		"Sort keys, in priority order. Omitted means id ascending."
 		orderBy: [ScriptOrder!],
-		"Page size; capped by the server's page-size cap."
+		"Page size, at most 200. A larger one is refused, not cut down."
 		first: Int! = 50,
 		"Cursor from the previous page."
 		after: Cursor
@@ -10321,7 +10332,7 @@ type Query {
 		filter: ModelInput,
 		"Sort keys, in priority order. Omitted means id ascending."
 		orderBy: [ModelOrder!],
-		"Page size; capped by the server's page-size cap."
+		"Page size, at most 500. A larger one is refused, not cut down."
 		first: Int! = 50,
 		"Cursor from the previous page."
 		after: Cursor
@@ -10351,7 +10362,7 @@ type Query {
 		filter: CatalogModelInput,
 		"Sort keys, in priority order. Omitted means provider, then model id, ascending."
 		orderBy: [CatalogModelOrder!],
-		"Page size; capped by the server's page-size cap."
+		"Page size, at most 500. A larger one is refused, not cut down."
 		first: Int! = 50,
 		"Cursor from the previous page."
 		after: Cursor
@@ -10374,7 +10385,7 @@ type Query {
 		filter: ProviderInput,
 		"Sort keys, in priority order. Omitted means name ascending."
 		orderBy: [ProviderOrder!],
-		"Page size; capped by the server's page-size cap."
+		"Page size, at most 500. A larger one is refused, not cut down."
 		first: Int! = 50,
 		"Cursor from the previous page."
 		after: Cursor
@@ -10404,7 +10415,7 @@ type Query {
 		filter: ToolInput,
 		"Sort keys, in priority order. Omitted means name ascending."
 		orderBy: [ToolOrder!],
-		"Page size; capped by the server's page-size cap."
+		"Page size, at most 500. A larger one is refused, not cut down."
 		first: Int! = 50,
 		"Cursor from the previous page."
 		after: Cursor
@@ -10502,7 +10513,7 @@ type Query {
 		filter: UpdateJobInput,
 		"Sort keys, in priority order. Omitted means id ascending."
 		orderBy: [UpdateJobOrder!],
-		"Page size; capped by the server's page-size cap."
+		"Page size, at most 200. A larger one is refused, not cut down."
 		first: Int! = 50,
 		"Cursor from the previous page."
 		after: Cursor
@@ -10531,7 +10542,7 @@ type Query {
 		filter: InteractionInput,
 		"Sort key and direction. Omitted means the order they were read."
 		orderBy: [InteractionOrder!],
-		"Page size; capped by the server's page-size cap."
+		"Page size, at most 200. A larger one is refused, not cut down."
 		first: Int! = 50,
 		"Cursor from the previous page."
 		after: Cursor
@@ -10552,7 +10563,7 @@ type Query {
 		filter: InteractionInput,
 		"Sort key and direction. Omitted means the order they were read."
 		orderBy: [InteractionOrder!],
-		"Page size; capped by the server's page-size cap."
+		"Page size, at most 200. A larger one is refused, not cut down."
 		first: Int! = 50,
 		"Cursor from the previous page."
 		after: Cursor
@@ -10578,7 +10589,7 @@ type Query {
 		search: RunSearchOptions,
 		"Sort keys, in priority order. Omitted means newest first."
 		orderBy: [RunOrder!],
-		"Page size; capped by the server's page-size limit."
+		"Page size, at most 200. A larger one is refused, not cut down."
 		first: Int! = 50,
 		"Cursor from the previous page."
 		after: Cursor
@@ -12565,7 +12576,12 @@ input RunInput {
 	"""
 	Filter on `RunOutput.updatedAt`.
 	
-	Last state change, unix epoch seconds.
+	When the run's record was last written, unix epoch seconds.
+	
+	Not when the run last changed: the daemon rewrites the record of a run
+	it holds every 30 seconds, so this stays fresh on a run that is stuck.
+	It says the daemon is alive and nothing about the run. Read
+	`lastProgressAt` for when the run last moved.
 	"""
 	updatedAt: TimestampFilter
 	"""
@@ -12858,7 +12874,14 @@ type RunOutput implements Node {
 	toolCallCount: Int!
 	"Unix epoch seconds, as the daemon stores it."
 	startedAt: Timestamp!
-	"Last state change, unix epoch seconds."
+	"""
+	When the run's record was last written, unix epoch seconds.
+	
+	Not when the run last changed: the daemon rewrites the record of a run
+	it holds every 30 seconds, so this stays fresh on a run that is stuck.
+	It says the daemon is alive and nothing about the run. Read
+	`lastProgressAt` for when the run last moved.
+	"""
 	updatedAt: Timestamp!
 	"When the run last actually moved. Age a wedged run against this."
 	lastProgressAt: Timestamp
@@ -12958,7 +12981,7 @@ type RunOutput implements Node {
 		filter: StageRecordInput,
 		"Sort keys, in priority order. Omitted means declared order."
 		orderBy: [StageRecordOrder!],
-		"Page size; capped by the server's page-size cap."
+		"Page size, at most 200. A larger one is refused, not cut down."
 		first: Int! = 50,
 		"Cursor from the previous page."
 		after: Cursor
@@ -12987,7 +13010,7 @@ type RunOutput implements Node {
 		filter: RunInput,
 		"Sort keys, in priority order. Omitted means newest first."
 		orderBy: [RunOrder!],
-		"Page size; capped by the server's page-size cap."
+		"Page size, at most 200. A larger one is refused, not cut down."
 		first: Int! = 50,
 		"Cursor from the previous page."
 		after: Cursor
@@ -13039,7 +13062,7 @@ type RunOutput implements Node {
 		filter: BlobEntryInput,
 		"Sort keys, in priority order. Omitted means declared order."
 		orderBy: [BlobEntryOrder!],
-		"Page size; capped by the server's page-size cap."
+		"Page size, at most 200. A larger one is refused, not cut down."
 		first: Int! = 50,
 		"Cursor from the previous page."
 		after: Cursor
@@ -13056,7 +13079,7 @@ type RunOutput implements Node {
 		filter: ArtifactInput,
 		"Sort keys, in priority order. Omitted means declared order."
 		orderBy: [ArtifactOrder!],
-		"Page size; capped by the server's page-size cap."
+		"Page size, at most 200. A larger one is refused, not cut down."
 		first: Int! = 50,
 		"Cursor from the previous page."
 		after: Cursor
@@ -13113,7 +13136,7 @@ type RunOutput implements Node {
 		source: FileSource! = MODIFIED,
 		"Which entries to include. Omitted means all of them."
 		filter: FileEntryInput,
-		"Page size; capped by the server's page-size cap."
+		"Page size, at most 1000. A larger one is refused, not cut down."
 		first: Int! = 50,
 		"Cursor from the previous page."
 		after: Cursor
@@ -13145,7 +13168,7 @@ type RunOutput implements Node {
 		filter: ToolExecutionInput,
 		"Sort key and direction. Omitted means dispatch order."
 		orderBy: [ToolExecutionOrder!],
-		"Page size; capped by the server's page-size cap."
+		"Page size, at most 200. A larger one is refused, not cut down."
 		first: Int! = 50,
 		"Cursor from the previous page."
 		after: Cursor
@@ -13174,7 +13197,7 @@ type RunOutput implements Node {
 		filter: InteractionInput,
 		"Sort key and direction. Omitted means the order the run asked them."
 		orderBy: [InteractionOrder!],
-		"Page size; capped by the server's page-size cap."
+		"Page size, at most 200. A larger one is refused, not cut down."
 		first: Int! = 50,
 		"Cursor from the previous page."
 		after: Cursor
@@ -13197,7 +13220,7 @@ type RunOutput implements Node {
 		filter: InferenceAttemptInput,
 		"Sort key and direction. Omitted means the order they were made."
 		orderBy: [InferenceAttemptOrder!],
-		"Page size; capped by the server's page-size cap."
+		"Page size, at most 200. A larger one is refused, not cut down."
 		first: Int! = 50,
 		"Cursor from the previous page."
 		after: Cursor
@@ -13225,7 +13248,7 @@ type RunOutput implements Node {
 		filter: ContextChangeInput,
 		"Sort key and direction. Omitted means the order they landed."
 		orderBy: [ContextChangeOrder!],
-		"Page size; capped by the server's page-size cap."
+		"Page size, at most 200. A larger one is refused, not cut down."
 		first: Int! = 50,
 		"Cursor from the previous page."
 		after: Cursor
@@ -13250,7 +13273,7 @@ type RunOutput implements Node {
 		filter: ContextSnapshotPointInput,
 		"Sort key and direction. Omitted means chronological."
 		orderBy: [ContextHistoryOrder!],
-		"Page size; capped by the server's page-size cap."
+		"Page size, at most 100. A larger one is refused, not cut down."
 		first: Int! = 50,
 		"Cursor from the previous page."
 		after: Cursor
@@ -15860,7 +15883,8 @@ input StageInput {
 	resolve at spawn.
 	
 	Names rather than tools: a blueprint may name a tool this machine does
-	not have, and resolving would drop it. Read `tools` for what is here.
+	not have, and resolving would drop it. Read `BlueprintOutput.tools` for
+	the tools this machine has for the blueprint.
 	"""
 	availableTools: StringListFilter
 	"""
@@ -16321,7 +16345,8 @@ type StageOutput {
 	resolve at spawn.
 	
 	Names rather than tools: a blueprint may name a tool this machine does
-	not have, and resolving would drop it. Read `tools` for what is here.
+	not have, and resolving would drop it. Read `BlueprintOutput.tools` for
+	the tools this machine has for the blueprint.
 	"""
 	availableTools: [String!]!
 	"""

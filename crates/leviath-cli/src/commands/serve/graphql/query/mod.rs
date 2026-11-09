@@ -111,7 +111,7 @@ impl Query {
         #[graphql(desc = "Sort keys, in priority order. Omitted means name ascending.")]
         order_by: Option<Vec<BlueprintOrder>>,
         #[graphql(
-            desc = "Page size; capped by the server's page-size cap.",
+            desc = "Page size, at most 200. A larger one is refused, not cut down.",
             default = 50
         )]
         first: i32,
@@ -169,7 +169,7 @@ impl Query {
         #[graphql(desc = "Sort keys, in priority order. Omitted means name ascending.")]
         order_by: Option<Vec<McpServerOrder>>,
         #[graphql(
-            desc = "Page size; capped by the server's page-size cap.",
+            desc = "Page size, at most 200. A larger one is refused, not cut down.",
             default = 50
         )]
         first: i32,
@@ -208,7 +208,7 @@ impl Query {
         #[graphql(desc = "Sort keys, in priority order. Omitted means name ascending.")]
         order_by: Option<Vec<YoloProfileOrder>>,
         #[graphql(
-            desc = "Page size; capped by the server's page-size cap.",
+            desc = "Page size, at most 200. A larger one is refused, not cut down.",
             default = 50
         )]
         first: i32,
@@ -243,7 +243,7 @@ impl Query {
         #[graphql(desc = "Sort keys, in priority order. Omitted means mime type ascending.")]
         order_by: Option<Vec<MimeRowOrder>>,
         #[graphql(
-            desc = "Page size; capped by the server's page-size cap.",
+            desc = "Page size, at most 200. A larger one is refused, not cut down.",
             default = 50
         )]
         first: i32,
@@ -267,7 +267,7 @@ impl Query {
         #[graphql(desc = "Sort keys, in priority order. Omitted means id ascending.")]
         order_by: Option<Vec<ScriptOrder>>,
         #[graphql(
-            desc = "Page size; capped by the server's page-size cap.",
+            desc = "Page size, at most 200. A larger one is refused, not cut down.",
             default = 50
         )]
         first: i32,
@@ -326,7 +326,7 @@ impl Query {
         #[graphql(desc = "Sort keys, in priority order. Omitted means id ascending.")]
         order_by: Option<Vec<ModelOrder>>,
         #[graphql(
-            desc = "Page size; capped by the server's page-size cap.",
+            desc = "Page size, at most 500. A larger one is refused, not cut down.",
             default = 50
         )]
         first: i32,
@@ -368,7 +368,7 @@ impl Query {
         )]
         order_by: Option<Vec<CatalogModelOrder>>,
         #[graphql(
-            desc = "Page size; capped by the server's page-size cap.",
+            desc = "Page size, at most 500. A larger one is refused, not cut down.",
             default = 50
         )]
         first: i32,
@@ -398,7 +398,7 @@ impl Query {
         #[graphql(desc = "Sort keys, in priority order. Omitted means name ascending.")]
         order_by: Option<Vec<ProviderOrder>>,
         #[graphql(
-            desc = "Page size; capped by the server's page-size cap.",
+            desc = "Page size, at most 500. A larger one is refused, not cut down.",
             default = 50
         )]
         first: i32,
@@ -437,7 +437,7 @@ impl Query {
         #[graphql(desc = "Sort keys, in priority order. Omitted means name ascending.")]
         order_by: Option<Vec<ToolOrder>>,
         #[graphql(
-            desc = "Page size; capped by the server's page-size cap.",
+            desc = "Page size, at most 500. A larger one is refused, not cut down.",
             default = 50
         )]
         first: i32,
@@ -552,7 +552,7 @@ impl Query {
         #[graphql(desc = "Sort keys, in priority order. Omitted means id ascending.")]
         order_by: Option<Vec<UpdateJobOrder>>,
         #[graphql(
-            desc = "Page size; capped by the server's page-size cap.",
+            desc = "Page size, at most 200. A larger one is refused, not cut down.",
             default = 50
         )]
         first: i32,
@@ -590,7 +590,7 @@ impl Query {
         #[graphql(desc = "Sort key and direction. Omitted means the order they were read.")]
         order_by: Option<Vec<super::types::interaction::InteractionOrder>>,
         #[graphql(
-            desc = "Page size; capped by the server's page-size cap.",
+            desc = "Page size, at most 200. A larger one is refused, not cut down.",
             default = 50
         )]
         first: i32,
@@ -617,7 +617,7 @@ impl Query {
         #[graphql(desc = "Sort key and direction. Omitted means the order they were read.")]
         order_by: Option<Vec<super::types::interaction::InteractionOrder>>,
         #[graphql(
-            desc = "Page size; capped by the server's page-size cap.",
+            desc = "Page size, at most 200. A larger one is refused, not cut down.",
             default = 50
         )]
         first: i32,
@@ -649,7 +649,7 @@ impl Query {
         #[graphql(desc = "Sort keys, in priority order. Omitted means newest first.")]
         order_by: Option<Vec<RunOrder>>,
         #[graphql(
-            desc = "Page size; capped by the server's page-size limit.",
+            desc = "Page size, at most 200. A larger one is refused, not cut down.",
             default = 50
         )]
         first: i32,
