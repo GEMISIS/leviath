@@ -15,6 +15,12 @@ same list.
 
 ### Fixed
 
+- Approving a compound shell command "for this run" covers the whole command for the rest of the
+  run. When part of the line already held a stage approval (say `node` in
+  `node --check app.js && npm test`), the run approval recorded only the rest, so the same line
+  asked again as soon as the run left the stage. The run option records, and its label names,
+  every command a run grant or the safe list does not cover: `Allow node, npm test for this run`.
+  The stage option still names only what nothing covers yet (#1095).
 - The Responses providers (`openai`, `meta`, `codex`, `xai`) no longer hide a refusal. Refusal text
   (`response.refusal.delta`, or a refusal content part) streams as ordinary text and the turn
   finishes as `Unknown("refusal")`; a `response.incomplete` with reason `content_filter` finishes as
@@ -227,6 +233,11 @@ same list.
 
 ### Changed
 
+- For embedders: `ToolVerdict::Ask.keys` and `InteractionRequest::tool_approval` take a
+  `leviath_core::interaction::GrantKeys`, which holds what a stage approval and a run approval
+  each record. A `ToolService::decide` whose answer does not depend on the scope passes
+  `GrantKeys::same(&keys)`. `ToolGrants::granted_for_run` says whether a key is granted for the
+  rest of the run, a stage grant not counting.
 - A model call whose availability trouble (a 5xx, a 429, "overloaded")
   outlives its retries moves to the next model in the stage's list, as an
   out-of-credits provider already did, rather than ending the stage. Each

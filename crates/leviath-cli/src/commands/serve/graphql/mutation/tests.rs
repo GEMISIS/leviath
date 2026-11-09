@@ -996,7 +996,7 @@ async fn an_option_word_answers_with_that_option() {
                     "bash",
                     serde_json::json!({}),
                     "s",
-                    &[],
+                    &leviath_core::interaction::GrantKeys::default(),
                 ),
             )],
         },

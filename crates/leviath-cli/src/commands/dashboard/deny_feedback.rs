@@ -95,7 +95,7 @@ mod tests {
                 "bash",
                 serde_json::json!({"command": "rm -rf build"}),
                 "main",
-                &["shell:rm".to_string()],
+                &leviath_core::interaction::GrantKeys::same(&["shell:rm".to_string()]),
             )),
             last_answered_request_id: None,
             context_snapshot: None,

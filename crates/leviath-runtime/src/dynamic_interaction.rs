@@ -1087,8 +1087,13 @@ mod tests {
     fn unattended_answer_approves_a_tool_approval() {
         // The tool-policy layer normally short-circuits these under --yolo, so
         // cover the arm directly.
-        let req =
-            InteractionRequest::tool_approval("t1", "shell", serde_json::json!({}), "impl", &[]);
+        let req = InteractionRequest::tool_approval(
+            "t1",
+            "shell",
+            serde_json::json!({}),
+            "impl",
+            &leviath_core::interaction::GrantKeys::default(),
+        );
         let resp = unattended_answer(&req);
         assert!(leviath_core::interaction::response_approved(&resp));
         assert_eq!(resp.scope, Some(ApprovalScope::Once));

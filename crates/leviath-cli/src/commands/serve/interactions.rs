@@ -550,7 +550,13 @@ mod tests {
     }
 
     fn approval() -> InteractionRequest {
-        InteractionRequest::tool_approval("ask-1", "bash", serde_json::json!({}), "s", &[])
+        InteractionRequest::tool_approval(
+            "ask-1",
+            "bash",
+            serde_json::json!({}),
+            "s",
+            &leviath_core::interaction::GrantKeys::default(),
+        )
     }
 
     /// Every kind with options answers to the word the listing gives it, and

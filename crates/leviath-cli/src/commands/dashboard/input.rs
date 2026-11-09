@@ -2946,7 +2946,7 @@ mod tests {
                 "bash",
                 serde_json::json!({"cmd": "ls"}),
                 "main",
-                &[],
+                &leviath_core::interaction::GrantKeys::default(),
             ),
         );
         agent.waiting_prompt = Some("Allow tool?".to_string());
@@ -2980,7 +2980,7 @@ mod tests {
                 "bash",
                 serde_json::json!({"cmd": "ls"}),
                 "main",
-                &[],
+                &leviath_core::interaction::GrantKeys::default(),
             ),
         );
         agent.waiting_prompt = Some("Allow tool?".to_string());
@@ -3181,7 +3181,7 @@ mod tests {
                     "bash",
                     serde_json::json!({"cmd": "ls"}),
                     "main",
-                    &["shell:ls".to_string()],
+                    &leviath_core::interaction::GrantKeys::same(&["shell:ls".to_string()]),
                 ),
             );
             agent.waiting_prompt = Some("Allow tool?".to_string());

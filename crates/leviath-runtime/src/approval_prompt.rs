@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use bevy_ecs::prelude::*;
-use leviath_core::interaction::{InteractionRequest, InteractionResponse};
+use leviath_core::interaction::{GrantKeys, InteractionRequest, InteractionResponse};
 use tokio::runtime::Handle;
 use tokio::sync::Notify;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -36,8 +36,8 @@ pub(crate) struct ApprovalAsk {
     pub call: leviath_providers::ToolCall,
     /// The stage it was made in, which the prompt names.
     pub stage: String,
-    /// What an approval for the stage or the run is remembered under.
-    pub keys: Vec<String>,
+    /// What an approval is remembered under, for the stage and for the run.
+    pub keys: GrantKeys,
 }
 
 /// A person's answer to an approval prompt, as they gave it.
@@ -175,8 +175,8 @@ pub fn lost_approval_result(tool: &str, why: &str) -> String {
 
 /// The tool result a declined approval gives the model.
 ///
-/// Without feedback it is the exact sentence it has always been (tests and
-/// docs quote it). With feedback the person's words follow a `Feedback:`
+/// Without feedback it is one fixed sentence, which tests and docs quote.
+/// With feedback the person's words follow a `Feedback:`
 /// marker on the same line, so the model reads the redirect as part of the
 /// refusal rather than as a stray user message somewhere later in the context.
 pub fn declined_result(tool: &str, feedback: Option<&str>) -> String {
@@ -234,7 +234,7 @@ pub(crate) fn collect_approvals(
         let decision = match response.approved {
             Some(true) => {
                 if let Some(mut grants) = grants {
-                    grants.grant(response.scope, &asked.keys);
+                    grants.grant(response.scope, asked.keys.for_scope(response.scope));
                 }
                 if let Some(mut ledger) = ledger {
                     ledger.written = ledger.written.saturating_add(asked.charge);
