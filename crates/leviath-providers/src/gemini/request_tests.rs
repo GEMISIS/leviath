@@ -335,3 +335,26 @@ fn calls_that_share_a_signature_are_behind_one_thought() {
     assert_eq!(steps[1]["signature"], "s1");
     assert_eq!(steps[2]["signature"], "s2");
 }
+
+/// A model asked to think is asked for its summaries too, unless the stage
+/// already said what it wants.
+#[test]
+fn a_thinking_level_asks_for_summaries_unless_the_stage_says() {
+    let mut req = request(vec![message("user", MessageContent::Text("hi".into()))]);
+    req.extra = json!({ "thinking_level": "high" });
+    assert_eq!(
+        build(&req, true)["generation_config"]["thinking_summaries"],
+        "auto"
+    );
+    req.extra = json!({ "thinking_level": "high", "thinking_summaries": "none" });
+    assert_eq!(
+        build(&req, true)["generation_config"]["thinking_summaries"],
+        "none"
+    );
+    req.extra = json!({});
+    assert!(
+        build(&req, true)["generation_config"]
+            .get("thinking_summaries")
+            .is_none()
+    );
+}

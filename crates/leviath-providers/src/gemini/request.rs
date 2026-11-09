@@ -139,6 +139,15 @@ fn merge_extra(body: &mut Map<String, Value>, generation: &mut Map<String, Value
             }
         }
     }
+    // A model asked to think also gets asked to say what it thought: the
+    // summaries are what an embedder shows as a thinking line, and they do not
+    // arrive unless requested. A stage that names `thinking_summaries` itself
+    // (`none` included) is not overridden.
+    if generation.contains_key("thinking_level") {
+        generation
+            .entry("thinking_summaries")
+            .or_insert(json!("auto"));
+    }
 }
 
 /// An assistant message's steps: the signed thoughts its calls came from, then

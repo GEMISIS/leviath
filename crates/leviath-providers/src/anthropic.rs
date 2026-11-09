@@ -3046,13 +3046,61 @@ mod tests {
         assert!(result.is_none());
     }
 
-    /// A block kind this build does not stream (a thinking block, say) is
-    /// skipped with a warning rather than in silence.
+    /// A thinking block streams its text as `thinking_delta`s, which are the
+    /// thinking line; the block's start, its signature and a redacted block say
+    /// nothing to show.
+    #[test]
+    fn test_parse_sse_event_thinking_deltas_are_reasoning_text() {
+        let mut tool_index: Option<usize> = None;
+        let mut next = |event: &str, data: serde_json::Value| {
+            let mut buffer = format!("event: {event}\ndata: {data}\n\n");
+            parse_sse_event(&mut buffer, &mut tool_index)
+        };
+        assert!(
+            next(
+                "content_block_start",
+                serde_json::json!({ "index": 0, "content_block": { "type": "thinking", "thinking": "" } })
+            )
+            .is_none()
+        );
+        let chunk = next(
+            "content_block_delta",
+            serde_json::json!({ "index": 0, "delta": { "type": "thinking_delta", "thinking": "Let me see" } }),
+        )
+        .expect("an item")
+        .expect("not an error");
+        assert_eq!(chunk.reasoning_delta.as_deref(), Some("Let me see"));
+        assert_eq!(chunk.delta, "");
+        assert!(
+            next(
+                "content_block_delta",
+                serde_json::json!({ "index": 0, "delta": { "type": "thinking_delta", "thinking": "" } })
+            )
+            .is_none()
+        );
+        assert!(
+            next(
+                "content_block_delta",
+                serde_json::json!({ "index": 0, "delta": { "type": "signature_delta", "signature": "EqQB" } })
+            )
+            .is_none()
+        );
+        assert!(
+            next(
+                "content_block_start",
+                serde_json::json!({ "index": 1, "content_block": { "type": "redacted_thinking", "data": "EmwK" } })
+            )
+            .is_none()
+        );
+    }
+
+    /// A block kind this build does not stream is skipped with a warning
+    /// rather than in silence.
     #[test]
     fn test_parse_sse_event_content_block_start_of_an_unknown_kind_returns_none() {
         let _guard = always_on_tracing_guard();
         let mut buffer =
-            "event: content_block_start\ndata: {\"content_block\":{\"type\":\"thinking\"}}\n\n"
+            "event: content_block_start\ndata: {\"content_block\":{\"type\":\"server_tool_use\"}}\n\n"
                 .to_string();
         let mut tool_index: Option<usize> = None;
         assert!(parse_sse_event(&mut buffer, &mut tool_index).is_none());

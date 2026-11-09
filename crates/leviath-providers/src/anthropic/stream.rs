@@ -141,6 +141,22 @@ fn parse_event(
                         parts: Vec::new(),
                     })
                 }
+                // The model's thinking, as it is written. The signature that
+                // seals a block, and a redacted block's opaque data, are not
+                // text and are skipped below with the other deltas.
+                Some("thinking_delta") => {
+                    let thinking = delta.get("thinking").and_then(|t| t.as_str()).unwrap_or("");
+                    (!thinking.is_empty()).then(|| StreamChunk {
+                        reasoning_delta: Some(thinking.to_string()),
+                        delta: String::new(),
+                        tool_calls: Vec::new(),
+                        tokens: None,
+                        finish_reason: None,
+                        reasoning: None,
+                        parts: Vec::new(),
+                    })
+                }
+                Some("signature_delta") => None,
                 Some("input_json_delta") => {
                     let partial = delta
                         .get("partial_json")
@@ -215,7 +231,9 @@ fn parse_event(
                 }
                 // A text block's words arrive in its deltas; the start says
                 // nothing the collector needs.
-                Some("text") => None,
+                // Thinking arrives in its deltas the same way, and a redacted
+                // block has no text to show.
+                Some("text" | "thinking" | "redacted_thinking") => None,
                 other => {
                     tracing::warn!(
                         block_type = other.unwrap_or("(none)"),
