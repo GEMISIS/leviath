@@ -210,6 +210,13 @@ not approve `cargo publish`. A line the parser cannot read as a list of commands
 heredoc, an `eval`, a program named by a variable) has nothing reusable to grant, and the prompt
 says so.
 
+The two options can name different things. Say `node` was approved for the stage earlier, and the
+model now runs `node --check app.js && npm test`. Only `npm test` still needs approving, so the
+stage option reads `Allow npm test for this stage`. The run option reads
+`Allow node, npm test for this run`, because the stage approval of `node` ends when the run leaves
+the stage. Approving for the run grants both, and the same line does not ask again in a later
+stage.
+
 A grant is kept in the run's own [run file](/docs/run-file), beside what the run has written
 against its write ceilings, so a run the daemon brings back after a restart keeps both. Nothing
 outside the run records it, and every grant dies with the run that made it.

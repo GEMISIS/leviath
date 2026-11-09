@@ -102,8 +102,8 @@ pub(crate) struct AwaitingApproval {
     pub call_id: String,
     /// The id of the question it was put to a person under.
     pub question: String,
-    /// What an approval for the stage or the run is remembered under.
-    pub keys: Vec<String>,
+    /// What an approval is remembered under, for the stage and for the run.
+    pub keys: leviath_core::interaction::GrantKeys,
     /// The bytes an approval charges the run.
     pub charge: u64,
 }
@@ -357,7 +357,7 @@ pub(crate) fn dispatch_lane_batches(
 /// once the question is put.
 struct Ask {
     call_id: String,
-    keys: Vec<String>,
+    keys: leviath_core::interaction::GrantKeys,
     charge: u64,
 }
 

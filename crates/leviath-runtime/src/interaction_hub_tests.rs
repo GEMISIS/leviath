@@ -383,7 +383,7 @@ async fn the_deadline_denies_rather_than_approves() {
                 "shell",
                 serde_json::json!({"command": "rm -rf /"}),
                 "implement",
-                &[],
+                &leviath_core::interaction::GrantKeys::default(),
             ))
             .await
     });
@@ -437,7 +437,7 @@ async fn a_deny_with_feedback_round_trips_through_the_hub() {
                 "bash",
                 serde_json::json!({"command": "rm -rf build"}),
                 "stage",
-                &[],
+                &leviath_core::interaction::GrantKeys::default(),
             ))
             .await
     });
@@ -511,7 +511,7 @@ async fn each_way_a_request_ends_is_recorded_as_itself() {
                     "shell",
                     serde_json::json!({"command": "rm -rf build"}),
                     "implement",
-                    &[],
+                    &leviath_core::interaction::GrantKeys::default(),
                 ),
             )
             .await
@@ -659,7 +659,7 @@ async fn two_runs_whose_provider_repeats_a_tool_call_id_each_keep_their_own_prom
                             "shell",
                             serde_json::json!({"command": "echo hello"}),
                             "main",
-                            &[],
+                            &leviath_core::interaction::GrantKeys::default(),
                         ),
                     )
                     .await

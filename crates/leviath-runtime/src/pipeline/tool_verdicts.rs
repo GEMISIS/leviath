@@ -14,7 +14,7 @@
 use std::collections::HashSet;
 
 use bevy_ecs::prelude::*;
-use leviath_core::interaction::ApprovalScope;
+use leviath_core::interaction::{ApprovalScope, GrantKeys};
 
 /// The world's verdict on one tool call, from [`ToolService::decide`].
 ///
@@ -39,8 +39,10 @@ pub enum ToolVerdict {
     Refuse(String),
     /// A person has to approve it first.
     Ask {
-        /// What an approval for the stage or the run is remembered under.
-        keys: Vec<String>,
+        /// What an approval is remembered under, for the stage and for the
+        /// run. The run's list also holds what only a stage grant covers:
+        /// see [`ToolGrants::granted_for_run`].
+        keys: GrantKeys,
         /// Bytes charged to the run if it is approved.
         charge: u64,
     },
@@ -102,6 +104,13 @@ impl ToolGrants {
     /// Whether `key` has been granted, for the run or the stage.
     pub fn granted(&self, key: &str) -> bool {
         self.run.contains(key) || self.stage.contains(key)
+    }
+
+    /// Whether `key` has been granted for the rest of the run. A stage grant
+    /// does not count: it ends with its stage, so what an approval for the
+    /// run has to record is whatever this does not cover.
+    pub fn granted_for_run(&self, key: &str) -> bool {
+        self.run.contains(key)
     }
 
     /// The run entered the stage at `index`: a stage grant made elsewhere ends.

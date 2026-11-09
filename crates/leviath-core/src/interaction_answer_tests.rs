@@ -2,9 +2,16 @@
 //! against them.
 
 use super::*;
+use crate::interaction::GrantKeys;
 
 fn approval() -> InteractionRequest {
-    InteractionRequest::tool_approval("a", "bash", serde_json::json!({}), "s", &[])
+    InteractionRequest::tool_approval(
+        "a",
+        "bash",
+        serde_json::json!({}),
+        "s",
+        &GrantKeys::default(),
+    )
 }
 
 fn choice(labels: &[&str]) -> InteractionRequest {
@@ -28,7 +35,7 @@ fn a_tool_approval_lists_its_options_under_fixed_words_numbered_from_one() {
         "bash",
         serde_json::json!({"command": "ls"}),
         "s",
-        &["shell:ls".to_string()],
+        &GrantKeys::same(&["shell:ls".to_string()]),
     ));
     let rows: Vec<(&str, usize)> = options.iter().map(|o| (o.id.as_str(), o.number)).collect();
     assert_eq!(

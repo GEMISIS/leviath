@@ -4,7 +4,7 @@
 use super::*;
 use crate::components::{InferenceResult, ToolCall};
 use crate::tool_bridge::BoxedToolExec;
-use leviath_core::interaction::{ApprovalScope, InteractionResponse};
+use leviath_core::interaction::{ApprovalScope, GrantKeys, InteractionResponse};
 use std::sync::Mutex;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
@@ -39,8 +39,13 @@ impl ToolService for Judge {
             "no" => ToolVerdict::Refuse("nope".to_string()),
             "q" => ToolVerdict::Interact { attended: true },
             _ if ctx.grants.granted("k") => ToolVerdict::Run { charge: 0 },
+            // `j` is a key only a stage grant covers, so an approval for the
+            // run is remembered under it as well.
             _ => ToolVerdict::Ask {
-                keys: vec!["k".to_string()],
+                keys: GrantKeys {
+                    stage: vec!["k".to_string()],
+                    run: vec!["j".to_string(), "k".to_string()],
+                },
                 charge: 7,
             },
         }
@@ -251,7 +256,12 @@ async fn an_approval_holds_the_batch_and_its_grant_covers_what_follows() {
         ApprovalScope::Run,
     ));
     until_answered(&mut world, e).await;
-    assert!(world.get::<ToolGrants>(e).unwrap().granted("k"));
+    let grants = world.get::<ToolGrants>(e).unwrap();
+    assert!(grants.granted_for_run("k"));
+    assert!(
+        grants.granted_for_run("j"),
+        "an approval for the run records the run's keys, not the stage's"
+    );
     assert!(jobs.try_recv().is_ok(), "sent once decided");
     let ran = ran(&judge);
     assert_eq!(
@@ -261,6 +271,29 @@ async fn an_approval_holds_the_batch_and_its_grant_covers_what_follows() {
     );
     assert_eq!(world.get::<WriteLedger>(e).unwrap().written, 112);
     assert!(hub.pending().is_empty());
+}
+
+/// Approved for the stage, a call is remembered under the stage's keys alone,
+/// and nothing is granted for the run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stage_approval_records_the_stage_keys_only() {
+    let judge = Arc::new(Judge::default());
+    let (mut world, _jobs) = world_with(judge.clone());
+    let hub = with_prompts(&mut world);
+    let e = agent(&mut world, &["ask"]);
+    run(&mut world);
+    let req = open_request(&hub).await;
+    assert_eq!(req.options[1], "Allow k for this stage");
+    assert_eq!(req.options[2], "Allow j, k for this run");
+    hub.answer(InteractionResponse::approval(
+        &req.id,
+        true,
+        ApprovalScope::Stage,
+    ));
+    until_answered(&mut world, e).await;
+    let grants = world.get::<ToolGrants>(e).unwrap();
+    assert!(grants.granted("k") && !grants.granted_for_run("k"));
+    assert!(!grants.granted("j"));
 }
 
 /// A declined approval becomes the call's result, with the person's words.

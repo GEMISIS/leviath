@@ -24,6 +24,7 @@ use std::sync::{Arc, Mutex as StdMutex, PoisonError};
 
 use bevy_ecs::entity::Entity;
 
+use leviath_core::interaction::GrantKeys;
 use leviath_core::region::EntryContent;
 use leviath_providers::ToolCall;
 use leviath_runtime::dynamic_interaction::{
@@ -762,14 +763,23 @@ pub(crate) fn decide_call(
             tc.name
         )),
         // Only what is still uncovered: that is what the prompt names and
-        // what a scoped approval records. A line reading outside the workdir
-        // records nothing: approving `cat src/a /etc/hosts` is approving that
-        // read, and a grant of `cat src/a` would go on to cover
-        // `cat src/a ~/.aws/credentials`. So it is approved once or not at all.
+        // what a scoped approval records. Uncovered is judged per scope. An
+        // approval for the stage records what nothing covers now; one for the
+        // run also records what only a stage grant covers, because that grant
+        // ends with the stage and the line would ask again in the next one.
+        // A line reading outside the workdir records nothing: approving
+        // `cat src/a /etc/hosts` is approving that read, and a grant of
+        // `cat src/a` would go on to cover `cat src/a ~/.aws/credentials`. So
+        // it is approved once or not at all.
         ToolPolicy::Ask => ToolVerdict::Ask {
             keys: match placed {
-                true => crate::shell_keys::uncovered_keys(&approval_keys, &is_safe, &is_granted),
-                false => Vec::new(),
+                true => GrantKeys {
+                    stage: crate::shell_keys::uncovered_keys(&approval_keys, &is_safe, &is_granted),
+                    run: crate::shell_keys::uncovered_keys(&approval_keys, &is_safe, &|k| {
+                        ctx.grants.granted_for_run(k)
+                    }),
+                },
+                false => GrantKeys::default(),
             },
             charge,
         },
@@ -1424,7 +1434,7 @@ pub(crate) mod tests {
                     let response = backend.ask(request).await;
                     match response.approved {
                         Some(true) => {
-                            grants.grant(response.scope, &keys);
+                            grants.grant(response.scope, keys.for_scope(response.scope));
                             written += charge;
                             Decision::Run
                         }
@@ -3991,6 +4001,80 @@ pub(crate) mod tests {
         .await;
         let result = out[0].1.clone();
         assert!(!result.contains("[denied]"), "got: {result}");
+    }
+
+    /// A run in its first stage that holds a stage grant for `ls` and is then
+    /// asked about `ls && pwd`, answered at `scope`, and moved to its next
+    /// stage. Returns the options that second prompt offered.
+    async fn compound_line_after_a_stage_grant(
+        hub: &InteractionHub,
+        scope: ApprovalScope,
+    ) -> (Arc<AgentToolState>, Vec<String>) {
+        let state = asking_shell_state(hub);
+        enter_stage(&state, 0);
+        dispatch_answering(
+            state.clone(),
+            vec![call("c1", "shell", serde_json::json!({"command": "ls"}))],
+            |req: &InteractionRequest| {
+                InteractionResponse::approval(&req.id, true, ApprovalScope::Stage)
+            },
+            hub.clone(),
+        )
+        .await;
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let seen_in = seen.clone();
+        dispatch_answering(
+            state.clone(),
+            vec![compound_line("c2")],
+            move |req| {
+                seen_in.lock().unwrap().clone_from(&req.options);
+                InteractionResponse::approval(&req.id, true, scope)
+            },
+            hub.clone(),
+        )
+        .await;
+        enter_stage(&state, 1);
+        let options = seen.lock().unwrap().clone();
+        (state, options)
+    }
+
+    /// `ls && pwd` as a shell call.
+    fn compound_line(id: &str) -> ToolCall {
+        call(id, "shell", serde_json::json!({"command": "ls && pwd"}))
+    }
+
+    /// Approving a line for the run covers every command in it for the rest of
+    /// the run, the ones a stage grant covers at that moment included: the
+    /// stage grant ends with its stage, and the line must not ask again there.
+    #[tokio::test]
+    async fn a_run_approval_covers_what_only_a_stage_grant_covered() {
+        let hub = InteractionHub::new();
+        let (state, options) = compound_line_after_a_stage_grant(&hub, ApprovalScope::Run).await;
+        assert_eq!(options[1], "Allow pwd for this stage");
+        assert_eq!(options[2], "Allow ls, pwd for this run");
+
+        let asked_again = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            dispatch_tools(state, vec![compound_line("c3")], noop_progress()),
+        )
+        .await;
+        let out = asked_again.expect("the line was approved for the run and must not ask again");
+        let ran = out[0].1.clone();
+        assert!(!ran.contains("[denied]"), "got: {ran}");
+    }
+
+    /// The same line approved for the stage records only what the stage did
+    /// not already cover, and all of it ends with the stage.
+    #[tokio::test]
+    async fn a_stage_approval_of_a_partly_covered_line_ends_with_the_stage() {
+        let hub = InteractionHub::new();
+        let (state, _) = compound_line_after_a_stage_grant(&hub, ApprovalScope::Stage).await;
+        let grants = grants_of(&state);
+        assert!(!grants.granted("shell:ls") && !grants.granted("shell:pwd"));
+
+        let out = dispatch_answering(state, vec![compound_line("c3")], deny_it, hub).await;
+        let asked = out[0].1.clone();
+        assert!(asked.contains("[denied]"), "got: {asked}");
     }
 
     /// "Allow once" is not a grant, so the next matching call asks again.

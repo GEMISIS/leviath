@@ -1377,7 +1377,7 @@ mod tests {
             "bash",
             serde_json::json!({"command": "ls"}),
             "main",
-            &[],
+            &interaction::GrantKeys::default(),
         ));
         dash.agents.push(agent);
         dash.update_display_indices();

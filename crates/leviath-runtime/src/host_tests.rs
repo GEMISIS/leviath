@@ -4727,7 +4727,7 @@ async fn wait_reason_distinguishes_a_tool_approval_from_a_question() {
             "shell",
             serde_json::json!({}),
             "implement",
-            &[],
+            &leviath_core::interaction::GrantKeys::default(),
         ),
     );
     await_pending(&host, "run-a").await;

@@ -572,7 +572,13 @@ async fn respond_refuses_a_bad_attachment_before_contacting_the_daemon() {
 
 /// The open questions the respond tests answer, one of each kind.
 fn approval_q() -> InteractionRequest {
-    InteractionRequest::tool_approval("q1", "bash", serde_json::json!({}), "s", &[])
+    InteractionRequest::tool_approval(
+        "q1",
+        "bash",
+        serde_json::json!({}),
+        "s",
+        &leviath_core::interaction::GrantKeys::default(),
+    )
 }
 fn confirm_q() -> InteractionRequest {
     InteractionRequest::confirm("q1", "Sure?", "s")
@@ -1348,7 +1354,7 @@ fn the_full_view_shows_arguments_body_and_the_answer_line() {
         "bash",
         serde_json::json!({"command": "rm -rf build"}),
         "implement",
-        &[],
+        &leviath_core::interaction::GrantKeys::default(),
     );
     req.body = Some("line one\nline two".to_string());
     let out = format_interaction_detail("agent-x", &req);

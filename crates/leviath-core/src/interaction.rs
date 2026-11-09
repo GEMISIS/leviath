@@ -271,14 +271,26 @@ impl InteractionRequest {
         Some(summary)
     }
 
+    /// The label of the option that approves a call for `scope` ("stage" or
+    /// "run"), naming what that approval would be remembered under.
+    fn scope_label(scope: &str, keys: &[String]) -> String {
+        match Self::grant_summary(keys) {
+            Some(what) => format!("Allow {what} for this {scope}"),
+            None => format!("Allow for this {scope} (nothing reusable - it will ask again)"),
+        }
+    }
+
     /// Build a tool-approval request.
     ///
-    /// `grant_keys` is what a `Stage` or `Run` approval would be remembered
-    /// under, and it goes in the option labels rather than in `body` because
-    /// the dashboard renders only `prompt` and `options` for this kind. Naming
-    /// it matters: a label promising more than the dispatcher will remember -
-    /// "Allow for this session" on a call it degrades to once - has the user
-    /// choose a grant they do not get.
+    /// `grant_keys` is what a `Stage` and a `Run` approval would each be
+    /// remembered under, and it goes in the option labels rather than in
+    /// `body` because the dashboard renders only `prompt` and `options` for
+    /// this kind. Naming it matters: a label promising more than the
+    /// dispatcher will remember - "Allow for this session" on a call it
+    /// degrades to once - has the user choose a grant they do not get. The two
+    /// scopes are named apart because they can differ: a run approval also
+    /// records what only a stage grant covers, which the stage option has no
+    /// need to hand over again.
     ///
     /// Every client reads an option's meaning off its label through
     /// [`answer_options`], so the wording here is the one place it lives.
@@ -287,23 +299,15 @@ impl InteractionRequest {
         tool_name: impl Into<String>,
         arguments: serde_json::Value,
         stage: impl Into<String>,
-        grant_keys: &[String],
+        grant_keys: &GrantKeys,
     ) -> Self {
         let tool = tool_name.into();
         let prompt = match Self::approval_detail(&tool, &arguments) {
             Some(detail) => format!("Allow tool call: `{tool}` - {detail}?"),
             None => format!("Allow tool call: `{tool}`?"),
         };
-        let (stage_label, run_label) = match Self::grant_summary(grant_keys) {
-            Some(what) => (
-                format!("Allow {what} for this stage"),
-                format!("Allow {what} for this run"),
-            ),
-            None => (
-                "Allow for this stage (nothing reusable - it will ask again)".to_string(),
-                "Allow for this run (nothing reusable - it will ask again)".to_string(),
-            ),
-        };
+        let stage_label = Self::scope_label("stage", &grant_keys.stage);
+        let run_label = Self::scope_label("run", &grant_keys.run);
         Self {
             id: id.into(),
             kind: InteractionKind::ToolApproval,
@@ -335,6 +339,43 @@ impl InteractionRequest {
     pub fn is_deny_with_feedback(&self, index: usize) -> bool {
         self.kind == InteractionKind::ToolApproval
             && self.options.get(index).map(String::as_str) == Some(DENY_WITH_FEEDBACK)
+    }
+}
+
+/// What a scoped approval of a tool call is remembered under, for each scope
+/// it can be given at.
+///
+/// The two lists differ when a stage grant covers part of the call. That
+/// grant ends with its stage, so an approval for the run has to record those
+/// keys too or the same call asks again one stage later; an approval for the
+/// stage has no need of them. Both empty means the call has nothing reusable:
+/// it is approved once or not at all.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GrantKeys {
+    /// What an approval for the stage records: the keys nothing covers yet.
+    pub stage: Vec<String>,
+    /// What an approval for the run records: the keys nothing covers for the
+    /// rest of the run.
+    pub run: Vec<String>,
+}
+
+impl GrantKeys {
+    /// `keys` at either scope, for a call no stage grant covers any part of.
+    pub fn same(keys: &[String]) -> Self {
+        Self {
+            stage: keys.to_vec(),
+            run: keys.to_vec(),
+        }
+    }
+
+    /// What an approval given at `scope` records. Nothing for `Once` or for
+    /// an answer that names no scope.
+    pub fn for_scope(&self, scope: Option<ApprovalScope>) -> &[String] {
+        match scope {
+            Some(ApprovalScope::Stage) => &self.stage,
+            Some(ApprovalScope::Run) => &self.run,
+            Some(ApprovalScope::Once) | None => &[],
+        }
     }
 }
 
@@ -686,7 +727,7 @@ mod tests {
             "bash",
             serde_json::json!({"command": "rm -rf build && make"}),
             "implement",
-            &[],
+            &GrantKeys::default(),
         );
         assert!(
             req.prompt.contains("rm -rf build && make"),
@@ -700,7 +741,7 @@ mod tests {
             "write_file",
             serde_json::json!({"path": "src/main.rs", "content": "..."}),
             "implement",
-            &[],
+            &GrantKeys::default(),
         );
         assert!(req.prompt.contains("src/main.rs"), "{}", req.prompt);
     }
@@ -715,7 +756,7 @@ mod tests {
             "bash",
             serde_json::json!({ "command": long }),
             "s",
-            &[],
+            &GrantKeys::default(),
         );
         assert!(req.prompt.chars().count() < 200, "{}", req.prompt);
         assert!(req.prompt.contains('…'), "{}", req.prompt);
@@ -725,7 +766,7 @@ mod tests {
             "bash",
             serde_json::json!({"command": "cat <<'EOF' > f\nline two\nEOF"}),
             "s",
-            &[],
+            &GrantKeys::default(),
         );
         assert!(req.prompt.contains("cat <<'EOF' > f"), "{}", req.prompt);
         assert!(!req.prompt.contains("line two"), "{}", req.prompt);
@@ -737,15 +778,20 @@ mod tests {
     /// than gaining an empty pair of backticks.
     #[test]
     fn a_tool_without_a_telling_argument_reads_as_before() {
-        let req =
-            InteractionRequest::tool_approval("id", "list_dir", serde_json::json!({}), "s", &[]);
+        let req = InteractionRequest::tool_approval(
+            "id",
+            "list_dir",
+            serde_json::json!({}),
+            "s",
+            &GrantKeys::default(),
+        );
         assert_eq!(req.prompt, "Allow tool call: `list_dir`?");
         let req = InteractionRequest::tool_approval(
             "id",
             "bash",
             serde_json::json!({"command": "   "}),
             "s",
-            &[],
+            &GrantKeys::default(),
         );
         assert_eq!(req.prompt, "Allow tool call: `bash`?");
         // Present but not a string: still nothing worth showing.
@@ -754,15 +800,15 @@ mod tests {
             "bash",
             serde_json::json!({"command": 42}),
             "s",
-            &[],
+            &GrantKeys::default(),
         );
         assert_eq!(req.prompt, "Allow tool call: `bash`?");
     }
 
-    /// "Allow for this session" said nothing about what the session would then
-    /// be allowed to do, and the dispatcher silently degraded it to once when
-    /// the call had no reusable key - so the user chose a grant they did not
-    /// get. The labels now name it.
+    /// A scoped option names what it grants. A bare "Allow for this run" says
+    /// nothing about what the run would then be allowed to do, and on a call
+    /// with no reusable key it would offer a grant the dispatcher does not
+    /// record.
     #[test]
     fn the_scope_options_name_what_they_grant() {
         let keys = |names: &[&str]| -> Vec<String> {
@@ -773,7 +819,7 @@ mod tests {
             "shell",
             serde_json::json!({"command": "ls && git status"}),
             "s",
-            &keys(&["git status", "ls"]),
+            &GrantKeys::same(&keys(&["git status", "ls"])),
         );
         assert_eq!(req.options[1], "Allow git status, ls for this stage");
         assert_eq!(req.options[2], "Allow git status, ls for this run");
@@ -784,7 +830,7 @@ mod tests {
             "shell",
             serde_json::json!({}),
             "s",
-            &keys(&["a", "b", "c", "d", "e"]),
+            &GrantKeys::same(&keys(&["a", "b", "c", "d", "e"])),
         );
         assert_eq!(req.options[2], "Allow a, b, c +2 more for this run");
 
@@ -794,9 +840,62 @@ mod tests {
             "web_fetch",
             serde_json::json!({}),
             "s",
-            &["web_fetch".to_string()],
+            &GrantKeys::same(&["web_fetch".to_string()]),
         );
         assert_eq!(req.options[2], "Allow web_fetch for this run");
+    }
+
+    /// A stage grant covers `node` here, so the stage option has only
+    /// `npm test` left to name. The run option names both: the stage grant
+    /// ends with its stage, and an approval for the run that left `node` out
+    /// would ask about the same line again one stage later.
+    #[test]
+    fn each_scope_option_names_its_own_keys() {
+        let keys = GrantKeys {
+            stage: vec!["shell:npm test".to_string()],
+            run: vec!["shell:node".to_string(), "shell:npm test".to_string()],
+        };
+        let req = InteractionRequest::tool_approval(
+            "id",
+            "shell",
+            serde_json::json!({"command": "node --check app.js && npm test"}),
+            "s",
+            &keys,
+        );
+        assert_eq!(req.options[1], "Allow npm test for this stage");
+        assert_eq!(req.options[2], "Allow node, npm test for this run");
+
+        // Each label is worded from its own list.
+        let run_only = GrantKeys {
+            stage: Vec::new(),
+            run: vec!["shell:node".to_string()],
+        };
+        let req =
+            InteractionRequest::tool_approval("id", "shell", serde_json::json!({}), "s", &run_only);
+        assert_eq!(
+            req.options[1],
+            "Allow for this stage (nothing reusable - it will ask again)"
+        );
+        assert_eq!(req.options[2], "Allow node for this run");
+    }
+
+    /// An approval records the list of the scope it was given at, and nothing
+    /// when it was for the one call or names no scope.
+    #[test]
+    fn grant_keys_are_read_by_scope() {
+        let keys = GrantKeys {
+            stage: vec!["a".to_string()],
+            run: vec!["a".to_string(), "b".to_string()],
+        };
+        assert_eq!(keys.for_scope(Some(ApprovalScope::Stage)), ["a"]);
+        assert_eq!(keys.for_scope(Some(ApprovalScope::Run)), ["a", "b"]);
+        assert!(keys.for_scope(Some(ApprovalScope::Once)).is_empty());
+        assert!(keys.for_scope(None).is_empty());
+
+        let same = GrantKeys::same(&["k".to_string()]);
+        assert_eq!(same.stage, same.run);
+        assert_eq!(same.for_scope(Some(ApprovalScope::Run)), ["k"]);
+        assert_eq!(GrantKeys::default().run, Vec::<String>::new());
     }
 
     /// A call with no reusable key says so, rather than offering a grant the
@@ -808,7 +907,7 @@ mod tests {
             "shell",
             serde_json::json!({"command": "echo `whoami`"}),
             "s",
-            &[],
+            &GrantKeys::default(),
         );
         assert!(
             req.options[1].contains("it will ask again"),
@@ -865,7 +964,13 @@ mod tests {
         assert!(check_answer(&confirm, &denied).is_ok());
         let err = check_answer(&confirm, &InteractionResponse::text("y", "yes")).unwrap_err();
         assert!(err.contains("yes or no"), "{err}");
-        let tool = InteractionRequest::tool_approval("a", "bash", serde_json::json!({}), "s", &[]);
+        let tool = InteractionRequest::tool_approval(
+            "a",
+            "bash",
+            serde_json::json!({}),
+            "s",
+            &GrantKeys::default(),
+        );
         assert!(check_answer(&tool, &InteractionResponse::choice("a", 0)).is_err());
     }
 
@@ -873,7 +978,13 @@ mod tests {
     /// anywhere else is a client mistake, refused before it reaches the run.
     #[test]
     fn check_answer_refuses_feedback_off_a_denial_and_files_off_text() {
-        let tool = InteractionRequest::tool_approval("a", "bash", serde_json::json!({}), "s", &[]);
+        let tool = InteractionRequest::tool_approval(
+            "a",
+            "bash",
+            serde_json::json!({}),
+            "s",
+            &GrantKeys::default(),
+        );
         let mut granted = InteractionResponse::approval("a", true, ApprovalScope::Once);
         granted.feedback = Some("no".into());
         let err = check_answer(&tool, &granted).unwrap_err();
@@ -944,7 +1055,7 @@ mod tests {
             "bash",
             serde_json::json!({"cmd": "ls"}),
             "impl",
-            &[],
+            &GrantKeys::default(),
         );
         assert_eq!(r.kind, InteractionKind::ToolApproval);
         assert_eq!(r.options.len(), 5);
@@ -1068,7 +1179,13 @@ mod tests {
     #[test]
     fn test_tool_approval_request() {
         let args = serde_json::json!({"file": "test.txt"});
-        let r = InteractionRequest::tool_approval("ta1", "write_file", args, "code", &[]);
+        let r = InteractionRequest::tool_approval(
+            "ta1",
+            "write_file",
+            args,
+            "code",
+            &GrantKeys::default(),
+        );
         assert_eq!(r.kind, InteractionKind::ToolApproval);
         assert_eq!(r.tool_name.as_deref(), Some("write_file"));
         assert!(r.tool_arguments.is_some());
@@ -1206,7 +1323,7 @@ mod tests {
             "bash",
             serde_json::json!({"cmd": "ls -la"}),
             "code",
-            &[],
+            &GrantKeys::default(),
         );
         let json = serde_json::to_string(&req).unwrap();
         let back: InteractionRequest = serde_json::from_str(&json).unwrap();
@@ -1263,8 +1380,13 @@ mod tests {
 
     #[test]
     fn test_tool_approval_is_required() {
-        let r =
-            InteractionRequest::tool_approval("ta", "bash", serde_json::json!({}), "stage", &[]);
+        let r = InteractionRequest::tool_approval(
+            "ta",
+            "bash",
+            serde_json::json!({}),
+            "stage",
+            &GrantKeys::default(),
+        );
         assert!(r.required);
     }
 
@@ -1456,8 +1578,13 @@ mod tests {
     /// the label sits at.
     #[test]
     fn the_feedback_row_is_found_by_label_on_tool_approvals_only() {
-        let tool =
-            InteractionRequest::tool_approval("id", "shell", serde_json::json!({}), "s", &[]);
+        let tool = InteractionRequest::tool_approval(
+            "id",
+            "shell",
+            serde_json::json!({}),
+            "s",
+            &GrantKeys::default(),
+        );
         assert!(tool.is_deny_with_feedback(4));
         assert!(!tool.is_deny_with_feedback(3));
         assert!(!tool.is_deny_with_feedback(99));

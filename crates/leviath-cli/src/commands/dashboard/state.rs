@@ -3238,7 +3238,7 @@ mod tests {
                     "write_file",
                     serde_json::json!({}),
                     "implement",
-                    &[],
+                    &interaction::GrantKeys::default(),
                 );
 
                 let mut dash = make_test_dashboard();
