@@ -16,7 +16,7 @@ use super::super::types::catalog::{
     ProviderOrderField, SkippedTool, Tool, ToolFilter, ToolGroup, ToolOrder, ToolOrderField,
     ToolSkips, provider_id,
 };
-use super::super::types::machine::ProviderAuthKind;
+use super::super::types::machine::{OfferedTools, ProviderAuthKind, Script};
 use super::listing::{Window, connection, terms};
 
 /// How many catalogue rows one page may carry.
@@ -285,17 +285,37 @@ pub(crate) async fn discover(
     let found = blocking(move || super::super::super::tools::inventory(&dirs, named.as_deref()))
         .await
         .gql()?;
+    let scope = OfferedTools::of(blueprint);
+    let skipped = found
+        .skipped
+        .into_iter()
+        .map(|skipped| SkippedTool {
+            path: skipped.path.display().to_string(),
+            reason: skipped.reason,
+            taken_by: holder(&found.tools, skipped.taken.as_deref(), &scope),
+        })
+        .collect();
     Ok(Inventory {
-        tools: found.tools.into_iter().map(Tool::of).collect(),
-        skipped: found
-            .skipped
+        tools: found
+            .tools
             .into_iter()
-            .map(|skipped| SkippedTool {
-                path: skipped.path.display().to_string(),
-                reason: skipped.reason,
-            })
+            .map(|entry| Tool::of(entry, &scope))
             .collect(),
+        skipped,
     })
+}
+
+/// The listed tool that has the name a skipped file declares, when a name is
+/// why it was skipped.
+fn holder(
+    tools: &[crate::tool_inventory::ToolEntry],
+    taken: Option<&str>,
+    scope: &std::sync::Arc<OfferedTools>,
+) -> Option<Tool> {
+    tools
+        .iter()
+        .find(|entry| Some(entry.name.as_str()) == taken)
+        .map(|entry| Tool::of(entry.clone(), scope))
 }
 
 /// One page of the tools one scope can offer, with the skipped files beside
@@ -359,14 +379,26 @@ pub(crate) async fn bundled_tools(ctx: &Context<'_>) -> Vec<BundledTool> {
     let state = ctx.data_unchecked::<AppState>();
     // Resolved on this task, read on the blocking pool.
     let dirs = super::super::super::tools::AgentDirs::of(&*state.current_config().await);
-    blocking(move || super::super::super::bundled_tools::list(&dirs))
+    let scope = OfferedTools::of(None);
+    blocking(move || super::super::super::bundled_tools::list_with_copies(&dirs))
         .await
         .into_iter()
-        .map(|row| BundledTool {
+        .map(|(row, copy)| BundledTool {
             name: row.name,
             description: row.description,
             is_installed: row.installed,
             is_current: row.current,
+            script: copy.map(|copy| {
+                Script::from_item(
+                    super::super::super::scripts::tool_item(
+                        std::path::Path::new(&copy.path),
+                        &copy.source,
+                        None,
+                        copy.error,
+                    ),
+                    scope.clone(),
+                )
+            }),
         })
         .collect()
 }

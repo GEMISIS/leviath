@@ -22,7 +22,7 @@ use super::error::IntoGraphql;
 use super::query::{RunExport, yolo_profile as profile_named};
 use super::types::blueprint::{Blueprint, revision_id};
 use super::types::catalog::{MODEL_TAG, Model, PROVIDER_TAG, Provider};
-use super::types::machine::{McpServer, Script, YoloProfile};
+use super::types::machine::{McpServer, OfferedTools, Script, YoloProfile};
 use super::types::run::Run;
 use super::types::update::UpdateJob;
 
@@ -192,7 +192,7 @@ async fn script(ctx: &Context<'_>, rest: &str) -> async_graphql::Result<Option<N
     Ok(listed
         .into_iter()
         .find(|item| item.kind == kind && item.name == name && item.agent.as_deref() == blueprint)
-        .map(|item| Node::Script(Script::from_item(item))))
+        .map(|item| Node::Script(Script::from_item(item, OfferedTools::of(blueprint)))))
 }
 
 /// The installed blueprint revision one id names.

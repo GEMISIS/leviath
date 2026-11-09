@@ -1032,6 +1032,36 @@ same four fields and a type of their own would say nothing a client could act on
 `skipped` names scripts that were found and could not be offered, with the reason, because a tool
 an author believes exists and silently is not there is the failure worth reporting.
 
+A script tool and the script behind it are the same file under two names. The model calls the tool
+by what its `@tool` line declares, and `scripts` files the script under its file's name, so
+`tools/gather.rhai` declaring `@tool collect` is the tool `collect` and the script `gather`. Each
+leads to the other:
+
+```graphql
+{
+  tools(first: 50) {
+    results {
+      name
+      ... on ScriptToolOutput { script { id name compiles } }
+    }
+    skipped { path reason takenBy { name origin } }
+  }
+  scripts(first: 50) {
+    results { id name tool { name origin } }
+  }
+}
+```
+
+`ScriptOutput.tool` is null for a script that is not a tool, and for a tool script that is not
+offered: one that does not compile, or one whose name another tool already has. That second case
+is the one `takenBy` explains. It is the tool that has the name, which is a built-in, a sub-agent
+tool, or a blueprint's own script ahead of a global one. It is null for a file skipped for any
+other reason.
+
+Both are answered for the listing they came from. Under `blueprint(name:)`, the blueprint's own
+script wins a name over a global one, so the global script offers a tool to the machine and none
+to that blueprint.
+
 A tool stays a name inside a blueprint. A stage's `tools` may name an MCP server's tool, a group
 token such as `@builtin`, or a tool this machine does not have. So the inventory describes what is
 here rather than what was written.
@@ -1525,12 +1555,12 @@ and whether this machine has each one and has this build's copy:
 
 ```graphql
 {
-  bundledTools { name description isInstalled isCurrent }
+  bundledTools { name description isInstalled isCurrent script { id path compiles } }
 }
 ```
 
 `isInstalled` true with `isCurrent` false means the global copy is older or edited, so an install
-would replace it.
+would replace it. `script` is that global copy as `scripts` lists it, and null when there is none.
 
 Anything that dials out is a mutation, so queries stay side-effect free. `refreshModels`,
 `checkMachine`, `checkProvider`, `checkMcpServer`, `checkEndpoint`, `signInProvider` and
@@ -1564,12 +1594,18 @@ path `lev yolo test` takes, so the command and the API cannot disagree about a c
 ```graphql
 {
   yoloProfile(name: "careful") {
-    decide(tool: "shell", kind: BUILTIN, args: { command: "curl https://example.com" }) {
+    decide(tool: "shell", args: { command: "curl https://example.com" }) {
       tool configured policy reason
     }
   }
 }
 ```
+
+A `@group` rule matches on where a tool comes from, and the server works that out the way dispatch
+does: a built-in or sub-agent tool by its name, a script by the machine's tools directory, and
+anything else as an MCP server's tool. Pass `kind` to say it yourself. The one case that needs it
+is a script only one blueprint carries, since nothing in the question says which blueprint to look
+in: `decide(tool: "collect", kind: SCRIPT)`.
 
 `upsertYoloProfile` writes one profile, whole. A profile is a grant of permissions, so an edit
 that left half of a previous list behind would describe rules nobody wrote. Only that one table of

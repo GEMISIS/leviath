@@ -1593,8 +1593,10 @@ not have, and for no file at all; `422` when the file does not load.
 relative paths in the command resolve, defaulting to the server's own. `configured` (`allow`,
 `ask` or `deny`) stands in for what the config layers resolve the tool to. Without it, that comes
 from the config in force. `kind` (`builtin`, `subagent`, `script`, `mcp`) says where the tool
-comes from for `@group` rules. Without it, the kind is guessed from the name. `allowed: true`
-decides as if `--allow <tool>` had been passed. The answer:
+comes from for `@group` rules. Without it, the server works the kind out the way dispatch does: a
+built-in or sub-agent tool by its name, a script by the machine's tools directory, anything else
+as an MCP tool. Name it for a script only one blueprint carries. `allowed: true` decides as if
+`--allow <tool>` had been passed. The answer:
 
 ```json
 {

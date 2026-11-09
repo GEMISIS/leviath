@@ -1507,6 +1507,11 @@ type BundledToolOutput {
 	is missing, older, or edited, which is when an install changes it.
 	"""
 	isCurrent: Boolean!
+	"""
+	The global copy on this machine, as the script it is. Null when no
+	global tool by this name is installed.
+	"""
+	script: ScriptOutput
 }
 
 "How a failed model call failed, and what happened next."
@@ -14191,6 +14196,19 @@ type ScriptOutput implements Node {
 	"Why it does not compile, when it does not."
 	compileError: String
 	"""
+	The tool this file offers, under the name the model calls it by.
+	
+	Null for a script of any other kind, and for a tool script that is not
+	offered: one that does not compile, or one whose name a tool ahead of it
+	already has. Those are in the `skipped` list of the tool listing, with
+	the reason.
+	
+	Answered for the scope this script was listed in. Under a blueprint,
+	the blueprint's own script wins a name over a global one, so a global
+	script can offer a tool to the machine and none to that blueprint.
+	"""
+	tool: ScriptToolOutput
+	"""
 	The script's source.
 	
 	Read from disk when this field is selected and not before, so a listing
@@ -14274,6 +14292,15 @@ type ScriptToolOutput implements Tool {
 	machine meets.
 	"""
 	requires: [String!]!
+	"""
+	The same file as a script: what `scripts` lists it as, with its id, its
+	source and whether it compiles.
+	
+	A tool is called by the name its `@tool` line declares and a script is
+	filed under its file's name, and the two need not match. This is the
+	step from one to the other.
+	"""
+	script: ScriptOutput!
 }
 
 "Whether a script compiles."
@@ -15170,6 +15197,13 @@ type SkippedToolOutput {
 	path: String!
 	"Why it could not be offered."
 	reason: String!
+	"""
+	The tool that has the name this file declares, when that is why the
+	file was skipped: a built-in, a sub-agent tool, or a blueprint's own
+	script ahead of a global one. Null for a file skipped for any other
+	reason, such as one that does not compile.
+	"""
+	takenBy: Tool
 }
 
 """
@@ -20788,8 +20822,8 @@ type YoloProfileOutput implements Node {
 	decide(
 		"The tool the model would call."
 		tool: String!,
-		"Where that tool comes from, which is what a `@group` token matches on."
-		kind: ToolKind!,
+		"Where that tool comes from, which is what a `@group` token matches on. Omitted, the server works it out the way dispatch does: a built-in or sub-agent tool by its name, a script by the machine's tools directory, anything else as an MCP tool. A script only one blueprint carries is not found that way, so pass `SCRIPT` for one."
+		kind: ToolKind,
 		"The call's arguments. The shell reads its line from `command` here."
 		args: JSON
 	): YoloDecisionOutput!

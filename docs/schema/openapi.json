@@ -2788,7 +2788,7 @@
           "yolo"
         ],
         "summary": "What a profile would decide for one call",
-        "description": "The same code path a run takes, without running anything, so the answer here is the run's answer. `command` is for the shell; any other tool takes `arguments` as an object. `workdir` is where relative paths resolve, defaulting to the server's own. `configured` (`allow`, `ask`, `deny`) stands in for what the config layers resolve the tool to, otherwise that is read from the config in force; `kind` (`builtin`, `subagent`, `script`, `mcp`) says where the tool comes from for `@group` rules, otherwise it is guessed from the name; `allowed` decides as if `--allow <tool>` had been passed.",
+        "description": "The same code path a run takes, without running anything, so the answer here is the run's answer. `command` is for the shell; any other tool takes `arguments` as an object. `workdir` is where relative paths resolve, defaulting to the server's own. `configured` (`allow`, `ask`, `deny`) stands in for what the config layers resolve the tool to, otherwise that is read from the config in force; `kind` (`builtin`, `subagent`, `script`, `mcp`) says where the tool comes from for `@group` rules, otherwise it is worked out the way dispatch does (a built-in or sub-agent tool by its name, a script by the machine's tools directory, anything else as an MCP tool); `allowed` decides as if `--allow <tool>` had been passed.",
         "requestBody": {
           "required": true,
           "content": {

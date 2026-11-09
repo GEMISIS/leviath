@@ -79,7 +79,10 @@ pub struct TestArgs {
     #[arg(long, value_name = "POLICY")]
     pub configured: Option<String>,
     /// Where the tool comes from, for @group matching: `builtin`, `subagent`,
-    /// `script` or `mcp`. Left off, it is guessed from the name.
+    /// `script` or `mcp`. Left off, it is worked out: a built-in or sub-agent
+    /// tool by its name, a script by your global tools directory, anything
+    /// else as an MCP tool. Pass `script` for a tool only one blueprint
+    /// carries.
     #[arg(long)]
     pub kind: Option<String>,
     /// Decide as if `--allow <tool>` had been passed for the run.
@@ -259,15 +262,23 @@ fn arguments_of(args: &TestArgs) -> anyhow::Result<serde_json::Value> {
     }
 }
 
-/// Where the tool comes from: the `--kind` word, else guessed from the name.
+/// Where the tool comes from: the `--kind` word, else worked out the way
+/// dispatch works it out.
+///
+/// A built-in or sub-agent tool is known by its name, a script by the
+/// machine's tools directory, and whatever is left is an MCP server's. A script
+/// only one blueprint carries cannot be seen from here, which is the case
+/// `--kind script` is for.
 fn kind_of(args: &TestArgs) -> anyhow::Result<ToolKind> {
     let canonical = leviath_tools::canonical_tool_name(&args.tool);
     match args.kind.as_deref().map(str::to_ascii_lowercase).as_deref() {
-        None => Ok(ToolKind::classify(
-            canonical,
-            leviath_tools::is_builtin_tool(canonical),
-            false,
-        )),
+        None => {
+            let is_builtin = leviath_tools::is_builtin_tool(canonical);
+            // The tools directory is walked only for a name no built-in has.
+            let is_script = !is_builtin
+                && crate::tool_inventory::ToolInventory::machine_offers_script(&args.tool);
+            Ok(ToolKind::classify(canonical, is_builtin, is_script))
+        }
         Some("builtin") => Ok(ToolKind::Builtin),
         Some("subagent") => Ok(ToolKind::Subagent),
         Some("script") => Ok(ToolKind::Script),
@@ -484,6 +495,13 @@ mod tests {
 
     #[test]
     fn test_reads_arguments_and_kinds() {
+        // A name given no kind is looked for in the tools directory, so this
+        // reads an empty one of its own rather than the machine's.
+        let home = tempfile::tempdir().unwrap();
+        temp_env::with_var("LEVIATH_HOME", Some(home.path()), arguments_and_kinds);
+    }
+
+    fn arguments_and_kinds() {
         let file = YoloFile::from_toml(
             "[p]\ndefault = \"ask\"\n[p.tools]\nallow = [\"@mcp\"]\ndeny = [\"@script\"]\n",
         )
@@ -542,6 +560,35 @@ mod tests {
                 .unwrap()
                 .starts_with("web_fetch: allow")
         );
+    }
+
+    /// With no `--kind`, a name the machine's tools directory holds a script
+    /// for is a script, so a `@scripts` rule reaches it and an `@mcp` rule
+    /// does not. A name nothing on the machine answers to is still an MCP
+    /// server's.
+    #[test]
+    fn a_tool_with_no_kind_is_a_script_when_the_machine_has_one_by_that_name() {
+        let home = tempfile::tempdir().unwrap();
+        temp_env::with_var("LEVIATH_HOME", Some(home.path()), || {
+            let tools = home.path().join(".leviath").join("tools");
+            std::fs::create_dir_all(&tools).unwrap();
+            std::fs::write(
+                tools.join("summarize.rhai"),
+                "// @tool summarize\n// @description sums\n1",
+            )
+            .unwrap();
+            let file = YoloFile::from_toml(
+                "[p]\ndefault = \"ask\"\n[p.tools]\nallow = [\"@mcp\"]\ndeny = [\"@scripts\"]\n",
+            )
+            .unwrap();
+            let p = file.get("p").unwrap();
+            let text =
+                render_test(&p, &test_args("p", "summarize", None), ToolPolicy::Ask).unwrap();
+            assert!(text.starts_with("summarize: deny"), "{text}");
+            let text =
+                render_test(&p, &test_args("p", "acme__thing", None), ToolPolicy::Ask).unwrap();
+            assert!(text.starts_with("acme__thing: allow"), "{text}");
+        });
     }
 
     #[test]

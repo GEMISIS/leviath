@@ -137,8 +137,9 @@ pub(super) struct TestReq {
     /// Left off, it is read from the config in force.
     #[serde(default)]
     pub configured: Option<String>,
-    /// `builtin`, `subagent`, `script` or `mcp`; guessed from the name when
-    /// left off.
+    /// `builtin`, `subagent`, `script` or `mcp`. Left off, it is worked out: a
+    /// built-in or sub-agent tool by its name, a script by the machine's tools
+    /// directory, anything else as an MCP tool.
     #[serde(default)]
     pub kind: Option<String>,
     /// Decide as if `--allow <tool>` had been passed.

@@ -99,6 +99,9 @@ pub(crate) struct SkippedScript {
     pub reason: String,
     /// Which directory it was found in.
     pub source: ToolSource,
+    /// The name it declares, when the reason is that a listed tool already
+    /// has it. `None` for a file that did not compile.
+    pub taken: Option<String>,
 }
 
 /// The full tool inventory for one scope: an agent plus the global directory,
@@ -195,6 +198,7 @@ impl ToolInventory {
                     path: f.path,
                     reason: f.reason,
                     source,
+                    taken: None,
                 });
             }
             for (meta, path) in set.sources() {
@@ -206,6 +210,7 @@ impl ToolInventory {
                             meta.name
                         ),
                         source,
+                        taken: Some(meta.name),
                     });
                     continue;
                 }
@@ -232,6 +237,18 @@ impl ToolInventory {
     /// Just the names, which is all the lint needs to answer "is this a tool".
     pub(crate) fn names(&self) -> HashSet<String> {
         self.tools.iter().map(|t| t.name.clone()).collect()
+    }
+
+    /// Whether the machine-wide tools directory offers a script called `name`.
+    ///
+    /// A script only one blueprint carries is not counted: answering for it
+    /// takes knowing the blueprint, and a caller asking about the machine has
+    /// none.
+    pub(crate) fn machine_offers_script(name: &str) -> bool {
+        Self::discover(None, None)
+            .tools
+            .iter()
+            .any(|tool| tool.source == ToolSource::Global && tool.name == name)
     }
 }
 

@@ -81,12 +81,26 @@ same list.
 - A `gpt-audio` stage whose declared output includes `audio/*` is sent to Chat
   Completions with `modalities` and `audio` set, and the audio that comes back
   becomes an output part (`voice` and `audio_format` parameters).
+- GraphQL: a script tool and the script it is lead to each other. A tool is
+  called by what its `@tool` line declares and a script is filed under its
+  file's name, and nothing joined the two. `ScriptToolOutput.script` is the
+  script, `ScriptOutput.tool` is the tool the file offers (null when it offers
+  none), `SkippedToolOutput.takenBy` is the tool that has a skipped file's
+  name, and `BundledToolOutput.script` is the installed global copy.
+- GraphQL: `YoloProfileOutput.decide` no longer needs `kind`. Left off, the
+  server works out where the tool comes from the way dispatch does.
 
 ### Fixed
 
 - OpenRouter looks a bare model name (`claude-sonnet-5.5`) up in its listing, so routing, rates,
   limits, modalities and cache markers all describe one model. An exact id wins; of several ids
   sharing a last segment the smallest is taken, so the answer no longer depends on map order.
+- `lev yolo test`, `POST /api/yolo/test` and GraphQL `decide` judged a global
+  script tool as an MCP server's tool when no kind was given, so an `@scripts`
+  rule missed it and an `@mcp` rule caught it. With no kind, a name the global
+  tools directory holds a script for is now a script. A script only one
+  blueprint carries still needs `--kind script`, since the question does not
+  say which blueprint.
 - Under the default `shell_env = "filtered"`, every git command in a shell tool
   failed with `missing config key GIT_CONFIG_KEY_0` when the daemon's
   environment carried git's `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` /
