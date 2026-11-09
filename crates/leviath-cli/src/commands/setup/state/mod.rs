@@ -172,12 +172,12 @@ fn signed_in_as(path: Option<&std::path::Path>, provider: &str) -> Option<String
 impl Wizard {
     /// Build the wizard from the config *file* and the surrounding environment.
     ///
-    /// `base` must come from reading the file, not from `Config::load()`:
-    /// `load` folds `$ANTHROPIC_API_KEY` and friends into the struct, and the
-    /// old wizard then re-serialized the whole thing - silently writing a key
-    /// the user had deliberately kept in their environment into
-    /// `~/.leviath/config.toml`. Environment-supplied credentials are tracked
-    /// separately in `env_only` and shown as such.
+    /// `base` must be the config as it is kept ([`Config::as_stored`]), not
+    /// one fresh from a load: a load folds `$ANTHROPIC_API_KEY` and friends
+    /// into the struct, and a wizard built on that would offer a key the
+    /// user deliberately keeps in their environment as a stored one.
+    /// Environment-supplied credentials are tracked separately in `env_only`
+    /// and shown as such.
     pub(crate) fn new(
         base: Config,
         env_lookup: &dyn Fn(&str) -> Option<String>,

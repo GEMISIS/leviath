@@ -923,7 +923,7 @@ fn env_names_are_the_variables_the_fill_reads() {
         asked.lock().unwrap().push(name.to_string());
         None
     };
-    UserSettings::default().fill_from_env(&recording, &mut BTreeMap::new(), &mut Vec::new());
+    UserSettings::default().fill_from_env(&recording, &mut Vec::new());
     let mut asked = asked.into_inner().unwrap();
     asked.sort_unstable();
     let mut names = env_names();
@@ -941,11 +941,85 @@ fn the_region_comes_from_aws_region_first() {
             ("AWS_REGION", "us-west-2"),
             ("AWS_DEFAULT_REGION", "eu-west-1"),
         ]),
-        &mut BTreeMap::new(),
         &mut Vec::new(),
     );
     assert_eq!(
         settings.providers.bedrock_region.as_deref(),
         Some("us-west-2")
     );
+}
+
+/// The fill says what it took from the environment, and that can be taken
+/// back out: a host that saves the settings does not write a key the user
+/// keeps in their environment. A slot changed since the fill is the host's
+/// own value and stays, and a slot the file had filled was never the
+/// environment's.
+#[test]
+fn what_the_environment_filled_can_be_taken_back_out() {
+    let env = env_of(&[
+        ("ANTHROPIC_API_KEY", "ant-env"),
+        ("OPENAI_API_KEY", "openai-env"),
+        ("OPENROUTER_API_KEY", "or-env"),
+        ("GOOGLE_API_KEY", "google-env"),
+        ("ANTHROPIC_BASE_URL", "https://ant.gateway"),
+        ("OPENAI_BASE_URL", "https://openai.gateway"),
+        ("AWS_REGION", "eu-west-1"),
+        ("OLLAMA_HOST", "http://ollama.box"),
+    ]);
+    let mut settings = UserSettings::default();
+    settings.providers.google_api_key = Some("google-file".to_string());
+    let fill = settings.fill_from_env(&env, &mut Vec::new());
+    assert_eq!(
+        fill.keys().collect::<Vec<_>>(),
+        ["anthropic", "openai", "openrouter"]
+    );
+    let rendered = format!("{fill:?}");
+    assert!(rendered.contains("\"openrouter\""), "{rendered}");
+    assert!(
+        !rendered.contains("-env") && !rendered.contains("gateway") && !rendered.contains("box"),
+        "a value was printed: {rendered}"
+    );
+
+    // Changed since the fill: these are whoever is saving's own.
+    settings.providers.openai_api_key = Some("openai-typed".to_string());
+    settings.providers.openai_base_url = Some("https://typed.gateway".to_string());
+    let mut stored = settings.clone();
+    stored.without_env_fill(&fill);
+    assert_eq!(stored.providers.anthropic_api_key, None);
+    assert_eq!(stored.openrouter_api_key, None);
+    assert_eq!(stored.providers.anthropic_base_url, None);
+    assert_eq!(stored.providers.bedrock_region, None);
+    assert_eq!(stored.ollama_base_url, None);
+    assert_eq!(
+        stored.providers.openai_api_key.as_deref(),
+        Some("openai-typed")
+    );
+    assert_eq!(
+        stored.providers.openai_base_url.as_deref(),
+        Some("https://typed.gateway")
+    );
+    assert_eq!(
+        stored.providers.google_api_key.as_deref(),
+        Some("google-file")
+    );
+
+    // The region and the address, changed since the fill, stay too.
+    let mut stored = settings.clone();
+    stored.providers.bedrock_region = Some("ap-south-1".to_string());
+    stored.ollama_base_url = Some("http://typed".to_string());
+    stored.without_env_fill(&fill);
+    assert_eq!(
+        stored.providers.bedrock_region.as_deref(),
+        Some("ap-south-1")
+    );
+    assert_eq!(stored.ollama_base_url.as_deref(), Some("http://typed"));
+
+    // Nothing filled is nothing to take out: settings the environment never
+    // touched come through as they were, unset fields included.
+    let mut untouched = UserSettings::default();
+    let nothing = untouched.fill_from_env(&env_of(&[]), &mut Vec::new());
+    assert_eq!(nothing.keys().count(), 0);
+    untouched.without_env_fill(&nothing);
+    assert_eq!(untouched.providers.bedrock_region, None);
+    assert_eq!(untouched.ollama_base_url, None);
 }

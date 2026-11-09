@@ -257,3 +257,156 @@ fn an_ignored_provider_setting_is_said_once_where_the_file_is_loaded() {
     });
     assert_eq!(said(&asked, "ignoring"), 0, "{asked:?}");
 }
+
+/// Run `f` with the process environment a load reads provider settings from
+/// holding exactly `vars`.
+fn with_provider_env<R>(vars: &[(&str, &str)], f: impl FnOnce() -> R) -> R {
+    let mut all: Vec<(String, Option<String>)> = leviath_runtime::user_creds::env_names()
+        .into_iter()
+        .map(|name| (name.to_string(), None))
+        .collect();
+    for (name, value) in vars {
+        all.retain(|(n, _)| n != name);
+        all.push((name.to_string(), Some(value.to_string())));
+    }
+    temp_env::with_vars(all, f)
+}
+
+/// A store a test keeps a handle on after handing it to a load or a save.
+struct Kept(std::sync::Arc<leviath_core::MemoryStore>);
+impl leviath_core::CredentialStore for Kept {
+    fn get(&self, account: &str) -> Result<Option<String>, String> {
+        self.0.get(account)
+    }
+    fn set(&self, account: &str, secret: &str) -> Result<(), String> {
+        self.0.set(account, secret)
+    }
+    fn delete(&self, account: &str) -> Result<bool, String> {
+        self.0.delete(account)
+    }
+}
+
+/// Every command that edits the config loads it, changes one thing and saves
+/// it. The load fills what the file leaves unset from the environment, and a
+/// save that wrote the struct as it stood would pin a key the user keeps in
+/// their environment, a gateway address and a region into `config.toml`.
+#[test]
+fn a_save_does_not_write_what_the_environment_supplied() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "[providers]\nopenai_api_key = \"file-key\"\n").unwrap();
+    let from_env = [
+        ("ANTHROPIC_API_KEY", "sk-ant-env"),
+        ("OPENROUTER_API_KEY", "sk-or-env"),
+        ("OPENAI_BASE_URL", "http://gateway.example"),
+        ("AWS_REGION", "eu-west-1"),
+        ("OLLAMA_HOST", "http://ollama.box:11434"),
+    ];
+    with_provider_env(&from_env, || {
+        let mut config = Config::load_from_path(&path).expect("loads");
+        // What a writer does: one unrelated change.
+        config.update_check = !config.update_check;
+        config.save_to_path(&path).expect("saves");
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        for (name, value) in from_env {
+            assert!(!text.contains(value), "{name} was written:\n{text}");
+        }
+        assert!(text.contains("file-key"), "{text}");
+        // The config in hand is the one a run is using: it keeps them.
+        assert_eq!(
+            config.providers.anthropic_api_key.as_deref(),
+            Some("sk-ant-env")
+        );
+        assert_eq!(
+            config.providers.openai_base_url.as_deref(),
+            Some("http://gateway.example")
+        );
+
+        // And what was written reads back to the same settings.
+        let again = Config::load_from_path(&path).expect("loads again");
+        assert!(
+            provider_creds_from_config(&again) == provider_creds_from_config(&config),
+            "the saved file builds different providers"
+        );
+    });
+}
+
+/// A value set after the load is the user's, wherever the environment had
+/// one of its own.
+#[test]
+fn a_value_set_after_the_load_is_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let env = |name: &str| match name {
+        "ANTHROPIC_API_KEY" => Some("sk-ant-env".to_string()),
+        "OLLAMA_HOST" => Some("http://ollama.box:11434".to_string()),
+        "GOOGLE_BASE_URL" => Some("http://google.gateway".to_string()),
+        "AWS_DEFAULT_REGION" => Some("eu-west-1".to_string()),
+        _ => None,
+    };
+    let mut config = Config::default();
+    config.fill_from_env(&env);
+    config.providers.anthropic_api_key = Some("sk-ant-typed".to_string());
+    config.ollama_base_url = Some("http://typed:11434".to_string());
+    config.providers.google_base_url = Some("http://typed.gateway".to_string());
+    config.providers.bedrock_region = Some("ap-south-1".to_string());
+    config.write_to(&path, Ok(None)).expect("saves");
+
+    let text = std::fs::read_to_string(&path).unwrap();
+    for typed in [
+        "sk-ant-typed",
+        "http://typed:11434",
+        "http://typed.gateway",
+        "ap-south-1",
+    ] {
+        assert!(text.contains(typed), "{typed} was dropped:\n{text}");
+    }
+    assert!(!text.contains("sk-ant-env"), "{text}");
+}
+
+/// In keychain mode a save copies every key it holds into the OS store. A
+/// key that came from the environment is not one to keep there, and one the
+/// store supplied is: it reaches the file when the store is given up.
+#[test]
+fn a_keychain_save_stores_no_key_the_environment_supplied() {
+    use leviath_core::CredentialStore;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let store = std::sync::Arc::new(leviath_core::MemoryStore::new());
+    store.set("provider/openai", "sk-openai-kept").unwrap();
+    let kept = || {
+        Ok(Some(
+            Box::new(Kept(store.clone())) as Box<dyn CredentialStore>
+        ))
+    };
+
+    let mut config = Config::default();
+    config.security.credential_store = leviath_core::CredentialStoreKind::Keychain;
+    config.fill_from_env(&|name| (name == "ANTHROPIC_API_KEY").then(|| "sk-ant-env".to_string()));
+    config.fill_from_credential_store_with(kept());
+    assert_eq!(
+        config.providers.openai_api_key.as_deref(),
+        Some("sk-openai-kept")
+    );
+    config.write_to(&path, kept()).expect("saves");
+    assert_eq!(store.get("provider/anthropic").unwrap(), None);
+    assert_eq!(
+        store.get("provider/openai").unwrap().as_deref(),
+        Some("sk-openai-kept")
+    );
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        !text.contains("sk-ant-env") && !text.contains("sk-openai-kept"),
+        "{text}"
+    );
+
+    // Giving the store up, as `lev auth migrate --to-file` does: what it
+    // supplied is written, what the environment supplied still is not.
+    config.security.credential_store = leviath_core::CredentialStoreKind::File;
+    config.write_to(&path, Ok(None)).expect("saves");
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("sk-openai-kept"), "{text}");
+    assert!(!text.contains("sk-ant-env"), "{text}");
+}

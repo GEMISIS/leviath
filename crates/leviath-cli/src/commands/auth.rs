@@ -492,7 +492,9 @@ fn migrate(
     dry_run: bool,
     grant_path: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
-    let config = Config::load_from_path(path)?;
+    // What is kept, in the file or the store: a key that is only in the
+    // environment is in neither, and is not this command's to move.
+    let config = Config::load_from_path(path)?.as_stored();
     let plan = plan_migration(&config, to_file);
 
     if plan.moving.is_empty() {
@@ -1539,6 +1541,35 @@ mod tests {
         run_auth(&path, AuthArgs::migrate_for_test(false, false)).expect("migrate succeeds");
         let after = std::fs::read_to_string(&path).unwrap();
         assert!(!after.contains("sk-ant-secret"), "{after}");
+    }
+
+    /// A key in the environment is in neither the file nor the keychain, so
+    /// a migration has nothing of it to move: it is not copied into the OS
+    /// store on the way.
+    #[test]
+    fn execute_migrate_leaves_a_key_from_the_environment_where_it_is() {
+        let _guard = with_mock_store();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        Config::default().save_to_path(&path).unwrap();
+
+        let mut vars: Vec<(&str, Option<&str>)> = leviath_runtime::user_creds::env_names()
+            .into_iter()
+            .filter(|name| *name != "ANTHROPIC_API_KEY")
+            .map(|name| (name, None))
+            .collect();
+        vars.push(("ANTHROPIC_API_KEY", Some("sk-ant-env")));
+        temp_env::with_vars(vars, || {
+            run_auth(&path, AuthArgs::migrate_for_test(false, false))
+                .expect("nothing to do succeeds");
+            let store = keychain().expect("the mock store").expect("a store");
+            assert_eq!(
+                store
+                    .get(&leviath_core::provider_account("anthropic"))
+                    .unwrap(),
+                None
+            );
+        });
     }
 
     /// With nothing configured there is nothing to move, and that is reported

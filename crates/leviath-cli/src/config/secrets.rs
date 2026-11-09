@@ -181,19 +181,22 @@ impl Config {
         path: &std::path::Path,
         resolved: crate::credentials::Resolved,
     ) -> anyhow::Result<()> {
+        // What is kept, in the file or in the store, is the config without
+        // what the environment supplied on the way in.
+        let stored = self.as_stored();
         let to_write = match resolved.map_err(|e| anyhow::anyhow!("{e}"))? {
             Some(store) => {
-                let tools = self.tool_credentials.secrets().map(|(name, secret)| {
+                let tools = stored.tool_credentials.secrets().map(|(name, secret)| {
                     (super::tool_credentials::account(name), secret.to_string())
                 });
-                for (account, secret) in self.provider_secrets().into_iter().chain(tools) {
+                for (account, secret) in stored.provider_secrets().into_iter().chain(tools) {
                     store
                         .set(&account, &secret)
                         .map_err(|e| anyhow::anyhow!("failed to store {account}: {e}"))?;
                 }
-                self.without_secrets()
+                stored.without_secrets()
             }
-            None => self.clone(),
+            None => stored,
         };
 
         // Config contains only primitive-typed fields; toml serialization is infallible.

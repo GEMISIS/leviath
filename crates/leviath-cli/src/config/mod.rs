@@ -396,6 +396,12 @@ pub struct Config {
     /// `[security] credential_store`; see [`ToolCredentials`].
     #[serde(default, skip_serializing_if = "is_empty_credentials")]
     pub tool_credentials: ToolCredentials,
+
+    /// What loading this config took from the environment, and so what a
+    /// save leaves out: see [`as_stored`](Self::as_stored). Not a key of the
+    /// file, and empty for a config that was built rather than loaded.
+    #[serde(skip)]
+    pub(crate) env_fill: leviath_runtime::user_creds::EnvFill,
 }
 
 /// Whether there is no `[tool_credentials]` table worth writing.
@@ -440,6 +446,7 @@ impl Default for Config {
             mime_types: toml::Table::new(),
             agent_read_paths: HashMap::new(),
             tool_credentials: ToolCredentials::default(),
+            env_fill: leviath_runtime::user_creds::EnvFill::default(),
         }
     }
 }
@@ -4334,6 +4341,7 @@ enabled = false
             update_check: true,
             load_dotenv: false,
             tool_credentials: ToolCredentials::default(),
+            env_fill: leviath_runtime::user_creds::EnvFill::default(),
             mime: MimeConfig::default(),
             mime_types: toml::Table::new(),
             default_provider: "anthropic".to_string(),
