@@ -15,7 +15,7 @@ use super::super::super::super::types::AppState;
 use super::super::run::counted;
 use super::delta::StateDelta;
 use super::graph::RunGraph;
-use super::spec::RunSpec;
+use super::spec::{RunSpec, ToolDef};
 use super::state::RunState;
 
 /// `read`'s answer, with a run that has no run file read as `None`.
@@ -38,6 +38,33 @@ pub(crate) async fn spec(run_id: &str) -> Result<Option<RunSpec>, ServeError> {
     let id = run_id.to_string();
     let spec = present(blocking(move || inspect::spec(&id)).await)?;
     Ok(spec.as_ref().map(RunSpec::from))
+}
+
+/// A tool as one stage of a run was given it, by the name the model called.
+///
+/// The spec keeps one plan per stage, in the graph's order, and each plan
+/// holds the tools the stage was offered, frozen when the run was resolved. A
+/// name the model used in place of the one offered is found under the tool it
+/// stands for. `None` for a run with no run file, and for a name the stage
+/// was not offered.
+pub(crate) async fn offered_tool(
+    run_id: &str,
+    stage_index: usize,
+    tool: &str,
+) -> Result<Option<ToolDef>, ServeError> {
+    counted(run_id);
+    let id = run_id.to_string();
+    let spec = present(blocking(move || inspect::spec(&id)).await)?;
+    let canonical = leviath_tools::canonical_tool_name(tool);
+    Ok(spec
+        .iter()
+        .filter_map(|spec| spec.stages.get(stage_index))
+        .flat_map(|plan| &plan.tools)
+        .find(|def| {
+            let offered = def.name.as_str();
+            offered == tool || leviath_tools::canonical_tool_name(offered) == canonical
+        })
+        .map(ToolDef::from))
 }
 
 /// The run's state at step `at`, or now: the daemon's answer while it holds

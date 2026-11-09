@@ -585,6 +585,7 @@ you can ask for rather than pair up yourself.
     executions(first: 20, filter: { outcome: { eq: FAILED } }) {
       results {
         id
+        definition { name description schema source scriptDigest }
         visit { id ordinal enteredAt leftAt inProgress }
         requestedBy { attempt provider model outcome { kind } }
         contextChanges { cause revisionAfter regions { region tokenDelta } }
@@ -595,6 +596,13 @@ you can ask for rather than pair up yourself.
   }
 }
 ```
+
+`definition` is the tool as the stage was given it: the description and argument schema the model
+read when it made the call. It comes from the run's own file, which froze every stage's tools when
+the run was resolved, so it does not change when this build or this machine describes the tool
+differently later. A script tool carries the digest of the code that ran. That is why
+`call.toolDescription` stays null on an execution: the only description worth showing is the one
+the run kept, and it is here. `definition` is null for a call to a name the stage did not offer.
 
 `visit` is the stay, and it is the key to correlate on. `stageIndex` says where an execution sat,
 not which stay it belonged to: a stage entered three times has one index and three visits, and

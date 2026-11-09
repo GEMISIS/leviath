@@ -16,6 +16,7 @@ use super::super::error::IntoGraphql;
 use super::super::filter::MatchCx;
 use super::super::paging::page::page;
 use super::super::scalars::{BigInt, Cursor, Timestamp};
+use super::runfile::spec::ToolDef;
 use super::tool_calls::{ToolCall, tool_call};
 use crate::blocking::blocking;
 use crate::commands::serve::core::{context_changes, executions, inferences};
@@ -108,8 +109,26 @@ impl ToolExecution {
         // The description is left out here. It would have to come from this
         // build's tool catalog, which describes the tool as it is now rather
         // than as it was when the call was made, and a run's history should not
-        // quietly re-word itself after an upgrade.
+        // quietly re-word itself after an upgrade. `definition` carries the one
+        // the run froze.
         tool_call(&self.record.tool, None, &self.record.arguments)
+    }
+
+    /// The tool as this run's stage was given it: its description and the
+    /// schema of its arguments, as the model read them when it made the call.
+    ///
+    /// Read from the run's own file, which froze every stage's tools when the
+    /// run was resolved, so it stays what the model saw whatever this build or
+    /// this machine describes the tool as now. A script tool carries the
+    /// digest of the code that ran, and an MCP tool its server.
+    ///
+    /// Null for a run with no run file, and for a call to a name the stage did
+    /// not offer.
+    #[filter(skip)]
+    async fn definition(&self) -> async_graphql::Result<Option<ToolDef>> {
+        super::runfile::read::offered_tool(&self.run_id, self.record.stage_index, &self.record.tool)
+            .await
+            .gql()
     }
 
     /// The provider's own id for the call, kept as correlation.

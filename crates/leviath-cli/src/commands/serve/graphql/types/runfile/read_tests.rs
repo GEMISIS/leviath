@@ -13,6 +13,7 @@ use leviath_runtime::state::{RunEvent, RunStatus, TransitionReason, TransitionRe
 
 use super::super::read;
 use crate::commands::serve::graphql::query::Query;
+use crate::commands::serve::graphql::types::execution::ToolExecution;
 use crate::commands::serve::testutil::{fake_daemon, no_daemon_client, state_with_agent_paths};
 use crate::commands::serve::types::AppState;
 use crate::config::Config;
@@ -389,5 +390,132 @@ async fn a_bad_step_behind_a_checkpoint_fails_only_what_reads_it() {
             .expect_err("a step does not decode");
         assert_eq!(failure.code(), "INTERNAL");
     })
+    .await;
+}
+
+/// A root handing out one execution.
+struct OneCall {
+    execution: ToolExecution,
+}
+
+#[async_graphql::Object]
+impl OneCall {
+    /// The execution under test.
+    async fn execution(&self) -> &ToolExecution {
+        &self.execution
+    }
+}
+
+/// What `definition` answers for a call to `tool` that the journal of
+/// `run_id` recorded in the stage at `stage_index`.
+async fn definition_of(run_id: &str, stage_index: usize, tool: &str) -> serde_json::Value {
+    let execution = ToolExecution {
+        run_id: run_id.to_string(),
+        record: leviath_runtime::runfile::history::Execution {
+            id: "x1".to_string(),
+            call_id: "c1".to_string(),
+            tool: tool.to_string(),
+            arguments: "{}".to_string(),
+            stage_index,
+            iteration: 1,
+            visit_id: String::new(),
+            requested_by: String::new(),
+            artifacts: Vec::new(),
+            dispatched_at: 100,
+            position: 1,
+            ended_at: None,
+            result_position: None,
+            outcome: None,
+        },
+    };
+    let answer = Schema::build(OneCall { execution }, EmptyMutation, EmptySubscription)
+        .data(state_with_agent_paths(Vec::new()))
+        .finish()
+        .execute(Request::new(
+            "{ execution { definition { name description schema source scriptDigest } } }",
+        ))
+        .await;
+    serde_json::to_value(&answer).expect("the answer serializes")
+}
+
+/// An execution reads the tool as its own stage was given it, from the run's
+/// file: the name, the words and the argument schema the model had.
+#[tokio::test]
+async fn an_execution_reads_the_tool_its_stage_was_given() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-runfile-offered", |_base| async move {
+        let runs = crate::runstate::runs_dir();
+        let run_id = walked(&runs);
+        let spec = RunFileReader::read(&file_of(&runs, &run_id))
+            .expect("the run file reads")
+            .spec()
+            .clone();
+        let pinned = spec.stages[0]
+            .tools
+            .iter()
+            .find(|tool| tool.name.as_str() == "read_file")
+            .expect("the first stage is given read_file");
+
+        let answer = definition_of(&run_id, 0, "read_file").await;
+        assert_eq!(answer["errors"], serde_json::Value::Null, "{answer}");
+        let definition = &answer["data"]["execution"]["definition"];
+        assert_eq!(definition["name"], "read_file");
+        assert_eq!(definition["description"], pinned.description.as_str());
+        assert_eq!(&definition["schema"], pinned.schema.value());
+        assert_eq!(definition["source"], "BUILTIN");
+        assert_eq!(definition["scriptDigest"], serde_json::Value::Null);
+
+        // A name the stage was not given has no definition there, though a
+        // later stage is given it.
+        let elsewhere = definition_of(&run_id, 0, "write_file").await;
+        assert_eq!(elsewhere["errors"], serde_json::Value::Null, "{elsewhere}");
+        assert!(elsewhere["data"]["execution"]["definition"].is_null());
+        let later = definition_of(&run_id, 1, "write_file").await;
+        assert_eq!(
+            later["data"]["execution"]["definition"]["name"],
+            "write_file"
+        );
+
+        // The second stage is given the shell under one of its names, and a
+        // call under the other finds the same definition.
+        let shell = read::offered_tool(&run_id, 1, "shell")
+            .await
+            .expect("the spec reads")
+            .expect("the shell, by its own name");
+        let bash = read::offered_tool(&run_id, 1, "bash")
+            .await
+            .expect("the spec reads")
+            .expect("the shell, by its other name");
+        assert_eq!(shell.name, bash.name);
+        assert_eq!(shell.description, bash.description);
+
+        // A stage the graph does not have, and a run with no run file.
+        let past = read::offered_tool(&run_id, 99, "read_file")
+            .await
+            .expect("the spec reads");
+        assert!(past.is_none());
+        let absent = definition_of("no-such-run", 0, "read_file").await;
+        assert_eq!(absent["errors"], serde_json::Value::Null, "{absent}");
+        assert!(absent["data"]["execution"]["definition"].is_null());
+    })
+    .await;
+}
+
+/// A run file that no longer reads fails the definition, rather than reading
+/// as a call to a tool the stage was never given.
+#[tokio::test]
+async fn a_definition_read_from_a_broken_run_file_fails() {
+    crate::runstate::with_isolated_runs_dir_async(
+        "graphql-runfile-offered-bad",
+        |_base| async move {
+            let runs = crate::runstate::runs_dir();
+            let run_id = walked(&runs);
+            std::fs::write(file_of(&runs, &run_id), b"not a run file")
+                .expect("the file is rewritten");
+
+            let answer = definition_of(&run_id, 0, "read_file").await;
+            assert!(answer["errors"].is_array(), "{answer}");
+            assert!(answer["data"]["execution"]["definition"].is_null());
+        },
+    )
     .await;
 }

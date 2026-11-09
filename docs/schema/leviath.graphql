@@ -18301,6 +18301,19 @@ type ToolExecutionOutput {
 	"The call this attempt was carrying out, typed by its tool."
 	call: ToolCall!
 	"""
+	The tool as this run's stage was given it: its description and the
+	schema of its arguments, as the model read them when it made the call.
+	
+	Read from the run's own file, which froze every stage's tools when the
+	run was resolved, so it stays what the model saw whatever this build or
+	this machine describes the tool as now. A script tool carries the
+	digest of the code that ran, and an MCP tool its server.
+	
+	Null for a run with no run file, and for a call to a name the stage did
+	not offer.
+	"""
+	definition: ToolDefOutput
+	"""
 	The provider's own id for the call, kept as correlation.
 	
 	Not an identity: a provider may reuse one across a retry or a reissue. It
