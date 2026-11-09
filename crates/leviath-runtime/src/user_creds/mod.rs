@@ -25,7 +25,14 @@
 //! the CLI's configuration is a superset of what this reads.
 
 mod creds;
+mod model_provider;
+mod provider_config;
+pub mod renamed;
 mod settings;
+
+pub use model_provider::{ModelProviderConfig, ModelProviderKind};
+pub use provider_config::ProviderConfig;
+pub use settings::{SecuritySettings, UserSettings};
 
 use crate::pipeline::ModelDefaults;
 use crate::provider_creds::ProviderCreds;
@@ -275,8 +282,8 @@ pub fn load_user_creds(source: &UserCredsSource<'_>) -> Result<UserCreds, UserCr
         .config_path
         .clone()
         .unwrap_or_else(|| source.data_dir.join("config.toml"));
-    let mut settings = read_settings(path)?;
     let mut warnings = Vec::new();
+    let mut settings = read_settings(path, &mut warnings)?;
 
     let mut origins = BTreeMap::new();
     for keyed in KEYED_PROVIDERS {
@@ -328,17 +335,38 @@ pub fn load_user_creds(source: &UserCredsSource<'_>) -> Result<UserCreds, UserCr
 /// resolve is the defaults, and a file that is there but will not read is
 /// an error.
 ///
+/// A key that changed name is respelled in the text before it is parsed, by
+/// the rewrite `lev` runs, and each one this loader reads is named in
+/// `warnings`. Done on the text, so a parse error still points at its line.
+///
 /// [`Path::exists`]: std::path::Path::exists
-fn read_settings(path: PathBuf) -> Result<settings::Settings, UserCredsError> {
+fn read_settings(
+    path: PathBuf,
+    warnings: &mut Vec<String>,
+) -> Result<UserSettings, UserCredsError> {
     if !path.exists() {
-        return Ok(settings::Settings::default());
+        return Ok(UserSettings::default());
     }
     let text = std::fs::read_to_string(&path).map_err(|source| UserCredsError::Read {
         path: path.clone(),
         source,
     })?;
-    toml::from_str(&text).map_err(|source| UserCredsError::Parse { path, source })
+    let (text, renames) = renamed::rename_in_text(&text);
+    let settings =
+        toml::from_str(&text).map_err(|source| UserCredsError::Parse { path, source })?;
+    warnings.extend(
+        renames
+            .iter()
+            .filter(|renamed| READ_TABLES.contains(&renamed.key.section))
+            .map(renamed::notice),
+    );
+    Ok(settings)
 }
+
+/// The tables [`UserSettings`] reads keys from: the top of the file, and
+/// these. A renamed key anywhere else (`[sandbox]`, say) is not this
+/// loader's to report.
+const READ_TABLES: &[Option<&str>] = &[None, Some("providers"), Some("security")];
 
 #[cfg(test)]
 mod tests;

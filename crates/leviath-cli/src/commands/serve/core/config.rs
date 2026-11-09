@@ -217,9 +217,7 @@ fn written(path: &std::path::Path, req: WriteConfigReq) -> Result<Config, ServeE
     // The same check the loader makes, made before the write: a file this
     // would refuse to read back is not a file worth saving.
     for (name, provider) in &config.model_providers {
-        provider
-            .validate(name)
-            .map_err(|e| ServeError::BadRequest(e.to_string()))?;
+        provider.validate(name).map_err(ServeError::BadRequest)?;
     }
 
     config
