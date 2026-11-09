@@ -282,7 +282,7 @@ mod tests {
         use leviath_providers::directory::{Credential, PROVIDERS, meta};
         for key in PROVIDER_KEYS {
             let row = meta(key.provider).expect("in the directory");
-            assert_eq!(row.env_var, Some(key.env), "{}", key.provider);
+            assert_eq!(row.env_var, Some(key.env()), "{}", key.provider);
         }
         for row in PROVIDERS
             .iter()
@@ -293,6 +293,16 @@ mod tests {
                 "{} is an API-key provider with no key slot",
                 row.id
             );
+        }
+    }
+
+    /// The runtime's keyed-provider table and the directory cannot drift:
+    /// each entry's key variable is the directory row's.
+    #[test]
+    fn the_runtime_table_env_vars_match_the_directory() {
+        for entry in leviath_runtime::KEYED_PROVIDERS {
+            let row = leviath_providers::directory::meta(entry.provider).expect("in the directory");
+            assert_eq!(row.env_var, Some(entry.key_env), "{}", entry.provider);
         }
     }
 
