@@ -89,6 +89,11 @@ same list.
   name, and `BundledToolOutput.script` is the installed global copy.
 - GraphQL: `YoloProfileOutput.decide` no longer needs `kind`. Left off, the
   server works out where the tool comes from the way dispatch does.
+- GraphQL: `ToolExecutionOutput.definition` is the tool as the run's stage was
+  given it, read from the run file: the description and argument schema the
+  model had when it made the call, and a script tool's code digest. An
+  execution named its tool and nothing else, so what the model had been told
+  about it could only be looked up against the machine as it is now.
 
 ### Fixed
 
