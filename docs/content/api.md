@@ -1163,13 +1163,20 @@ The answer comes back before the file exists. That is the point of a job: the re
 milliseconds however large the store is. Poll it, and fetch it when it is ready:
 
 ```graphql
-{ runExport(id: "export-1789865498-0") { status written error downloadUrl } }
+{
+  runExport(id: "export-1789865498-0") {
+    status written error
+    downloadUrl downloadUrlExpiresAt
+    startedAt expiresAt
+  }
+}
 ```
 
 `status` is `QUEUED`, `RUNNING`, `COMPLETE` or `FAILED`. `written` counts the runs on disk so far.
 `downloadUrl` is null until the export is complete, and then it is a signed link to
 `GET /api/exports/{id}`, good for five minutes. That link needs no bearer token, so it can be the
-`href` of a download button.
+`href` of a download button. `downloadUrlExpiresAt` is when that link stops working. Every read
+mints a fresh one, so a client that is late asks again.
 
 The filter is the run listing's own, so a predicate that works for one works for the other.
 `fields` narrows each row to the top-level run fields you name, using the same names the listing
@@ -1184,7 +1191,8 @@ loop over ten thousand lines at either end.
 {"run_id":"run-b","status":"complete","cost_usd":0.0071}
 ```
 
-A file is kept for one hour, then removed along with its job record. Neither outlives the other, so
+A file is kept for one hour, then removed along with its job record. `expiresAt` is that hour's
+end, counted from `startedAt`. Neither outlives the other, so
 an id that has expired and one that was never started both answer 404. While the export is still
 running, or after it failed, the file route answers 409 and `runExport` carries the reason.
 

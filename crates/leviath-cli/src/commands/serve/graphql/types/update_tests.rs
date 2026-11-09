@@ -11,6 +11,7 @@ use async_graphql::{EmptyMutation, EmptySubscription, Request, Schema};
 use super::super::update::{
     DaemonStatus, UpdateJob, UpdateJobStatus, UpdatePlan, UpdateStep, UpdateStepStatus,
 };
+use crate::commands::serve::graphql::scalars::Timestamp;
 use crate::commands::update::detect::InstallMethod;
 use crate::commands::update::latest::LatestCheck;
 use crate::commands::update::{ConfigState, UpdatePlan as CorePlan};
@@ -361,6 +362,33 @@ async fn an_update_job_carries_its_steps() {
             .iter()
             .all(|step| step.status == UpdateStepStatus::Pending)
     );
+    // A job that has only started has a start and nothing after it.
+    assert_eq!(
+        job.started_at.0,
+        i64::try_from(started.started_at).expect("a clock reading")
+    );
+    assert!(job.finished_at.is_none());
+    assert!(!job.restart_required);
+}
+
+/// A finished job says when it finished and whether the binary moved, so a
+/// client that polls learns what the last frame told a client that listened.
+#[test]
+fn a_finished_update_job_says_when_and_whether_to_restart() {
+    use crate::commands::serve::update_job::{JobStatus, UpdateJob as Recorded};
+
+    let job = UpdateJob::from(Recorded {
+        id: "update-1788000000-0".to_string(),
+        status: JobStatus::Complete,
+        steps: Vec::new(),
+        restart_required: true,
+        restart_hint: Some("restart".to_string()),
+        started_at: 1_788_000_000,
+        finished_at: Some(1_788_000_042),
+    });
+    assert_eq!(job.started_at.0, 1_788_000_000);
+    assert_eq!(job.finished_at.map(|at| at.0), Some(1_788_000_042));
+    assert!(job.restart_required);
 }
 
 /// Every step, status and job status the registry can record has a value here.
@@ -530,6 +558,9 @@ async fn every_mirrored_function_runs() {
         id: async_graphql::ID("job-1".to_string()),
         status: UpdateJobStatus::Running,
         steps,
+        started_at: Timestamp(1_788_000_000),
+        finished_at: Some(Timestamp(1_788_000_060)),
+        restart_required: true,
     };
     exercise(std::slice::from_ref(&job)).await;
 }

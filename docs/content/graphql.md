@@ -1695,6 +1695,20 @@ check found, and asking starts another for whoever asks next rather than waiting
 can ask every time it opens. `startUpdate` runs it, `updateJob(id:)` follows one job and
 `updateJobs` lists them.
 
+```graphql
+query UpdateProgress($id: ID!) {
+  updateJob(id: $id) {
+    status startedAt finishedAt restartRequired
+    steps { step status detail }
+  }
+}
+```
+
+`restartRequired` says whether the binary on disk is now newer than this server and its daemon,
+which both keep running the old build until they are restarted. It is decided when the job
+finishes, so it is false while `finishedAt` is null. It is the same answer the job's last
+[frame](#live-frames) carries, for a client that polls instead of holding a stream.
+
 `serverTime` is the daemon's clock in unix epoch seconds. Every duration a run reports is measured
 against it, so a client drawing its own clocks should draw them against this rather than the
 browser's.

@@ -94,6 +94,13 @@ same list.
   model had when it made the call, and a script tool's code digest. An
   execution named its tool and nothing else, so what the model had been told
   about it could only be looked up against the machine as it is now.
+- GraphQL: an update job can be polled for what its last frame says.
+  `UpdateJobOutput` gains `restartRequired`, `startedAt` and `finishedAt`.
+  Whether an update left a newer binary on disk reached a client only on the
+  `UpdateFinishedEvent` frame, so one that polled never learned to restart.
+- GraphQL: `RunExportOutput` gains `startedAt`, `expiresAt` (when the file and
+  its record stop being kept) and `downloadUrlExpiresAt` (when the signed link
+  stops working).
 
 ### Fixed
 

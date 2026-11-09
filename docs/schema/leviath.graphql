@@ -12226,6 +12226,24 @@ type RunExportOutput implements Node {
 	complete, because there is nothing to fetch before then.
 	"""
 	downloadUrl: String
+	"""
+	When the link in `downloadUrl` stops working. Null when there is no
+	link.
+	
+	A few minutes from now, on purpose: each read of this export mints a
+	fresh link, so a client that is late asks again rather than keeping
+	one.
+	"""
+	downloadUrlExpiresAt: Timestamp
+	"When the export was asked for."
+	startedAt: Timestamp!
+	"""
+	When the export stops being kept, which is an hour after it started.
+	
+	The next export to start after this removes the file and this record,
+	so one that is still wanted is fetched before then or asked for again.
+	"""
+	expiresAt: Timestamp!
 }
 
 """
@@ -19888,6 +19906,29 @@ input UpdateJobInput {
 	whatever the request was.
 	"""
 	steps: UpdateJobStepListInput
+	"""
+	Filter on `UpdateJobOutput.startedAt`.
+	
+	When the job was started.
+	"""
+	startedAt: TimestampFilter
+	"""
+	Filter on `UpdateJobOutput.finishedAt`.
+	
+	When it reached `COMPLETE` or `FAILED`. Null while it is still going.
+	"""
+	finishedAt: TimestampFilter
+	"""
+	Filter on `UpdateJobOutput.restartRequired`.
+	
+	Whether the binary on disk is now newer than the processes serving
+	this. Both keep running the old build until they are restarted.
+	
+	Decided when the job finishes, so it is false on one still going, and
+	true only when the binary step ran and succeeded. The same answer the
+	job's last frame carries, for a client that polls.
+	"""
+	restartRequired: BooleanFilter
 	"Every filter in this list has to hold."
 	and: [UpdateJobInput!]
 	"At least one filter in this list has to hold."
@@ -19935,6 +19976,19 @@ type UpdateJobOutput implements Node {
 	whatever the request was.
 	"""
 	steps: [UpdateJobStepOutput!]!
+	"When the job was started."
+	startedAt: Timestamp!
+	"When it reached `COMPLETE` or `FAILED`. Null while it is still going."
+	finishedAt: Timestamp
+	"""
+	Whether the binary on disk is now newer than the processes serving
+	this. Both keep running the old build until they are restarted.
+	
+	Decided when the job finishes, so it is false on one still going, and
+	true only when the binary step ran and succeeded. The same answer the
+	job's last frame carries, for a client that polls.
+	"""
+	restartRequired: Boolean!
 }
 
 "Where an update run as a whole got to."

@@ -8,7 +8,7 @@ use leviath_graphql_derive::mirror;
 use super::super::super::types::AppState;
 use super::super::connection::Connection;
 use super::super::paging::order::{OrderDirection, Term};
-use super::super::scalars::Cursor;
+use super::super::scalars::{Cursor, Timestamp};
 use super::super::types::update::{
     UpdateJob, UpdateJobFilter, UpdateJobOrder, UpdateJobOrderField,
 };
@@ -131,6 +131,20 @@ pub(crate) struct RunExport {
     /// A short-lived signed link to the JSONL. Null until the export is
     /// complete, because there is nothing to fetch before then.
     pub(crate) download_url: Option<String>,
+    /// When the link in `downloadUrl` stops working. Null when there is no
+    /// link.
+    ///
+    /// A few minutes from now, on purpose: each read of this export mints a
+    /// fresh link, so a client that is late asks again rather than keeping
+    /// one.
+    pub(crate) download_url_expires_at: Option<Timestamp>,
+    /// When the export was asked for.
+    pub(crate) started_at: Timestamp,
+    /// When the export stops being kept, which is an hour after it started.
+    ///
+    /// The next export to start after this removes the file and this record,
+    /// so one that is still wanted is fetched before then or asked for again.
+    pub(crate) expires_at: Timestamp,
 }
 
 impl RunExport {
@@ -140,6 +154,8 @@ impl RunExport {
         job: &super::super::super::core::export::ExportJob,
     ) -> Self {
         let complete = job.status == super::super::super::core::export::ExportStatus::Complete;
+        let now = leviath_core::duration::now_secs();
+        let link_expires = Timestamp(now + super::super::super::signed_url::URL_TTL_SECS);
         Self {
             id: ID(job.id.clone()),
             status: ExportStatus::from(job.status),
@@ -150,9 +166,14 @@ impl RunExport {
                     &state.signer,
                     &format!("/api/exports/{}", job.id),
                     &[],
-                    leviath_core::duration::now_secs(),
+                    now,
                 )
             }),
+            download_url_expires_at: complete.then_some(link_expires),
+            started_at: Timestamp(job.started_at),
+            expires_at: Timestamp(
+                job.started_at + super::super::super::core::export::EXPORT_TTL_SECS,
+            ),
         }
     }
 }

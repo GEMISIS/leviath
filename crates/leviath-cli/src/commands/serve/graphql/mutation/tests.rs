@@ -1458,7 +1458,8 @@ async fn an_export_is_started_then_polled_for_its_link() {
             .execute(Request::new(
                 r#"mutation { startRunExport(request: { filter: { status: { in: [COMPLETE] } },
                      fields: ["run_id", "status"] })
-                     { export { id status written downloadUrl } } }"#,
+                     { export { id status written downloadUrl downloadUrlExpiresAt
+                                startedAt expiresAt } } }"#,
             ))
             .await;
         assert!(started.errors.is_empty(), "{:?}", started.errors);
@@ -1469,14 +1470,26 @@ async fn an_export_is_started_then_polled_for_its_link() {
             export["downloadUrl"].is_null(),
             "nothing to fetch before it is written"
         );
+        assert!(
+            export["downloadUrlExpiresAt"].is_null(),
+            "and so no link to expire"
+        );
+        // The export itself is kept for an hour from when it was asked for.
+        let started_at = export["startedAt"].as_i64().expect("a start");
+        assert_eq!(
+            export["expiresAt"].as_i64(),
+            Some(started_at + crate::commands::serve::core::export::EXPORT_TTL_SECS)
+        );
 
         // Poll until the worker has finished: the mutation answers before the
         // file exists, which is the point of a job.
         let mut link = None;
+        let mut link_expires = None;
         for _ in 0..200 {
             let polled = schema
                 .execute(Request::new(format!(
-                    "{{ runExport(id: \"{id}\") {{ status written error downloadUrl }} }}"
+                    "{{ runExport(id: \"{id}\")
+                         {{ status written error downloadUrl downloadUrlExpiresAt }} }}"
                 )))
                 .await;
             assert!(polled.errors.is_empty(), "{:?}", polled.errors);
@@ -1487,12 +1500,16 @@ async fn an_export_is_started_then_polled_for_its_link() {
                 link = json["runExport"]["downloadUrl"]
                     .as_str()
                     .map(str::to_string);
+                link_expires = json["runExport"]["downloadUrlExpiresAt"].as_i64();
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
         let link = link.expect("the export finished with a link");
         assert!(link.starts_with(&format!("/api/exports/{id}?")), "{link}");
+        // The expiry the field states is the one the link itself carries.
+        let expires = link_expires.expect("a link says when it stops working");
+        assert!(link.contains(&format!("exp={expires}&")), "{link}");
     })
     .await;
 }
