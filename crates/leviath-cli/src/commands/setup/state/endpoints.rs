@@ -994,7 +994,7 @@ mod tests {
             .expect("the provider field is an ordered priority")
             .to_vec();
         assert_eq!(providers, vec!["llama-cpp".to_string()]);
-        assert_eq!(w.build_config().default_provider, "llama-cpp");
+        assert_eq!(w.build_config().head_provider(), Some("llama-cpp"));
         assert_eq!(
             w.build_config().override_model.as_deref(),
             Some("qwen"),

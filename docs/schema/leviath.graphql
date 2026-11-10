@@ -2345,12 +2345,10 @@ type ConfigOutput {
 
 "The settings that belong to no one provider."
 input ConfigWrite {
-	"The provider a bare model name resolves on."
-	defaultProvider: String
 	"""
 	Providers allowed to serve a bare model name, best first. A list
-	replaces the order whole, and an empty one takes it back to
-	`defaultProvider` alone.
+	replaces the order whole, and an empty one clears it: no provider is
+	set up then, and only a stage that names its provider runs.
 	"""
 	providerOrder: [String!]
 	"""
@@ -11999,13 +11997,9 @@ input RetryDecisionFilter {
 "How a bare model name is resolved, and what overrides a stage's own choice."
 type RoutingConfigOutput {
 	"""
-	The provider a bare model name resolves on when the order below says
-	nothing.
-	"""
-	defaultProvider: String!
-	"""
-	The providers allowed to serve a bare model name, best first. Empty
-	means `defaultProvider` alone decides.
+	The providers allowed to serve a bare model name, best first. The
+	first is the one `overrideModel` and `fallbackModel` are asked of.
+	Empty means no provider is set up, and no bare model name is served.
 	"""
 	providerOrder: [String!]!
 	"The model every stage that permits it starts on, ahead of its own list."

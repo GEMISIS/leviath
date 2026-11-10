@@ -55,11 +55,8 @@ fn written(path: &std::path::Path, req: WriteConfigReq) -> Result<Config, ServeE
     let mut config = Config::load_from_path(path)
         .map_err(|e| ServeError::Internal(format!("failed to read config: {e}")))?;
 
-    if let Some(v) = req.default_provider {
-        config.default_provider = v;
-    }
-    // A present list replaces the order whole; an empty one clears it back to
-    // `default_provider` alone. Absent leaves it untouched, like every other
+    // A present list replaces the order whole; an empty one clears it, which
+    // leaves no provider set up. Absent leaves it untouched, like every other
     // partial field here.
     if let Some(order) = req.provider_order {
         config.providers.provider_order = order;

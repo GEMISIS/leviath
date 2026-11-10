@@ -219,7 +219,7 @@ async fn summarized_on(
 async fn a_bare_compaction_model_runs_on_the_users_provider() {
     let (registry, asked) = registry(&[("cfg", &["m", "small"])]);
     let defaults = ModelDefaults {
-        provider: "cfg".to_string(),
+        provider_order: vec!["cfg".to_string()],
         ..ModelDefaults::default()
     };
     let g = graph(
@@ -238,7 +238,7 @@ async fn a_bare_compaction_model_runs_on_the_users_provider() {
 async fn a_compaction_with_no_model_runs_on_the_stage_model() {
     let (registry, _) = registry(&[("cfg", &["m"])]);
     let defaults = ModelDefaults {
-        provider: "cfg".to_string(),
+        provider_order: vec!["cfg".to_string()],
         ..ModelDefaults::default()
     };
     let (settings, stage) = placed_settings(graph("m", "{}"), defaults, &registry);
@@ -254,7 +254,7 @@ async fn a_compaction_with_no_model_runs_on_the_stage_model() {
 async fn a_listed_compaction_lands_on_a_model_this_machine_serves() {
     let (registry, _) = registry(&[("cfg", &["m", "small"])]);
     let defaults = ModelDefaults {
-        provider: "cfg".to_string(),
+        provider_order: vec!["cfg".to_string()],
         ..ModelDefaults::default()
     };
     let g = graph(

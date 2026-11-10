@@ -889,9 +889,8 @@ fn config_check_is_quiet_when_every_rate_limit_names_a_real_provider() {
 #[test]
 fn resolve_check_uses_the_configured_default() {
     let config = Config {
-        default_provider: "stub".to_string(),
         override_model: Some("m-1".to_string()),
-        ..Config::default()
+        ..crate::test_support::config_preferring(&["stub"])
     };
     let registry = registry_with("stub", StubProvider::replying("hi"));
     let (check, resolved) = resolve_check(&config, None, &registry);
@@ -907,8 +906,7 @@ fn resolve_check_uses_the_configured_default() {
 #[test]
 fn resolve_check_honours_a_provider_slash_model_override() {
     let config = Config {
-        default_provider: "anthropic".to_string(),
-        ..Config::default()
+        ..crate::test_support::config_preferring(&["anthropic"])
     };
     let registry = registry_with("stub", StubProvider::replying("hi"));
     let (check, resolved) = resolve_check(&config, Some("stub/m-2"), &registry);
@@ -919,11 +917,8 @@ fn resolve_check_honours_a_provider_slash_model_override() {
 #[test]
 fn resolve_check_reports_an_unconfigured_provider_and_what_was_tried() {
     // The exact shape of the incident this command exists for: nothing is
-    // registered, so the chain falls through to its hard-coded last resort.
-    let config = Config {
-        default_provider: "openrouter".to_string(),
-        ..Config::default()
-    };
+    // registered, so the chain has nothing of the user's to offer.
+    let config = crate::test_support::config_preferring(&["openrouter"]);
     let (check, resolved) = resolve_check(&config, None, &ProviderRegistry::new());
     assert_eq!(check.status, CheckStatus::Fail);
     assert!(
@@ -934,7 +929,7 @@ fn resolve_check_reports_an_unconfigured_provider_and_what_was_tried() {
     assert!(
         check
             .detail
-            .contains("default_provider = 'openrouter' is not configured"),
+            .contains("nothing in provider_order = [openrouter] is configured"),
         "{}",
         check.detail
     );
@@ -943,9 +938,9 @@ fn resolve_check_reports_an_unconfigured_provider_and_what_was_tried() {
         "{}",
         check.detail
     );
-    // The placeholder the chain fell back to is not the user's problem and
-    // must not be named as one: "resolved to 'anthropic'" on a machine that
-    // never mentioned anthropic is the confusion this exists to remove.
+    // No provider the user never mentioned is named: "resolved to
+    // 'anthropic'" on a machine that never listed anthropic is the confusion
+    // this exists to remove.
     assert!(!check.detail.contains("anthropic"), "{}", check.detail);
     assert!(check.detail.contains("lev setup"), "{}", check.detail);
     assert!(resolved.is_none());
@@ -954,7 +949,6 @@ fn resolve_check_reports_an_unconfigured_provider_and_what_was_tried() {
 #[test]
 fn resolve_check_names_the_provider_order_when_none_of_it_is_configured() {
     let config = Config {
-        default_provider: "anthropic".to_string(),
         providers: crate::config::ProviderConfig {
             provider_order: vec!["codex".to_string(), "openrouter".to_string()],
             ..Default::default()
@@ -987,8 +981,7 @@ fn resolve_check_passes_a_configured_provider_that_names_no_model() {
     // preference rather than naming the placeholder's provider as not
     // configured, and the model is left for the inference check to pick.
     let config = Config {
-        default_provider: "stub".to_string(),
-        ..Config::default()
+        ..crate::test_support::config_preferring(&["stub"])
     };
     let registry = registry_with("stub", StubProvider::replying("hi"));
     let (check, resolved) = resolve_check(&config, None, &registry);
@@ -1016,7 +1009,6 @@ fn resolve_check_passes_a_configured_provider_that_names_no_model() {
 #[test]
 fn resolve_check_takes_the_first_configured_provider_in_the_order() {
     let config = Config {
-        default_provider: "anthropic".to_string(),
         providers: crate::config::ProviderConfig {
             provider_order: vec!["codex".to_string(), "stub".to_string()],
             ..Default::default()
@@ -1037,12 +1029,11 @@ fn resolve_check_takes_the_first_configured_provider_in_the_order() {
 
 #[test]
 fn resolve_check_blames_the_default_provider_when_a_model_setting_pairs_with_an_absent_one() {
-    // `override_model` pairs with `default_provider`, so with the latter not
-    // configured the setting goes nowhere even though another preferred
+    // `override_model` pairs with the first provider in the order, so with
+    // that one not configured the setting goes nowhere even though another preferred
     // provider is here. Passing on 'stub' would hide a config that does not
     // do what it says.
     let config = Config {
-        default_provider: "openrouter".to_string(),
         override_model: Some("m-1".to_string()),
         providers: crate::config::ProviderConfig {
             provider_order: vec!["openrouter".to_string(), "stub".to_string()],
@@ -1054,9 +1045,9 @@ fn resolve_check_blames_the_default_provider_when_a_model_setting_pairs_with_an_
     let (check, resolved) = resolve_check(&config, None, &registry);
     assert_eq!(check.status, CheckStatus::Fail);
     assert!(
-        check
-            .detail
-            .contains("pair with default_provider = 'openrouter', which is not configured"),
+        check.detail.contains(
+            "the first provider in provider_order, 'openrouter', which is not configured"
+        ),
         "{}",
         check.detail
     );
@@ -1070,8 +1061,7 @@ fn resolve_check_reports_the_provider_a_model_override_named() {
     // configured the chain names it, and the answer is about it rather than
     // about the preference.
     let config = Config {
-        default_provider: "openrouter".to_string(),
-        ..Config::default()
+        ..crate::test_support::config_preferring(&["openrouter"])
     };
     let (check, resolved) = resolve_check(&config, Some("m-1"), &ProviderRegistry::new());
     assert_eq!(check.status, CheckStatus::Fail);
@@ -1168,9 +1158,8 @@ fn resolve_check_says_so_when_the_configured_default_never_wins() {
     // "is never chosen", which read as a statement about the user's runs and
     // sent an investigation of a downgraded run in the wrong direction.
     let config = Config {
-        default_provider: "openrouter".to_string(),
         override_model: None,
-        ..Config::default()
+        ..crate::test_support::config_preferring(&["openrouter"])
     };
     let mut registry = registry_with("openrouter", StubProvider::replying("hi"));
     registry.register("anthropic".to_string(), StubProvider::replying("hi"));
@@ -1194,12 +1183,43 @@ fn resolve_check_says_so_when_the_configured_default_never_wins() {
     assert!(check.detail.contains("openrouter"), "{}", check.detail);
 }
 
+/// The first provider in the order is registered and loses anyway: with no
+/// model of the user's to send it, the host-wide fallback chain is the only
+/// thing that names a model, so the check lands there. The note says so, and
+/// scopes itself to this check.
+#[test]
+fn resolve_check_notes_a_first_provider_the_fallback_chain_passed_over() {
+    let mut config = crate::test_support::config_preferring(&["openrouter"]);
+    config.providers.fallback_order = vec!["anthropic/m-2".to_string()];
+    let mut registry = registry_with("openrouter", StubProvider::replying("hi"));
+    registry.register("anthropic".to_string(), StubProvider::replying("hi"));
+    let (check, resolved) = resolve_check(&config, None, &registry);
+    assert_eq!(check.status, CheckStatus::Ok);
+    assert!(
+        check.detail.starts_with("anthropic / m-2"),
+        "{}",
+        check.detail
+    );
+    assert!(
+        check
+            .detail
+            .contains("there is nothing to send to 'openrouter' and it loses here"),
+        "{}",
+        check.detail
+    );
+    assert!(
+        check.detail.contains("A real run is different"),
+        "{}",
+        check.detail
+    );
+    assert_eq!(resolved.expect("resolved").provider_name, "anthropic");
+}
+
 #[test]
 fn resolve_check_is_quiet_when_the_configured_default_does_win() {
     let config = Config {
-        default_provider: "openrouter".to_string(),
         override_model: Some("openai/gpt-4o-mini".to_string()),
-        ..Config::default()
+        ..crate::test_support::config_preferring(&["openrouter"])
     };
     let registry = registry_with("openrouter", StubProvider::replying("hi"));
     let (check, _) = resolve_check(&config, None, &registry);
@@ -1212,9 +1232,8 @@ fn resolve_check_reads_a_qualified_default_model_bare_and_says_so() {
     // "ollama"`: the run goes to `qwen3.8:latest`, and the note says how the
     // setting was read so the config can be tidied.
     let config = Config {
-        default_provider: "stub".to_string(),
         override_model: Some("stub/m-1".to_string()),
-        ..Config::default()
+        ..crate::test_support::config_preferring(&["stub"])
     };
     let registry = registry_with("stub", StubProvider::replying("hi"));
     let (check, resolved) = resolve_check(&config, None, &registry);
@@ -1238,18 +1257,18 @@ fn resolve_check_reads_a_qualified_default_model_bare_and_says_so() {
 }
 
 #[test]
-fn resolve_check_does_not_second_guess_an_unregistered_default_provider() {
-    // Landing somewhere other than a default provider that has no key is not
+fn resolve_check_does_not_second_guess_an_unregistered_head_of_the_order() {
+    // Landing somewhere other than a first provider that has no key is not
     // news - the `config` line already lists what is registered, and this
     // check's fail arm covers the case where nothing usable is left. Saying it
     // again here would put a note on every install with a stale provider name
-    // in its config.
+    // in its config. The fallback chain is what lands it somewhere here.
     for override_model in [None, Some("m-1".to_string())] {
-        let config = Config {
-            default_provider: "ghost".to_string(),
+        let mut config = Config {
             override_model,
-            ..Config::default()
+            ..crate::test_support::config_preferring(&["ghost"])
         };
+        config.providers.fallback_order = vec!["anthropic/m-2".to_string()];
         let registry = registry_with("anthropic", StubProvider::replying("hi"));
         let (check, _) = resolve_check(&config, None, &registry);
         assert_eq!(check.status, CheckStatus::Ok);
@@ -1262,9 +1281,8 @@ fn resolve_check_stays_quiet_under_an_explicit_model_override() {
     // `--model` is the caller overriding on purpose; telling them their
     // default was passed over is noise.
     let config = Config {
-        default_provider: "openrouter".to_string(),
         override_model: None,
-        ..Config::default()
+        ..crate::test_support::config_preferring(&["openrouter"])
     };
     let registry = registry_with("stub", StubProvider::replying("hi"));
     let (check, _) = resolve_check(&config, Some("stub/m-2"), &registry);

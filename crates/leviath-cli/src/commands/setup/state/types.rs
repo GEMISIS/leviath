@@ -14,7 +14,7 @@ pub enum Step {
     Welcome,
     /// The providers this install has, each set up in its own modal.
     Providers,
-    /// The default provider and model new runs use.
+    /// The provider priority and the models new runs use.
     Defaults,
     /// Concurrency, timeouts, and the other numeric ceilings.
     Limits,
@@ -271,8 +271,8 @@ pub enum FieldValue {
         index: usize,
     },
     /// An ordered list the user arranges in a reorder modal, best first. Its
-    /// head is what a single-value setting derived from it takes (the provider
-    /// priority's head is the default provider).
+    /// head is what a setting paired with it takes (the override and fallback
+    /// models run on the provider priority's head).
     Order(Vec<String>),
 }
 

@@ -10,6 +10,7 @@ use super::{UpdateArgs, UpdateEnv, UpdatePlan, agreed};
 use crate::config::Config;
 use crate::config::DEFAULT_MAX_MEDIA_BYTES_PER_REQUEST;
 use crate::config::renamed::legacy_keys_present;
+use crate::config::retired;
 
 /// The `max_media_bytes_per_request` value shipped as the default before it was
 /// lowered. `lev setup` wrote the default into `config.toml` explicitly, so an
@@ -129,6 +130,28 @@ pub const MIGRATIONS: &[Migration] = &[
                         note = r.key.note,
                     )
                 })
+                .collect()
+        },
+    },
+    // The same shape as a rename: the loader already put the name at the head
+    // of the provider order, so the save writes the order and drops the key.
+    Migration {
+        name: "default-provider",
+        description: "move `default_provider` to the head of `[providers] provider_order`, \
+                      the one setting that decides where a bare model name runs",
+        applies: |_config, raw| retired::default_provider_in(raw).is_some(),
+        apply: |config, raw| {
+            retired::default_provider_in(raw)
+                .map(|old| {
+                    format!(
+                        "`default_provider = \"{old}\"` becomes the first entry of `[providers] \
+                         provider_order`, now [{}]. A provider is set up once it is in that \
+                         order, and the first one is where `override_model` and \
+                         `fallback_model` run.",
+                        config.providers.provider_order.join(", ")
+                    )
+                })
+                .into_iter()
                 .collect()
         },
     },

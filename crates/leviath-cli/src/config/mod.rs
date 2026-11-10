@@ -47,7 +47,7 @@ pub(crate) use fault::ConfigFault;
 // Keys that changed name: one table, read by the loader, the unread-key
 // warning, `lev doctor` and `lev update`. It lives in the runtime, whose own
 // loader reads the same file through it.
-pub(crate) use leviath_runtime::user_creds::renamed;
+pub(crate) use leviath_runtime::user_creds::{renamed, retired};
 
 // Two helpers with no `[table]` of their own: reading a repository's `.env`,
 // and hardening the config file's permissions. Private to this module; the
@@ -103,10 +103,6 @@ fn collect_dropped_keys(
 /// printed.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Config {
-    /// Default provider
-    #[serde(default = "default_provider_name")]
-    pub default_provider: String,
-
     /// Provider API keys
     #[serde(default)]
     pub providers: ProviderConfig,
@@ -128,15 +124,15 @@ pub struct Config {
     pub mcp_servers: Vec<MCPServerConfig>,
 
     /// One model every stage that allows a user default starts on, ahead of
-    /// the models its blueprint names. A bare model id on `default_provider`.
-    /// Unset, the usual state, lets each blueprint pick per stage.
+    /// the models its blueprint names. A bare model id on the first provider
+    /// in `[providers] provider_order`. Unset, the usual state, lets each blueprint pick per stage.
     #[serde(default)]
     pub override_model: Option<String>,
 
     /// The model a stage falls back to when none of the models it names is
     /// configured here, tried after all of them and before `[providers]
-    /// fallback_order`. A bare model id on `default_provider`. Never moves a
-    /// stage off a model its blueprint names.
+    /// fallback_order`. A bare model id on the first provider in `[providers]
+    /// provider_order`. Never moves a stage off a model its blueprint names.
     #[serde(default)]
     pub fallback_model: Option<String>,
 
@@ -418,7 +414,6 @@ fn is_empty_credentials(credentials: &ToolCredentials) -> bool {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            default_provider: "anthropic".to_string(),
             providers: ProviderConfig::default(),
             agent_paths: Vec::new(),
             openrouter_api_key: None,
@@ -637,30 +632,52 @@ impl Config {
     /// Say so when `override_model` or `fallback_model` is written as
     /// `provider/model`.
     ///
-    /// Both settings are bare model ids that pair with `default_provider`, but
-    /// `--model` and `[providers] fallback_order` take the qualified form and an
+    /// Both settings are bare model ids that pair with the first provider in
+    /// `provider_order`, but `--model` and `[providers] fallback_order` take the qualified form and an
     /// OpenRouter id already has a slash in it, so `override_model =
     /// "ollama/qwen3.8:latest"` gets written. The resolver reads it bare, so
     /// nothing breaks; this names the reading, at the same place the unread-key
     /// warning appears, so the file can be tidied.
     fn warn_qualified_user_models(&self) {
         for (key, written, bare) in self.qualified_user_models() {
-            let provider = &self.default_provider;
+            let provider = self.head_provider().unwrap_or_default();
             tracing::warn!(
                 key = %key,
                 written = %written,
                 read_as = %bare,
                 "config.toml {key} is written as provider/model; it takes a bare \
-                 model id and pairs with default_provider, so the '{provider}/' \
-                 prefix is dropped. `lev doctor` reports it too, if this scrolls past."
+                 model id and pairs with the first provider in provider_order, so \
+                 the '{provider}/' prefix is dropped. `lev doctor` reports it too, \
+                 if this scrolls past."
             );
         }
     }
 
+    /// `[providers] provider_order` as names: the providers a bare model
+    /// name may run on, best first.
+    pub(crate) fn provider_order(&self) -> Vec<&str> {
+        self.providers
+            .provider_order
+            .iter()
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// The first provider in `[providers] provider_order`: the one
+    /// `override_model`, `fallback_model` and a bare `--model` are asked of.
+    /// `None` when no provider is set up.
+    pub(crate) fn head_provider(&self) -> Option<&str> {
+        self.providers.provider_order.first().map(String::as_str)
+    }
+
     /// Each of `override_model` and `fallback_model` that is written qualified
-    /// with the default provider's own name: the key, the value as written and
-    /// the bare id it is read as. Empty when both are unset or already bare.
+    /// with the name of the provider it is asked of: the key, the value as
+    /// written and the bare id it is read as. Empty when both are unset or
+    /// already bare, and when no provider is set up to qualify them with.
     pub(crate) fn qualified_user_models(&self) -> Vec<(&'static str, &str, &str)> {
+        let Some(head) = self.head_provider() else {
+            return Vec::new();
+        };
         [
             ("override_model", self.override_model.as_deref()),
             ("fallback_model", self.fallback_model.as_deref()),
@@ -668,10 +685,18 @@ impl Config {
         .into_iter()
         .filter_map(|(key, written)| {
             let written = written?;
-            let bare = leviath_runtime::pipeline::bare_user_model(&self.default_provider, written);
+            let bare = leviath_runtime::pipeline::bare_user_model(head, written);
             (bare != written).then_some((key, written, bare))
         })
         .collect()
+    }
+
+    /// The provider a `default_provider` key still in the config file at
+    /// `path` names, for `lev doctor`. Read the same way
+    /// [`renamed_keys_at`](Self::renamed_keys_at) is.
+    pub(crate) fn retired_default_provider_at(path: &std::path::Path) -> Option<String> {
+        let content = std::fs::read_to_string(path).ok()?;
+        retired::default_provider_in_text(&content)
     }
 
     /// The renamed keys still present in the config file at `path`, for
@@ -741,9 +766,14 @@ impl Config {
         // judging the document as the loader sees it keeps the two agreeing.
         let (content, _) = renamed::rename_in_text(content);
         let content = content.as_str();
-        let Ok(found) = toml::from_str::<toml::value::Table>(content) else {
+        let Ok(mut found) = toml::from_str::<toml::value::Table>(content) else {
             return Vec::new();
         };
+        // `default_provider` naming a provider is read, as the head of the
+        // provider order, though no field of `Config` holds it.
+        if retired::default_provider_in(&found).is_some() {
+            found.remove(retired::DEFAULT_PROVIDER);
+        }
         // A file that is TOML but not a config has no *unknown* keys to report
         // - it has a type error, which whoever asked for it reports instead.
         let Ok(config) = toml::from_str::<Self>(content) else {
@@ -816,12 +846,20 @@ impl Config {
         // what its file now means. Done on the text so a parse error still
         // points at its line.
         let (content, renamed) = renamed::rename_in_text(content);
-        let c: Self = toml::from_str(&content)
+        let mut c: Self = toml::from_str(&content)
             .map_err(|e| Box::new(ConfigFault::parse(path, &content, &e)))?;
 
         for r in &renamed {
             let notice = renamed::notice(r);
             tracing::warn!(old = %r.key.old, new = %r.key.new, "{notice}");
+        }
+        // `default_provider` is the head of the provider order, so a file
+        // that still carries it routes where it did.
+        if let Some(notice) = retired::fold_default_provider(
+            retired::default_provider_in_text(&content),
+            &mut c.providers.provider_order,
+        ) {
+            tracing::warn!(old = retired::DEFAULT_PROVIDER, "{notice}");
         }
         Self::warn_unknown_config_keys(&content);
         c.warn_qualified_user_models();
@@ -987,18 +1025,6 @@ pub(crate) use leviath_core::paths::providers_dir;
 /// switched off, the opposite of what leaving it out means.
 fn default_update_check() -> bool {
     true
-}
-
-/// The provider a config that names none is assumed to mean.
-///
-/// Exists so `default_provider` can carry `#[serde(default)]`: a field on
-/// [`Config`] with no default makes a hand-written `config.toml` a parse
-/// error. Three lines pointing Leviath at OpenRouter would fail with
-/// `missing field `providers``, which names a table the user has no reason to
-/// know about and says nothing about what to add. Kept in sync with
-/// [`Config::default`] by `an_empty_config_file_parses_to_the_defaults`.
-pub(crate) fn default_provider_name() -> String {
-    "anthropic".to_string()
 }
 
 /// Serializes any test, anywhere in the crate, that mutates the process's
@@ -1571,8 +1597,8 @@ anthropic_cach_ttl = \"1h\"
     /// bury the message that actually explains it.
     #[test]
     fn a_file_that_is_not_a_config_reports_no_unknown_keys() {
-        // Parses as a table, fails as a `Config`: the provider is a number.
-        assert!(Config::unknown_config_keys("default_provider = 42").is_empty());
+        // Parses as a table, fails as a `Config`: the model is a number.
+        assert!(Config::unknown_config_keys("override_model = 42").is_empty());
     }
 
     /// `unread_keys_at` answers for a path, and a path that is not there is a
@@ -1627,7 +1653,7 @@ some_custom_thing = \"forwarded to the script\"
         // holds whatever another test in this binary did to the global one.
         let _guard = leviath_testkit::tracing_guard();
         let config = Config::load_from_path(&path).expect("an unknown key does not stop the load");
-        assert_eq!(config.default_provider, "anthropic");
+        assert_eq!(config.head_provider(), Some("anthropic"));
     }
 
     /// A config using only real keys reports nothing. Without this the test
@@ -1669,7 +1695,7 @@ some_custom_thing = \"forwarded to the script\"
         let parsed: Config = toml::from_str(CONFIG_EXAMPLE).expect("the example deserializes");
         // A couple of spot checks that the values landed where the schema says,
         // rather than being silently dropped into nothing.
-        assert_eq!(parsed.default_provider, "anthropic");
+        assert_eq!(parsed.head_provider(), Some("anthropic"));
         assert_eq!(
             parsed.limits.interaction_timeout_secs, None,
             "the example only shows the timeout commented out"
@@ -1942,9 +1968,12 @@ some_custom_thing = \"forwarded to the script\"
         }
         found.sort();
 
+        // `default_provider` is read the same way an old name is, as the head
+        // of the provider order, though it is not a one-for-one rename.
         let mut expected: Vec<_> = renamed::RENAMED_KEYS
             .iter()
             .map(|key| (key.section.map(str::to_owned), key.old.to_string()))
+            .chain([(None, retired::DEFAULT_PROVIDER.to_string())])
             .collect();
         expected.sort();
         assert_eq!(found, expected);
@@ -2252,7 +2281,7 @@ some_custom_thing = \"forwarded to the script\"
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let config = with_tracing(|| Config::load_from_path(&path)).unwrap();
-        assert_eq!(config.default_provider, "anthropic");
+        assert_eq!(config.head_provider(), None, "no provider is assumed");
     }
 
     #[test]
@@ -2260,12 +2289,11 @@ some_custom_thing = \"forwarded to the script\"
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let original = Config {
-            default_provider: "openai".to_string(),
-            ..Config::default()
+            ..crate::test_support::config_preferring(&["openai"])
         };
         std::fs::write(&path, toml::to_string_pretty(&original).unwrap()).unwrap();
         let config = with_tracing(|| Config::load_from_path(&path)).unwrap();
-        assert_eq!(config.default_provider, "openai");
+        assert_eq!(config.head_provider(), Some("openai"));
     }
 
     /// `override_model = "ollama/qwen3.8:latest"` next to `default_provider =
@@ -2297,9 +2325,8 @@ some_custom_thing = \"forwarded to the script\"
 
         // A bare id, or no model at all, has nothing to say.
         let bare = Config {
-            default_provider: "ollama".to_string(),
             override_model: Some("qwen3.8:latest".to_string()),
-            ..Config::default()
+            ..crate::test_support::config_preferring(&["ollama"])
         };
         assert!(bare.qualified_user_models().is_empty());
         assert!(Config::default().qualified_user_models().is_empty());
@@ -2794,13 +2821,12 @@ meshy_api_key = "msy-existing"
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested").join("config.toml");
         let config = Config {
-            default_provider: "google".to_string(),
-            ..Config::default()
+            ..crate::test_support::config_preferring(&["google"])
         };
         with_tracing(|| config.save_to_path(&path)).unwrap();
 
         let loaded = with_tracing(|| Config::load_from_path(&path)).unwrap();
-        assert_eq!(loaded.default_provider, "google");
+        assert_eq!(loaded.head_provider(), Some("google"));
     }
 
     #[test]
@@ -3613,7 +3639,8 @@ headers = { Ocp-Apim-Subscription-Key = "sub" }
     #[test]
     fn config_default_values() {
         let config = Config::default();
-        assert_eq!(config.default_provider, "anthropic");
+        assert_eq!(config.head_provider(), None);
+        assert!(config.provider_order().is_empty());
         assert!(config.providers.anthropic_api_key.is_none());
         assert!(config.providers.openai_api_key.is_none());
         assert!(config.providers.google_api_key.is_none());
@@ -3684,13 +3711,13 @@ headers = { Ocp-Apim-Subscription-Key = "sub" }
     #[test]
     fn config_from_toml_with_all_fields() {
         let toml_content = r#"
-default_provider = "openai"
 openrouter_api_key = "sk-or-test"
 ollama_base_url = "http://my-ollama:11434"
 override_model = "gpt-5"
 agent_paths = []
 
 [providers]
+provider_order = ["openai", "anthropic"]
 anthropic_api_key = "sk-ant-test"
 openai_api_key = "sk-test"
 google_api_key = "AIza-test"
@@ -3705,7 +3732,7 @@ provider = "anthropic"
 model = "claude-haiku-4-5"
 "#;
         let config: Config = toml::from_str(toml_content).unwrap();
-        assert_eq!(config.default_provider, "openai");
+        assert_eq!(config.head_provider(), Some("openai"));
         assert_eq!(
             config.providers.anthropic_api_key.as_deref(),
             Some("sk-ant-test")
@@ -3732,13 +3759,12 @@ model = "claude-haiku-4-5"
     #[test]
     fn config_from_minimal_toml() {
         let toml_content = r#"
-default_provider = "anthropic"
 agent_paths = []
 
 [providers]
 "#;
         let config: Config = toml::from_str(toml_content).unwrap();
-        assert_eq!(config.default_provider, "anthropic");
+        assert_eq!(config.head_provider(), None);
         assert!(config.providers.anthropic_api_key.is_none());
     }
 
@@ -3750,13 +3776,13 @@ agent_paths = []
         // message that says nothing about what to add.
         let config: Config = toml::from_str(
             r#"
-default_provider = "openrouter"
 override_model = "openai/gpt-4o-mini"
 openrouter_api_key = "sk-or-test"
+providers.provider_order = ["openrouter"]
 "#,
         )
         .expect("a hand-written OpenRouter config parses");
-        assert_eq!(config.default_provider, "openrouter");
+        assert_eq!(config.head_provider(), Some("openrouter"));
         assert_eq!(config.openrouter_api_key.as_deref(), Some("sk-or-test"));
         assert_eq!(config.override_model.as_deref(), Some("openai/gpt-4o-mini"));
     }
@@ -3768,7 +3794,10 @@ openrouter_api_key = "sk-or-test"
         // file and a fresh struct disagree about the same install.
         let parsed: Config = toml::from_str("").expect("an empty config parses");
         let default = Config::default();
-        assert_eq!(parsed.default_provider, default.default_provider);
+        assert_eq!(
+            parsed.providers.provider_order,
+            default.providers.provider_order
+        );
         assert_eq!(parsed.agent_paths, default.agent_paths);
         assert_eq!(parsed.openrouter_api_key, default.openrouter_api_key);
         assert_eq!(parsed.ollama_base_url, default.ollama_base_url);
@@ -4006,8 +4035,8 @@ max_contxt_tokens = 1048576
     #[test]
     fn config_toml_roundtrip() {
         let config = Config {
-            default_provider: "openai".to_string(),
             providers: ProviderConfig {
+                provider_order: vec!["openai".to_string()],
                 anthropic_api_key: Some("sk-ant-key".to_string()),
                 openai_api_key: None,
                 google_api_key: None,
@@ -4029,7 +4058,7 @@ max_contxt_tokens = 1048576
 
         let serialized = toml::to_string_pretty(&config).unwrap();
         let deserialized: Config = toml::from_str(&serialized).unwrap();
-        assert_eq!(deserialized.default_provider, "openai");
+        assert_eq!(deserialized.head_provider(), Some("openai"));
         assert_eq!(
             deserialized.providers.anthropic_api_key.as_deref(),
             Some("sk-ant-key")
@@ -4114,7 +4143,11 @@ agent_paths = ["/my/agents"]
         assert!(config_path.exists());
         let loaded_content = std::fs::read_to_string(&config_path).unwrap();
         let loaded: Config = toml::from_str(&loaded_content).unwrap();
-        assert_eq!(loaded.default_provider, "anthropic");
+        assert_eq!(loaded.head_provider(), None);
+        assert!(
+            !loaded_content.contains("default_provider"),
+            "{loaded_content}"
+        );
     }
 
     // ─── TitleConfig serde from TOML ─────────────────────────────────────
@@ -4219,7 +4252,7 @@ agent_paths = ["/home/user/agents", "/opt/agents"]
         // verifying defaults are applied when no file exists.
         // We can't easily override the path, but we can verify default behavior.
         let config = Config::default();
-        assert_eq!(config.default_provider, "anthropic");
+        assert_eq!(config.head_provider(), None);
         assert!(config.providers.anthropic_api_key.is_none());
     }
 
@@ -4227,14 +4260,14 @@ agent_paths = ["/home/user/agents", "/opt/agents"]
     fn config_load_from_toml_string() {
         // Test the TOML parsing path of load() by parsing directly.
         let toml_content = r#"
-default_provider = "openai"
 agent_paths = []
 
 [providers]
+provider_order = ["openai"]
 anthropic_api_key = "sk-ant-test-key"
 "#;
         let config: Config = toml::from_str(toml_content).unwrap();
-        assert_eq!(config.default_provider, "openai");
+        assert_eq!(config.head_provider(), Some("openai"));
         assert_eq!(
             config.providers.anthropic_api_key.as_deref(),
             Some("sk-ant-test-key")
@@ -4270,8 +4303,8 @@ enabled = false
         let config_path = dir.path().join("config.toml");
 
         let config = Config {
-            default_provider: "openai".to_string(),
             providers: ProviderConfig {
+                provider_order: vec!["openai".to_string()],
                 anthropic_api_key: Some("sk-ant-test".to_string()),
                 openai_api_key: Some("sk-test".to_string()),
                 google_api_key: None,
@@ -4294,7 +4327,7 @@ enabled = false
         let loaded_content = std::fs::read_to_string(&config_path).unwrap();
         let loaded: Config = toml::from_str(&loaded_content).unwrap();
 
-        assert_eq!(loaded.default_provider, "openai");
+        assert_eq!(loaded.head_provider(), Some("openai"));
         assert_eq!(
             loaded.providers.anthropic_api_key.as_deref(),
             Some("sk-ant-test")
@@ -4350,8 +4383,8 @@ enabled = false
             env_fill: leviath_runtime::user_creds::EnvFill::default(),
             mime: MimeConfig::default(),
             mime_types: toml::Table::new(),
-            default_provider: "anthropic".to_string(),
             providers: ProviderConfig {
+                provider_order: vec!["anthropic".to_string()],
                 anthropic_api_key: Some("sk-ant-key".to_string()),
                 openai_api_key: None,
                 google_api_key: None,
@@ -4482,7 +4515,7 @@ enabled = false
         let serialized = toml::to_string_pretty(&config).unwrap();
         let deserialized: Config = toml::from_str(&serialized).unwrap();
 
-        assert_eq!(deserialized.default_provider, "anthropic");
+        assert_eq!(deserialized.head_provider(), Some("anthropic"));
         assert_eq!(deserialized.limits.max_concurrent_inferences, Some(4));
         assert_eq!(
             deserialized

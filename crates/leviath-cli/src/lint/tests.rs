@@ -149,8 +149,8 @@ tools = ["raed_file"]
 
 // ─── Declaration checks ───────────────────────────────────────────────────────
 
-/// The defect from the report: no models listed, so the stage silently runs on
-/// the user's default provider.
+/// The defect from the report: no models listed, so whether the stage runs
+/// at all is up to the machine's own model settings.
 #[test]
 fn a_stage_with_no_model_is_warned_about() {
     let toml = manifest(
@@ -164,7 +164,9 @@ max_iterations = 10
     let findings = lint(&toml, &LintEnv::default());
     assert_eq!(codes(&findings), ["stage-missing-model"]);
     assert!(
-        findings[0].message.contains("default_provider"),
+        findings[0]
+            .message
+            .contains("override_model or fallback_model"),
         "{findings:?}"
     );
     let fix = findings[0].fix.as_deref().expect("the fix names the stage");
@@ -3873,8 +3875,7 @@ async fn an_open_entry_is_routed_through_the_default_script_provider() {
         .await;
     let bp = blueprint_open(&["local-fast", "nobody-serves-this"]);
     let config = crate::config::Config {
-        default_provider: "spark".to_string(),
-        ..crate::config::Config::default()
+        ..crate::test_support::config_preferring(&["spark"])
     };
 
     let env = LintEnv::default().with_provider_catalogs(&graph_of(&bp), &config, &registry);
@@ -3904,7 +3905,7 @@ fn a_native_provider_answers_the_open_route_question() {
 
     let env = LintEnv::default().with_provider_catalogs(
         &graph_of(&bp),
-        &crate::config::Config::default(),
+        &crate::test_support::config_preferring(&["anthropic"]),
         &registry,
     );
 
@@ -3912,6 +3913,18 @@ fn a_native_provider_answers_the_open_route_question() {
         env.unrouted_models,
         known_tools(&["nobody-serves-this"]),
         "anthropic serves one of the two, so only the other is unrouted"
+    );
+
+    // The same provider left out of the order serves neither: a provider is
+    // asked about a bare name only once the machine lists it.
+    let unlisted = LintEnv::default().with_provider_catalogs(
+        &graph_of(&bp),
+        &crate::config::Config::default(),
+        &registry,
+    );
+    assert_eq!(
+        unlisted.unrouted_models,
+        known_tools(&["claude-sonnet-5", "nobody-serves-this"])
     );
     assert!(
         env.provider_catalogs.is_empty(),

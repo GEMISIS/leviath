@@ -19,13 +19,13 @@ impl Wizard {
     pub(super) fn picker_explanation(&self, field: usize) -> Vec<&'static str> {
         if self.step == Step::Defaults && field == Self::PROVIDER_FIELD {
             vec![
-                "Where your runs go by default. A stage that lists this provider among",
-                "its models is served by it first, ahead of the blueprint's own order.",
+                "Where your runs go. A model a blueprint names with no provider runs",
+                "only on a provider listed here, and one a stage lists is served by the",
+                "listed provider first, ahead of the blueprint's own order.",
                 "",
-                "This field does nothing on its own. Until you also set an override",
-                "model on the advanced screen, the only thing it can do is reorder a",
-                "list that already names this provider, so on a machine keyed for one",
-                "provider that no blueprint mentions, every stage still goes elsewhere.",
+                "A provider left out is not set up: it serves no bare model name, and",
+                "still runs a stage that names it as provider/model. The first one is",
+                "where the override and fallback models on the advanced screen run.",
                 "",
                 "It never overrides a blueprint that pins its provider: a stage with",
                 "allow_user_default = false ignores this, and so does a provider you",
@@ -34,7 +34,7 @@ impl Wizard {
         } else if self.step == Step::Limits && field == Self::FALLBACK_FIELD {
             vec![
                 "The model a stage falls back to when none of the models it names is",
-                "configured on this machine. It is asked of your default provider, and",
+                "configured on this machine. It is asked of your first provider, and",
                 "this name is never sent to a different provider.",
                 "",
                 "It sits behind everything a blueprint names and is never moved ahead",
@@ -46,7 +46,7 @@ impl Wizard {
             ]
         } else {
             vec![
-                "The model your default provider is asked for. The two travel together:",
+                "The model your first provider is asked for. The two travel together:",
                 "this name is never sent to a different provider, so an OpenAI model is",
                 "never asked of Anthropic.",
                 "",
@@ -91,7 +91,7 @@ impl Wizard {
         models.extend(self.discovered_models());
         // The head of the priority, or the configured provider before the
         // form exists: the one the override pairs with.
-        let head = self.current_default_provider();
+        let head = self.current_head_provider();
         let override_now = self
             .chosen_model(Self::OVERRIDE_FIELD)
             .unwrap_or_else(|| {
@@ -124,14 +124,14 @@ impl Wizard {
         self.limits.push(field(
             "Override model",
             "One model every stage that allows a user default starts on, ahead of what \
-             its blueprint names, paired with your default provider. Leave it unset to \
+             its blueprint names, on your first provider. Leave it unset to \
              let each blueprint decide. Listed from what your providers reported.",
             override_now,
         ));
         self.limits.push(field(
             "Fallback model",
             "The model a stage falls back to when none of the models it names is \
-             configured here, on your default provider. Never moves a stage off a \
+             configured here, on your first provider. Never moves a stage off a \
              model its blueprint names.",
             fallback_now,
         ));

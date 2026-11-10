@@ -9,7 +9,7 @@
 
 use super::*;
 
-/// The user's default provider and model settings from `config.toml`, in the
+/// The user's provider order and model settings from `config.toml`, in the
 /// plain form the runtime's stage resolver takes: the runtime's own
 /// [`model_defaults`](leviath_runtime::user_creds::model_defaults) over this
 /// config's provider settings.

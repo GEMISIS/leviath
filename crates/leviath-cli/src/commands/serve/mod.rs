@@ -2439,7 +2439,7 @@ mod tests {
             .await
             .unwrap();
         let val: types::RedactedConfig = serde_json::from_slice(&body).unwrap();
-        assert_eq!(val.default_provider, "anthropic");
+        assert!(val.provider_order.is_empty());
         // Default config has no keys
         assert!(!val.has_anthropic_key);
         assert!(!val.has_openai_key);

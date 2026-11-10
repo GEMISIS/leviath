@@ -75,12 +75,16 @@ An agent needs at least one [provider](/docs/providers). Run `lev setup`: an API
 Claude subscription you sign in to, or a local [Ollama](https://ollama.com) all count, and the last
 two need no key.
 
-`lev doctor` says which provider your defaults actually resolve to. With no provider configured
-its `resolve` line fails and names the one your config asked for, `default_provider` or the first
-entry of `provider_order`, and lists what is registered. A config that names a provider but no
+A provider is set up once it is in `[providers] provider_order`, which `lev setup` writes. A run
+whose error says `no provider is set up` has an empty order: run `lev setup`, or list a provider
+you already have a key for with `lev providers order <name>`.
+
+`lev doctor` says which provider your settings actually resolve to. With no provider configured
+its `resolve` line fails, names the providers your `provider_order` asked for or says the order is
+empty, and lists what is registered. A config that names a provider but no
 `override_model` or `fallback_model` is fine. The line passes on that provider, and the inference
 check picks a model from its catalogue to probe with. Each stage of a real run uses the model its
-blueprint names. When your configured `default_provider` is being passed over for one
+blueprint names. When the first provider in your order is being passed over for one
 that is configured, the `resolve` line says that too.
 
 ## Every run dies immediately with a payment or auth error
@@ -116,7 +120,7 @@ That stage's `models` list never mentions the provider you configured. A bluepri
 starts on a provider it lists. The [bundled agents](/docs/agent-catalog) list all five providers,
 so with them any key qualifies; a blueprint you downloaded or wrote may list fewer.
 
-Set `fallback_model` beside your `default_provider`: a stage none of whose models is configured
+Set `fallback_model` beside your `provider_order`: a stage none of whose models is configured
 here then runs on that. `override_model` is the heavier tool, putting one model ahead of the
 blueprint's list for every stage that has not opted out. `--model <provider>/<model>` does it for
 one run, and copying the blueprint does it per stage. See
@@ -131,7 +135,7 @@ it is on, every bundled agent lists it last, so on a stage that names no model o
 first entry that matches, and the run starts against `http://localhost:11434`.
 
 Two ways to stop it. Turn Ollama off if you did not mean to enable it. Or set `fallback_model`
-alongside your `default_provider`: without a model to send, `default_provider` is never consulted
+alongside your `provider_order`: without a model to send, your first provider is never consulted
 and Ollama wins by default. `lev doctor` says so in its `resolve` line when your configured provider
 is being passed over.
 
@@ -245,7 +249,7 @@ If the name in the error carries a provider prefix, as in Ollama's
 id was expected. `override_model` and `fallback_model` in `config.toml` and a `model` in a
 blueprint's `models` list pair with a provider that is named separately, so they take
 `qwen3.8:latest`; only `--model` and `[providers] fallback_order` take `ollama/qwen3.8:latest`. An
-`override_model` or `fallback_model` prefixed with its own `default_provider` is read bare and
+`override_model` or `fallback_model` prefixed with the first provider in `provider_order` is read bare and
 `lev doctor` says so; a blueprint entry is sent as written.
 
 Check the spelling against `lev models list --provider <name>`, which asks the provider rather

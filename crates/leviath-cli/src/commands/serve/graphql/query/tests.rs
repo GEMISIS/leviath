@@ -2589,7 +2589,7 @@ async fn a_file_link_carries_its_path_and_its_grant() {
 async fn the_config_field_answers_without_secrets() {
     crate::commands::serve::testutil::with_home(|_home| async move {
         let answer = run_query(
-            "{ config { routing { defaultProvider providerOrder overrideModel fallbackModel }
+            "{ config { routing { providerOrder overrideModel fallbackModel }
                         providers { id name auth isEnabled hasKey baseUrl region
                           options { __typename } }
                         allowsFileUploads blueprintPaths mcpServerCount
@@ -3579,7 +3579,7 @@ mod machine_listings {
                 .finish();
             let answer = schema
                 .execute(Request::new(
-                    "{ config { routing { defaultProvider } blueprintPaths mcpServerCount
+                    "{ config { routing { providerOrder } blueprintPaths mcpServerCount
                          server { apiVersion capabilities isAdminEnabled
                            limits { maxPageSize maxIds maxFileBytes maxListingEntries
                              maxSearchScan maxHistoryLimit maxConcurrentRequests
@@ -3591,7 +3591,12 @@ mod machine_listings {
             assert!(answer.errors.is_empty(), "{:?}", answer.errors);
             let json = serde_json::to_value(&answer.data).expect("data serializes");
             let config = &json["config"];
-            assert_eq!(config["routing"]["defaultProvider"], "local");
+            // The file still says `default_provider`, which is read as the
+            // head of the order.
+            assert_eq!(
+                config["routing"]["providerOrder"],
+                serde_json::json!(["local"])
+            );
             let gateway = &config["gateways"][0];
             assert_eq!(gateway["name"], "local");
             assert_eq!(gateway["kind"], "SCRIPT", "the entry names no kind");
@@ -3706,7 +3711,7 @@ mod the_awkward_shapes {
                 .finish();
             let answer = schema
                 .execute(Request::new(
-                    "{ config { routing { defaultProvider } health { savedAt
+                    "{ config { routing { providerOrder } health { savedAt
                          error { kind path message line column key since note } } } }",
                 ))
                 .await;
@@ -3740,10 +3745,9 @@ mod the_awkward_shapes {
             );
             // The config in force is still answered: it is the last one that
             // loaded, which is what the daemon is running on.
-            assert!(
-                json["config"]["routing"]["defaultProvider"]
-                    .as_str()
-                    .is_some()
+            assert_eq!(
+                json["config"]["routing"]["providerOrder"],
+                serde_json::json!(["openai"])
             );
         })
         .await;

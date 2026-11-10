@@ -329,11 +329,9 @@ pub(crate) struct ProviderConfig {
 #[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct RoutingConfig {
-    /// The provider a bare model name resolves on when the order below says
-    /// nothing.
-    pub(crate) default_provider: String,
-    /// The providers allowed to serve a bare model name, best first. Empty
-    /// means `defaultProvider` alone decides.
+    /// The providers allowed to serve a bare model name, best first. The
+    /// first is the one `overrideModel` and `fallbackModel` are asked of.
+    /// Empty means no provider is set up, and no bare model name is served.
     pub(crate) provider_order: Vec<String>,
     /// The model every stage that permits it starts on, ahead of its own list.
     pub(crate) override_model: Option<String>,

@@ -36,14 +36,14 @@ fn env_of(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> + use<> {
     move |name| vars.get(name).cloned()
 }
 
-/// No file is the defaults: nothing registered, `anthropic` as the default
-/// provider, and the two paths under the data directory.
+/// No file is the defaults: nothing registered, no provider in the order,
+/// and the two paths under the data directory.
 #[test]
 fn a_missing_file_is_the_defaults() {
     let dir = tempfile::tempdir().unwrap();
     let loaded = load_user_creds(&bare(dir.path())).unwrap();
     assert!(loaded.creds.is_empty());
-    assert_eq!(loaded.defaults.provider, "anthropic");
+    assert!(loaded.defaults.provider_order.is_empty());
     assert!(loaded.defaults.retention.file_uploads);
     assert_eq!(loaded.credential_store, CredentialStoreKind::File);
     assert_eq!(loaded.grants_path, dir.path().join("provider-auth.json"));
@@ -475,8 +475,9 @@ fn the_sign_in_transports_and_ollama_register_on_their_switches() {
 }
 
 /// The defaults carry what a stage resolves against, a malformed fallback
-/// entry is a warning, and the old `default_model` name loads as
-/// `fallback_model` with a notice saying so. A renamed key in a table this
+/// entry is a warning, the old `default_model` name loads as
+/// `fallback_model` with a notice saying so, and the old `default_provider`
+/// loads as the head of the provider order with one of its own. A renamed key in a table this
 /// loader does not read (`[sandbox] persist`) is not its to report.
 #[test]
 fn the_defaults_carry_the_routing_preferences() {
@@ -491,13 +492,18 @@ fn the_defaults_carry_the_routing_preferences() {
     );
     let loaded = load_user_creds(&bare(dir.path())).unwrap();
     let defaults = &loaded.defaults;
-    assert_eq!(defaults.provider, "openai");
     assert_eq!(defaults.override_model.as_deref(), Some("o"));
     assert_eq!(defaults.fallback_model.as_deref(), Some("old"));
-    assert_eq!(defaults.provider_order, ["codex", "openai"]);
+    assert_eq!(defaults.provider_order, ["openai", "codex"]);
     assert_eq!(defaults.fallback_order.len(), 1);
     assert_eq!(defaults.fallback_order[0].model.to_string(), "a/b");
-    assert_eq!(loaded.warnings.len(), 2, "{:?}", loaded.warnings);
+    assert_eq!(loaded.warnings.len(), 3, "{:?}", loaded.warnings);
+    assert!(
+        loaded.warnings[1].contains("default_provider = \"openai\"")
+            && loaded.warnings[1].contains("[openai, codex]"),
+        "{:?}",
+        loaded.warnings
+    );
     assert!(
         loaded.warnings[0].contains("`default_model = \"old\"`")
             && loaded.warnings[0].contains("`fallback_model = \"old\"`"),
@@ -505,7 +511,7 @@ fn the_defaults_carry_the_routing_preferences() {
         loaded.warnings
     );
     assert!(
-        loaded.warnings[1].contains("\"bare\""),
+        loaded.warnings[2].contains("\"bare\""),
         "{:?}",
         loaded.warnings
     );

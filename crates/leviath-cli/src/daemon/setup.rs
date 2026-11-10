@@ -179,10 +179,10 @@ pub(crate) async fn setup_daemon_host_with(
     let prime_failures = providers
         .prime_capabilities(
             std::time::Duration::from_secs(PROVIDER_PRIME_TIMEOUT_SECS),
-            // The machine's default, so a script provider named there can
-            // answer what it serves and win an open route. No effect when the
-            // default is a native provider, which is already in the list.
-            &[config.default_provider.as_str()],
+            // The machine's provider order, so a script provider named there
+            // can answer what it serves and win an open route. A native
+            // provider in it is already in the list.
+            &config.provider_order(),
         )
         .await;
     // Write what the prime learned to the shared capability cache, so a
@@ -1322,10 +1322,9 @@ mod tests {
     /// `url`, with a `fallback_model` a silent downgrade would land on.
     fn gateway_config(url: String) -> Config {
         let mut config = Config {
-            default_provider: "openrouter".to_string(),
             fallback_model: Some("openrouter/anthropic/claude-sonnet-5".to_string()),
             openrouter_api_key: Some("sk-or-test".to_string()),
-            ..Config::default()
+            ..crate::test_support::config_preferring(&["openrouter"])
         };
         config.providers.openrouter_base_url = Some(url);
         config
@@ -1611,9 +1610,8 @@ binds = [{ region = "task" }]
     /// A config that names one endpoint provider, written to `path`.
     fn config_naming(path: &std::path::Path, providers: &[(&str, &str)], default: &str) -> Config {
         let mut config = Config {
-            default_provider: default.to_string(),
             override_model: Some("m".to_string()),
-            ..Config::default()
+            ..crate::test_support::config_preferring(&[default])
         };
         for (name, url) in providers {
             config.model_providers.insert(

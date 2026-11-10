@@ -68,14 +68,13 @@ pub(crate) mod tests {
     #[test]
     fn model_defaults_carries_the_fallback_chain_from_config() {
         let mut config = Config {
-            default_provider: "openrouter".to_string(),
             override_model: Some("deepseek".to_string()),
             fallback_model: Some("flash".to_string()),
-            ..Default::default()
+            ..crate::test_support::config_preferring(&["openrouter"])
         };
         config.providers.fallback_order = vec!["anthropic/claude-sonnet-5".to_string()];
         let defaults = model_defaults(&config);
-        assert_eq!(defaults.provider, "openrouter");
+        assert_eq!(defaults.provider_order, ["openrouter"]);
         assert_eq!(defaults.override_model.as_deref(), Some("deepseek"));
         assert_eq!(defaults.fallback_model.as_deref(), Some("flash"));
         assert_eq!(defaults.fallback_order.len(), 1);

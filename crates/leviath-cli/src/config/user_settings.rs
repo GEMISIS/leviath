@@ -17,7 +17,6 @@ impl Config {
     /// runtime starts reading is a compile error here until it is copied.
     pub(crate) fn user_settings(&self) -> UserSettings {
         UserSettings {
-            default_provider: self.default_provider.clone(),
             openrouter_api_key: self.openrouter_api_key.clone(),
             ollama_base_url: self.ollama_base_url.clone(),
             override_model: self.override_model.clone(),

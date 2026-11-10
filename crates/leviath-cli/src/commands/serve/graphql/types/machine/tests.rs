@@ -410,7 +410,6 @@ async fn every_mirrored_function_runs() {
     })])
     .await;
     exercise(&[RoutingConfig {
-        default_provider: "openai".to_string(),
         provider_order: vec!["openai".to_string()],
         override_model: Some("gpt-5.6".to_string()),
         fallback_model: None,
@@ -438,7 +437,6 @@ async fn every_mirrored_function_runs() {
 
     exercise(&[Config {
         routing: RoutingConfig {
-            default_provider: "openai".to_string(),
             provider_order: vec!["openai".to_string()],
             override_model: Some("gpt-5.6".to_string()),
             fallback_model: None,

@@ -248,7 +248,7 @@ impl ProviderRegistry {
     /// rather than however long a connect takes to give up.
     ///
     /// Script providers are consulted only when `also` names one - in practice
-    /// the machine's `default_provider`, and for `lev validate` the providers
+    /// the machine's `provider_order`, and for `lev validate` the providers
     /// the blueprint in front of it pins. `get` compiles them on demand, so
     /// priming the lot would compile every `.rhai` provider on disk whether or
     /// not a run touches one; priming the ones a caller has actually named
@@ -577,15 +577,16 @@ impl ProviderRegistry {
     /// if this had never been called - so the failure costs accuracy, not the
     /// run.
     ///
-    /// `also` names a script provider to include, for the same reason
-    /// [`prime_capabilities`](Self::prime_capabilities) takes one: a script
+    /// `also` names the script providers to include, for the same reason
+    /// [`prime_capabilities`](Self::prime_capabilities) takes them: a script
     /// provider is compiled on demand, so the ones on disk are not enumerable
-    /// here, and the machine's default is the one worth the compile.
+    /// here, and the ones in the machine's provider order are the ones worth
+    /// the compile.
     pub async fn warm_models(
         &self,
         models: &[String],
         timeout: std::time::Duration,
-        also: Option<&str>,
+        also: &[&str],
     ) {
         if models.is_empty() {
             return;
@@ -595,11 +596,12 @@ impl ProviderRegistry {
             .iter()
             .map(|(name, provider)| (name.clone(), provider.clone()))
             .collect();
-        if let Some(name) = also
-            && !self.providers.contains_key(name)
-            && let Some(provider) = self.get(name)
-        {
-            targets.push((name.to_string(), provider));
+        for name in also {
+            if !targets.iter().any(|(target, _)| target == name)
+                && let Some(provider) = self.get(name)
+            {
+                targets.push((name.to_string(), provider));
+            }
         }
         for (name, provider) in targets {
             match tokio::time::timeout(timeout, provider.warm_models(models)).await {
@@ -1365,7 +1367,7 @@ mod tests {
 
         let models = vec!["one".to_string(), "two".to_string()];
         registry
-            .warm_models(&models, std::time::Duration::from_secs(5), None)
+            .warm_models(&models, std::time::Duration::from_secs(5), &[])
             .await;
 
         for stub in [&a, &b] {
@@ -1383,7 +1385,7 @@ mod tests {
         registry.register("a".to_string(), stub.clone());
 
         registry
-            .warm_models(&[], std::time::Duration::from_secs(5), None)
+            .warm_models(&[], std::time::Duration::from_secs(5), &[])
             .await;
 
         assert!(stub.warmed.lock().expect("not poisoned").is_empty());
@@ -1405,7 +1407,7 @@ mod tests {
             .warm_models(
                 &["m".to_string()],
                 std::time::Duration::from_millis(50),
-                None,
+                &[],
             )
             .await;
 
@@ -1625,7 +1627,7 @@ mod tests {
         reg.warm_models(
             &["local-fast".to_string()],
             std::time::Duration::from_secs(5),
-            Some("spark"),
+            &["spark", "spark"],
         )
         .await;
 
@@ -1640,7 +1642,7 @@ mod tests {
 
     /// The bug this fixes, in the shape it was found in: a script provider with
     /// a config block, a working `list_models`, and a machine whose
-    /// `default_provider` is something else. It claimed no models, so no
+    /// `provider_order` names something else. It claimed no models, so no
     /// blueprint could route to it without pinning it by name, and its
     /// `list_models` was never asked.
     #[tokio::test]

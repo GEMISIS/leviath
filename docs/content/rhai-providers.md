@@ -55,7 +55,7 @@ Model selection is per stage. Every stage that should use this provider names it
 
 > [!WARNING]
 > There is no blueprint-wide model. A `model` key under `[graph]` is refused as an unknown key, and a
-> stage with no `model` runs on your default provider.
+> stage with no `model` runs only where the machine sets `override_model` or `fallback_model`.
 
 A config table is optional. It only supplies overrides that reach the script's `initialize`:
 

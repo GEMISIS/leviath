@@ -616,24 +616,23 @@ impl Wizard {
     /// Rebuild the Defaults screen. Called on entry, since both the provider
     /// list and the discovered models can change between visits.
     pub(crate) fn rebuild_defaults(&mut self) {
-        let chosen = self.current_default_provider();
         let providers = self.configured_provider_names();
-        // Fall back to whatever is configured when nothing is selected, so the
-        // field is never empty.
+        // Fall back to what the config already lists when nothing is
+        // selected, so the field shows the order the file holds.
         let providers = if providers.is_empty() {
-            vec![self.base.default_provider.clone()]
+            self.base.providers.provider_order.clone()
         } else {
             providers
         };
-        // The provider field is an ordered priority, its head the default
-        // provider. Preserve whatever arrangement the form (or the config it
-        // loaded) already holds for still-configured providers. A provider
-        // configured since is NOT added on its own: being in the priority is
-        // a choice made in the reorder modal, and a provider left out of it
-        // still runs any stage that names it. The list is never left empty
-        // while something is configured, because its head is the default
-        // provider: on a first build it is the chosen default, else the first
-        // configured provider.
+        // The provider field is an ordered priority. Preserve whatever
+        // arrangement the form (or the config it loaded) already holds for
+        // still-configured providers. A provider configured since is NOT
+        // added on its own: being in the priority is a choice made in the
+        // reorder modal, and a provider left out of it still runs any stage
+        // that names it. The list is never left empty while something is
+        // configured, because a provider is set up only once it is in the
+        // order: when nothing of the prior arrangement is still configured,
+        // it is seeded with the first configured provider.
         let prior = match self.current_provider_order().is_empty() {
             false => self.current_provider_order(),
             true => self.base.providers.provider_order.clone(),
@@ -643,11 +642,7 @@ impl Wizard {
             .filter(|p| providers.contains(p))
             .collect();
         if order.is_empty() {
-            let head = match providers.contains(&chosen) {
-                true => chosen.clone(),
-                false => providers[0].clone(),
-            };
-            order.push(head);
+            order.extend(providers.first().cloned());
         }
 
         let timeout = self.current_request_timeout();
@@ -659,8 +654,8 @@ impl Wizard {
         self.defaults = vec![
             Field {
                 label: "Provider priority",
-                help: "The providers a bare model name may run on, best first. Its head is your \
-                       default provider. Enter opens a modal to drag the order and to add or \
+                help: "The providers a bare model name may run on, best first. The first is \
+                       where your override and fallback models run. Enter opens a modal to drag the order and to add or \
                        drop configured providers; one left out is never chosen for a bare \
                        model name, and still runs any stage that names it as provider/model.",
                 value: FieldValue::Order(order),
@@ -796,7 +791,7 @@ impl Wizard {
     /// applied while the field still holds the general default, so a number the
     /// user typed is never overwritten.
     pub(crate) fn apply_provider_concurrency_default(&mut self) {
-        let ollama = self.current_default_provider() == "ollama";
+        let ollama = self.current_head_provider() == "ollama";
         let general = Config::default().limits.max_concurrent_inferences;
         let local = Some(catalog::OLLAMA_MAX_CONCURRENT_INFERENCES as u64);
         let general = general.map(|n| n as u64);
@@ -940,23 +935,20 @@ impl Wizard {
 
         self.write_endpoints(&mut config);
 
-        // The head of the priority is the default provider, and the whole
-        // order is `provider_order`. Written only when the user arranged more
-        // than one: a single-provider order says nothing `default_provider`
-        // does not, and leaving it empty keeps a config that never wanted an
-        // order from growing a one-entry one.
+        // The whole priority is `provider_order`, written whatever its
+        // length: a provider is set up only once it is in the order, so one
+        // provider is an order of one. A form that was never built keeps the
+        // order the config came with.
         let order = self.current_provider_order();
-        config.default_provider = order
-            .first()
-            .cloned()
-            .unwrap_or_else(|| self.current_default_provider());
-        config.providers.provider_order = if order.len() > 1 { order } else { Vec::new() };
+        if !order.is_empty() {
+            config.providers.provider_order = order;
+        }
         // The two model settings live on the advanced screen. Until it has
         // been visited the override keeps what the config holds, or what an
         // endpoint entry at the head of the priority picked for itself; a
         // visit that chose "(each blueprint decides)" is a real answer and is
         // not overridden by that pick.
-        let head = config.default_provider.clone();
+        let head = self.current_head_provider();
         config.override_model = self.chosen_model(Self::OVERRIDE_FIELD).unwrap_or_else(|| {
             self.base
                 .override_model
@@ -2610,10 +2602,11 @@ pub(super) mod tests {
         wizard.rebuild_defaults();
         assert_eq!(wizard.current_provider_order(), ["openai".to_string()]);
         let config = wizard.build_config();
-        assert_eq!(config.default_provider, "openai");
-        assert!(
-            config.providers.provider_order.is_empty(),
-            "a one-entry order is not written"
+        assert_eq!(config.head_provider(), Some("openai"));
+        assert_eq!(
+            config.providers.provider_order,
+            ["openai"],
+            "an order of one is written: it is what makes the provider set up"
         );
 
         // The config's own order is the starting point, filtered to what is
@@ -2704,7 +2697,7 @@ pub(super) mod tests {
             ["openai".to_string(), "anthropic".to_string()]
         );
         let config = wizard.build_config();
-        assert_eq!(config.default_provider, "openai");
+        assert_eq!(config.head_provider(), Some("openai"));
         assert_eq!(
             config.providers.provider_order,
             vec!["openai".to_string(), "anthropic".to_string()]
@@ -3024,15 +3017,14 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn the_provider_choice_falls_back_to_the_configured_one_when_nothing_is_picked() {
+    fn the_provider_priority_is_empty_while_nothing_is_configured() {
         let dir = tempfile::tempdir().unwrap();
         let mut wizard = test_wizard(dir.path());
         wizard.enter(Step::Defaults);
 
-        assert_eq!(
-            wizard.defaults[0].value.display(),
-            Config::default().default_provider
-        );
+        // No provider is assumed for a machine that has none.
+        assert!(wizard.current_provider_order().is_empty());
+        assert_eq!(wizard.current_head_provider(), "");
     }
 
     #[test]
@@ -3185,8 +3177,8 @@ pub(super) mod tests {
         wizard.enter(Step::Defaults);
         wizard.defaults[0].value = FieldValue::Number(Some(1));
         assert_eq!(
-            wizard.current_default_provider(),
-            wizard.base.default_provider
+            wizard.current_head_provider(),
+            wizard.base.head_provider().unwrap_or_default()
         );
         assert!(wizard.current_provider_order().is_empty());
     }
@@ -3548,8 +3540,8 @@ pub(super) mod tests {
         wizard.defaults[0].value = FieldValue::Bool(true);
 
         assert_eq!(
-            wizard.build_config().default_provider,
-            Config::default().default_provider
+            wizard.build_config().providers.provider_order,
+            Config::default().providers.provider_order
         );
     }
 
@@ -3563,8 +3555,8 @@ pub(super) mod tests {
         };
 
         assert_eq!(
-            wizard.build_config().default_provider,
-            Config::default().default_provider
+            wizard.build_config().providers.provider_order,
+            Config::default().providers.provider_order
         );
     }
 

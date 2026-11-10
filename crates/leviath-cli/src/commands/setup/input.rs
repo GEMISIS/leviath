@@ -552,7 +552,7 @@ impl Wizard {
                 if changed_provider {
                     self.dirty = true;
                 }
-                // Changing the default provider re-picks the concurrency
+                // Changing the head of the priority re-picks the concurrency
                 // default, so an Ollama-first setup does not inherit a number
                 // meant for hosted APIs.
                 if changed_provider && self.step == Step::Defaults && cursor == 0 {

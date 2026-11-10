@@ -482,7 +482,7 @@ fn stage_fields(doc: &ManifestDoc, name: &str, tab: StageTab) -> Vec<Field> {
                 out.push(Field::new(
                     FieldId::AddModel,
                     "Model",
-                    FieldValue::Row("(not set · runs on your default provider)".into()),
+                    FieldValue::Row("(not set · needs an override or fallback model)".into()),
                     "Choose the model this stage runs on; Enter opens the list.",
                 ));
             } else {

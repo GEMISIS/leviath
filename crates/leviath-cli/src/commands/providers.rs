@@ -109,7 +109,8 @@ struct OrderArgs {
     /// openai`). A provider left out keeps its old priority; a subscription
     /// left out stays excluded from a bare model name.
     names: Vec<String>,
-    /// Clear the order, so `default_provider` alone decides again.
+    /// Clear the order. With none, no provider serves a bare model name, so
+    /// only a stage that names its provider runs.
     #[arg(long, conflicts_with = "names")]
     clear: bool,
 }
@@ -475,8 +476,8 @@ fn set_order(order: OrderArgs, env: &ProvidersEnv) -> anyhow::Result<()> {
 
     if new_order.is_empty() {
         println!(
-            "Cleared the provider priority; default_provider ({}) decides a bare model name now.",
-            config.default_provider
+            "Cleared the provider priority. No provider serves a bare model name now; \
+             `lev providers order <name>...` lists one."
         );
     } else {
         println!("Provider priority set: {}", new_order.join(" > "));
@@ -503,7 +504,6 @@ fn list(json: bool, env: &ProvidersEnv) -> anyhow::Result<()> {
             .collect();
         let out = serde_json::json!({
             "provider_order": order,
-            "default_provider": config.default_provider,
             "providers": rows,
         });
         // `{:#}` is `serde_json::Value`'s own pretty Display - infallible,
@@ -515,8 +515,7 @@ fn list(json: bool, env: &ProvidersEnv) -> anyhow::Result<()> {
     println!("Provider priority for a bare model name (best first):");
     if order.is_empty() {
         println!(
-            "  (none set - default_provider '{}' decides; `lev providers order <name>...` to set one)",
-            config.default_provider
+            "  (none set - no provider serves a bare model name; `lev providers order <name>...` to list one)"
         );
     } else {
         for (i, name) in order.iter().enumerate() {

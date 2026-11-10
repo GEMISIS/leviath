@@ -156,11 +156,10 @@ impl ProviderReload {
         let changed = self.refresh(config);
         if !changed.is_empty() {
             let registry = self.registry();
-            let default = config.default_provider.clone();
             registry
                 .prime_capabilities(
                     std::time::Duration::from_secs(PRIME_TIMEOUT_SECS),
-                    &[default.as_str()],
+                    &config.provider_order(),
                 )
                 .await;
         }

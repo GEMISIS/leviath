@@ -242,11 +242,11 @@ pub struct ProviderConfig {
     /// Ordered provider preference for a bare model name, best first, as plain
     /// provider names (e.g. `["codex", "openrouter", "openai"]`).
     ///
-    /// When a blueprint names a model with no provider and more than one
-    /// configured provider serves it, this decides which one wins. It
-    /// generalizes [`default_provider`](super::UserSettings::default_provider) from a
-    /// single front-runner into a full ordering; leave it empty and
-    /// `default_provider` alone decides, exactly as before.
+    /// These are the only providers a model named with no provider may run
+    /// on, and when more than one of them serves it, the order decides which
+    /// wins. Its first entry is the provider `override_model` and
+    /// `fallback_model` are asked of. Left empty, no provider is set up and
+    /// such a stage is refused: nothing is assumed in its place.
     ///
     /// Naming a provider here is also a deliberate choice to route bare names
     /// through it, so a subscription transport (Codex) that is

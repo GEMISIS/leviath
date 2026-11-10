@@ -1423,7 +1423,7 @@ it saves. A key is the one exception, and it reads back as `hasKey` on its provi
 ```graphql
 {
   config {
-    routing { defaultProvider providerOrder overrideModel fallbackModel }
+    routing { providerOrder overrideModel fallbackModel }
     providers { id name auth isEnabled hasKey baseUrl region }
     gateways { name kind baseUrl hasApiKey headerNames models unknownKeys }
     allowsFileUploads blueprintPaths mcpServerCount
@@ -1478,6 +1478,9 @@ mutation {
 `set` names the settings to change, and a field left out of it is untouched. `clear` is the third
 state, spelled in the schema as `ConfigClearable` rather than hidden in a null. Taking
 `overrideModel` back to nothing is a value you send, not an absence the server has to guess at.
+A list is cleared by sending an empty one: `set: { providerOrder: [] }` leaves no provider set up,
+which is how a client takes back an order it wrote. `providerOrder` is the only routing preference;
+its first entry is the provider `overrideModel` and `fallbackModel` are asked of.
 Every refusal happens before anything is written, so a request that is going to fail leaves the
 file as it was.
 

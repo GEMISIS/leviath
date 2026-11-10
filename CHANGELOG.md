@@ -13,6 +13,40 @@ same list.
 
 ## Unreleased
 
+### Changed
+
+- **Breaking.** `default_provider` is gone, and `[providers] provider_order` is the one setting
+  that decides where a bare model name runs. A provider is set up once it is in that list:
+  only listed providers serve a model a blueprint names with no provider, in that order, and
+  `override_model`, `fallback_model` and a bare `--model` are asked of the first one. Nothing is
+  assumed in its place, `anthropic` included. With the order empty a stage that leaves its route
+  open is refused at spawn with `no provider is set up`, naming `lev setup` and
+  `lev providers order <name>`, and a stage that lists no model at all is refused unless
+  `override_model` or `fallback_model` supplies one. A stage that names its provider as
+  `provider/model`, and a `fallback_order` entry, still reach any configured provider (#1099).
+- A config that still has `default_provider = "x"` keeps routing where it did: it loads with `x`
+  as the first entry of `provider_order`, ahead of whatever the order already held, and the load
+  and `lev doctor` say so. `lev update` rewrites the file, as does any save. A config with no
+  such line and no order has no provider set up, since the `anthropic` it used to imply is no
+  longer assumed: run `lev setup`, or `lev providers order anthropic`.
+- **Breaking.** The config API follows. `default_provider` is off `GET /api/config`, and a
+  `PUT /api/config` body that sends it is a 400 naming `provider_order`, with nothing written.
+  GraphQL loses `RoutingConfigOutput.defaultProvider` and `ConfigWrite.defaultProvider`. To take
+  a machine back to no provider, send an empty order: `set: { providerOrder: [] }`, or
+  `"provider_order": []`. The `config.provider_order_only` capability announces all of this.
+- **Breaking.** `lev setup --non-interactive` adds each provider its flags configure to
+  `provider_order`, and refuses, writing nothing, when the result would have no provider in the
+  order; it used to warn and write the file. The wizard writes the whole priority even when it
+  holds one provider. `lev providers list --json` has no `default_provider`, and
+  `lev providers order --clear` leaves no provider serving a bare model name.
+- **Breaking, library.** `AgentWorldBuilder::default_provider` is replaced by
+  `provider_order`, which takes the list; `override_model(provider, model)` puts its provider
+  first in it. `ModelDefaults` has no `provider` field and gains `head()`, and `UserSettings` has
+  no `default_provider`. `ProviderRegistry::warm_models` takes the script providers to include
+  as a slice.
+- The seven bundled agents that summarise on a bare model name each move up a patch version,
+  for a comment that named the old setting.
+
 ### Fixed
 
 - Approving a compound shell command "for this run" covers the whole command for the rest of the

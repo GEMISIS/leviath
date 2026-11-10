@@ -958,7 +958,7 @@ fn direct_providers() -> Vec<(&'static str, Box<dyn leviath_providers::Provider>
 /// A blueprint's `models` is a preference order. The host picks a route
 /// within that order; it does not get to pick a different preference. The
 /// failure this rules out: matching entries as whole `provider/model`
-/// pairs, so `default_provider` chooses among routes and whatever model
+/// pairs, so `provider_order` chooses among routes and whatever model
 /// its route names comes back - `polish` asking for
 /// `gemini-3.1-pro-preview` and running `claude-sonnet-5`.
 ///
@@ -967,12 +967,11 @@ fn direct_providers() -> Vec<(&'static str, Box<dyn leviath_providers::Provider>
 fn every_bundled_stage_runs_the_first_model_anything_serves() {
     let providers = direct_providers();
     let registry = setup_registry();
-    // A real default provider, because the reordering only runs when one is
-    // set and registered. Every provider is in the preference, since a bare
+    // A real provider order, because the reordering only runs when one of
+    // its providers is registered. Every provider is in the preference, since a bare
     // name only resolves to a provider listed there and this test is about
     // which model wins, not which providers are allowed.
     let defaults = leviath_runtime::pipeline::ModelDefaults {
-        provider: "google".to_string(),
         provider_order: providers.iter().map(|(n, _)| (*n).to_string()).collect(),
         ..Default::default()
     };

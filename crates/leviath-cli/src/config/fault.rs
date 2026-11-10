@@ -289,12 +289,12 @@ mod tests {
     fn a_wrongly_typed_value_points_at_the_value() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, "default_provider = 7\n").unwrap();
+        std::fs::write(&path, "override_model = 7\n").unwrap();
 
-        let fault = ConfigFault::check(&path).expect("a number is not a provider name");
+        let fault = ConfigFault::check(&path).expect("a number is not a model id");
         assert_eq!(fault.kind, FaultKind::Parse);
         assert_eq!(fault.line, Some(1), "{fault:?}");
-        assert_eq!(fault.column, Some(20), "{fault:?}");
+        assert_eq!(fault.column, Some(18), "{fault:?}");
     }
 
     /// Whitespace and newlines are squeezed out of a message before it reaches

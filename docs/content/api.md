@@ -427,7 +427,7 @@ Several routes in that table take more explaining than a cell allows.
 whether the stage ran at all. The blueprint detail route carries the manifest, the regions and the
 [fan-out limits](#fan-out-limits).
 
-A `PUT /api/config` that changes a provider key, a gateway, `default_provider`,
+A `PUT /api/config` that changes a provider key, a gateway, `provider_order`,
 [`override_model` or `fallback_model`](#override-and-fallback-models) applies to the next run
 spawned, with no daemon restart. An MCP server added or removed through `/api/mcp/servers` reaches
 the next run the same way.
@@ -2197,7 +2197,7 @@ whole story while it does not:
 
 ```json
 {
-  "default_provider": "anthropic",
+  "provider_order": ["anthropic"],
   "config_mtime": 1756000000,
   "config_error": {
     "kind": "parse",
@@ -2237,7 +2237,7 @@ read back answers **400**, and the file is left byte for byte as it was.
 `override_model` on `GET /api/config` is the model every stage that allows a user default starts on
 while it is set, ahead of what its blueprint names. `fallback_model` is the model a stage falls back
 to when none of the models it names is configured on that machine, never ahead of them. Both are
-bare model ids on `default_provider`. Both are always sent, `null` included, and that is the point:
+bare model ids on the first provider in `provider_order`. Both are always sent, `null` included, and that is the point:
 a server that omits a key predates the field, which is a different answer from "nothing is set".
 Read the absence as "cannot say" and show that, rather than showing an empty picker over a machine
 that has a model pinned. Servers before 0.6 sent `default_model` instead, which behaved as
@@ -2278,9 +2278,12 @@ so the next search of a run already going uses the new key. See
 a model id, and a form that posts its empty box should be told rather than quietly lose the
 setting. Nothing is written when it is refused.
 
-`default_provider` takes no `null`. It is not optional in `config.toml`, because a machine always
-has one, defaulting to `anthropic`. There is no unset state to write, and sending a different name
-is the whole vocabulary.
+`provider_order` is the one routing setting: the providers a bare model name may run on, best
+first, with `override_model` and `fallback_model` asked of the first. A list replaces the order
+whole. `"provider_order": []` clears it, and a machine with an empty order has no provider set up:
+a stage that names no provider is refused until one is listed. There is no `default_provider`. A
+body that sends one is a **400** that names `provider_order`, and nothing is written. The
+`config.provider_order_only` capability says a server works this way.
 
 ## Gateways
 
@@ -2439,6 +2442,7 @@ than that feature, not broken.
 | `runs.blueprint_snapshot` | `blueprint_digest` on every run, so a client can tell whether the installed blueprint is the one that ran |
 | `runs.export` | `startRunExport` and `GET /api/exports/{id}`, the whole store as one file. See [below](#exporting-the-whole-store) |
 | `config.health` | `config_error` and `config_mtime` on `GET /api/config`, and the `config_health` frame on the socket. See [below](#when-the-config-file-will-not-load) |
+| `config.provider_order_only` | `provider_order` is the whole routing preference on `GET` and `PUT /api/config`, and `default_provider` is on neither. A server without it reads an empty order as "use `default_provider`" |
 
 A few of those promises carry a consequence worth spelling out.
 

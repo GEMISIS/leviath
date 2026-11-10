@@ -59,12 +59,12 @@ fails is the diagnosis:
              unset, when the daemon was started before it existed, or when it
              is missing from [security] allow_env_vars - each of which silently
              downgrades every web_search to a keyless Wikipedia lookup.
-  resolve    your default provider/model picks a provider that is actually
+  resolve    your provider order and models pick a provider that is actually
              registered. With no override_model or fallback_model set it
-             passes on the first configured provider in your preference and
-             the next check probes a model from its catalogue. Fails when
-             nothing in default_provider or provider_order is configured: a
-             key missing or misspelled, or lev setup never run.
+             passes on the first configured provider in your order and the
+             next check probes a model from its catalogue. Fails when
+             provider_order is empty or nothing in it is configured: a key
+             missing or misspelled, or lev setup never run.
   inference  one real call to that provider. Fails on a bad key, an unknown
              model id, or a billing problem; the provider's own error is
              printed verbatim, status line and response body included.
@@ -77,7 +77,7 @@ problem, not your keys - the distinction this command exists to make.
 
 `--model` takes the same forms `lev run --model` does: `provider/model` picks
 both (the way to reach a Rhai script provider by name), and a bare model id
-pairs with your default_provider. Use it to try a model string before wiring it
+pairs with the first provider in your provider_order. Use it to try a model string before wiring it
 into a blueprint.
 
 Two inferences are billed per run, capped at 64 output tokens each.
@@ -90,7 +90,8 @@ checks as {\"checks\": [...], \"passed\": bool}.";
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct DoctorArgs {
     /// Model to test (`provider/model`, or a bare model id paired with the
-    /// configured default provider). Defaults to your configured default.
+    /// first provider in your provider order). Defaults to what your config
+    /// resolves to.
     #[arg(short, long)]
     pub model: Option<String>,
 
@@ -527,9 +528,12 @@ fn config_check(config: &Config, registry: &ProviderRegistry) -> Check {
         true => "none".to_string(),
         false => names.join(", "),
     };
+    let order = match config.provider_order() {
+        order if order.is_empty() => "(empty)".to_string(),
+        order => order.join(", "),
+    };
     let detail = format!(
-        "default_provider={}; registered: {} (script providers resolve by name)",
-        config.default_provider, registered
+        "provider_order={order}; registered: {registered} (script providers resolve by name)"
     );
 
     // Without this, "which keys were ignored" is only answerable by catching
@@ -541,8 +545,14 @@ fn config_check(config: &Config, registry: &ProviderRegistry) -> Check {
     // says the old thing. That is worth a warning rather than a note: the
     // value's meaning changed with the name, and `lev update` rewrites it.
     let renamed = Config::renamed_keys_at(&Config::config_path());
-    if !renamed.is_empty() {
-        let notices: Vec<String> = renamed.iter().map(crate::config::renamed::notice).collect();
+    let mut notices: Vec<String> = renamed.iter().map(crate::config::renamed::notice).collect();
+    // `default_provider` is the same kind of finding: read, as the head of
+    // the provider order, and still written the old way in the file.
+    notices.extend(crate::config::retired::fold_default_provider(
+        Config::retired_default_provider_at(&Config::config_path()),
+        &mut config.providers.provider_order.clone(),
+    ));
+    if !notices.is_empty() {
         return Check::warn("config", format!("{detail}  ({})", notices.join("; ")));
     }
     let mut unread = Config::unread_keys_at(&Config::config_path());

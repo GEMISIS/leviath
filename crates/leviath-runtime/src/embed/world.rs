@@ -122,26 +122,40 @@ impl AgentWorldBuilder {
         self
     }
 
-    /// The provider bare model names route to, and the model every stage
-    /// that allows a user default starts on while this is set - ahead of the
-    /// models its blueprint names. The embedded form of `override_model`.
+    /// The model every stage that allows a user default starts on while
+    /// this is set, ahead of the models its blueprint names, and the provider
+    /// it is asked of, which goes to the head of the
+    /// [`provider_order`](Self::provider_order). The embedded form of
+    /// `override_model`.
     pub fn override_model(mut self, provider: impl Into<String>, model: impl Into<String>) -> Self {
-        self.defaults.provider = provider.into();
+        let provider = provider.into();
+        let order = &mut self.defaults.provider_order;
+        order.retain(|name| *name != provider);
+        order.insert(0, provider);
         self.defaults.override_model = Some(model.into());
         self
     }
 
-    /// The provider bare model names route to, with no override: each stage
-    /// keeps its blueprint's choice and open routes are asked of this
-    /// provider first. The embedded form of `default_provider` on its own.
-    pub fn default_provider(mut self, provider: impl Into<String>) -> Self {
-        self.defaults.provider = provider.into();
+    /// The providers a model named with no provider may run on, best first.
+    /// The embedded form of `[providers] provider_order`.
+    ///
+    /// It is the whole answer: a registered provider left out is reached only
+    /// by a stage that names it, and with no order at all a stage that leaves
+    /// its route open is refused. The first entry is the provider
+    /// [`fallback_model`](Self::fallback_model) is asked of.
+    pub fn provider_order<I, S>(mut self, order: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.defaults.provider_order = order.into_iter().map(Into::into).collect();
         self
     }
 
-    /// A model on the default provider tried after every model a stage names
-    /// and before any [`fallback_route`](Self::fallback_route), never ahead
-    /// of the blueprint's own choices. The embedded form of `fallback_model`.
+    /// A model on the head of the [`provider_order`](Self::provider_order),
+    /// tried after every model a stage names and before any
+    /// [`fallback_route`](Self::fallback_route), never ahead of the
+    /// blueprint's own choices. The embedded form of `fallback_model`.
     pub fn fallback_model(mut self, model: impl Into<String>) -> Self {
         self.defaults.fallback_model = Some(model.into());
         self
@@ -1204,16 +1218,16 @@ budget = 20000
         }
     }
 
-    /// `default_provider` names the route for bare model names and nothing
+    /// `provider_order` names the routes for bare model names and nothing
     /// else; `fallback_model` is the model behind every stage's own list.
     /// Neither touches the override, so each stage keeps its blueprint's
     /// choice.
     #[test]
-    fn a_default_provider_and_a_fallback_model_leave_the_override_unset() {
+    fn a_provider_order_and_a_fallback_model_leave_the_override_unset() {
         let builder = AgentWorldBuilder::new()
-            .default_provider("openrouter")
+            .provider_order(["openrouter", "openai"])
             .fallback_model("deepseek-v4-flash");
-        assert_eq!(builder.defaults.provider, "openrouter");
+        assert_eq!(builder.defaults.provider_order, ["openrouter", "openai"]);
         assert_eq!(builder.defaults.override_model, None);
         assert_eq!(
             builder.defaults.fallback_model.as_deref(),
@@ -1221,15 +1235,17 @@ budget = 20000
         );
     }
 
-    /// The failover chain is ordered and additive, and setting a default model
-    /// afterwards must not wipe it.
+    /// The failover chain is ordered and additive, and setting an override
+    /// model afterwards must not wipe it. The override's provider goes to the
+    /// head of the order, moved there when it was already listed.
     #[test]
-    fn fallback_models_accumulate_in_order_beside_the_default() {
+    fn fallback_models_accumulate_in_order_beside_the_override() {
         let builder = AgentWorldBuilder::new()
             .fallback_route("anthropic", "sonnet")
             .fallback_route("openai", "gpt")
+            .provider_order(["openai", "openrouter"])
             .override_model("openrouter", "deepseek");
-        assert_eq!(builder.defaults.provider, "openrouter");
+        assert_eq!(builder.defaults.provider_order, ["openrouter", "openai"]);
         assert_eq!(builder.defaults.override_model.as_deref(), Some("deepseek"));
         assert_eq!(
             builder

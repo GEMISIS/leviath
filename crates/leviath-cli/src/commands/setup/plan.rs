@@ -130,11 +130,15 @@ pub(crate) fn changes(before: &Config, plan: &SetupPlan) -> Vec<String> {
         }
     }
 
+    let priority = |config: &Config| {
+        let order = &config.providers.provider_order;
+        (!order.is_empty()).then(|| order.join(" > "))
+    };
     push_if_changed(
         &mut out,
-        "default provider",
-        Some(&before.default_provider),
-        Some(&after.default_provider),
+        "provider priority",
+        priority(before).as_ref(),
+        priority(after).as_ref(),
     );
     push_if_changed(
         &mut out,
@@ -528,7 +532,7 @@ mod tests {
     fn scalar_settings_are_shown_as_old_to_new() {
         let before = Config::default();
         let mut after = before.clone();
-        after.default_provider = "ollama".to_string();
+        after.providers.provider_order = vec!["ollama".to_string(), "openai".to_string()];
         after.override_model = Some("llama3".to_string());
         after.fallback_model = Some("llama3-small".to_string());
         after.providers.bedrock_region = Some("eu-west-1".to_string());
@@ -542,7 +546,7 @@ mod tests {
 
         let lines = changes(&before, &plan_of(after));
 
-        assert!(lines.contains(&"default provider: anthropic → ollama".to_string()));
+        assert!(lines.contains(&"provider priority: (unset) → ollama > openai".to_string()));
         assert!(lines.contains(&"override model: (unset) → llama3".to_string()));
         assert!(lines.contains(&"fallback model: (unset) → llama3-small".to_string()));
         assert!(lines.contains(&"AWS Bedrock region: (unset) → eu-west-1".to_string()));

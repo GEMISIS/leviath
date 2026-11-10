@@ -21,6 +21,15 @@ impl serde::Serialize for PoisonSerialize {
     }
 }
 
+/// A config whose provider order is `order`, best first, and whose every
+/// other setting is the default: the base for a test that needs somewhere a
+/// bare model name can run.
+pub(crate) fn config_preferring(order: &[&str]) -> crate::config::Config {
+    let mut config = crate::config::Config::default();
+    config.providers.provider_order = order.iter().map(ToString::to_string).collect();
+    config
+}
+
 /// Whether `needle` appears anywhere in the run file at `path` once every
 /// frame is decompressed: what a reader of the file could get out of it.
 pub(crate) fn run_file_holds(path: &std::path::Path, needle: &str) -> bool {
