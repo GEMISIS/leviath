@@ -70,7 +70,7 @@ pub(crate) fn env_with(config: Config) -> (DaemonEnv, tempfile::TempDir) {
 }
 
 pub(crate) fn env() -> (DaemonEnv, tempfile::TempDir) {
-    env_with(Config::default())
+    env_with(crate::test_support::config_preferring(&["mock"]))
 }
 
 /// Install `manifest` as `name` under the env's agents directory, renamed

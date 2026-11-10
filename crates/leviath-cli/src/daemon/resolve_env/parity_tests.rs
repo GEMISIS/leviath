@@ -37,7 +37,7 @@ async fn the_coder_lands_with_what_the_daemons_systems_read() {
     let workdir = std::fs::canonicalize(work.path()).unwrap();
     let config = Config {
         taint_tracking: true,
-        ..Config::default()
+        ..crate::test_support::config_preferring(&["anthropic", "openai", "ollama"])
     };
 
     temp_env::async_with_vars(

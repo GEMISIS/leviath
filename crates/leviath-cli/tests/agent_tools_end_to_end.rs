@@ -214,7 +214,7 @@ async fn an_agent_reads_validates_fixes_spawns_and_reads_its_childs_history() {
         let mcp = Arc::new(tokio::sync::Mutex::new(leviath_mcp::ToolExecutor::new()));
         let mut host =
             leviath_cli::daemon::setup::build_host(leviath_cli::daemon::setup::HostParts {
-                config: leviath_cli::config::Config::default(),
+                config: e2e_config(),
                 providers,
                 runs_dir: runs.path().to_path_buf(),
                 shared_mcp: mcp,
@@ -318,4 +318,12 @@ async fn an_agent_reads_validates_fixes_spawns_and_reads_its_childs_history() {
         "child {child}: {:?}",
         statuses[1]
     );
+}
+
+/// A config whose provider order lists the one provider these tests
+/// register, so its stages have somewhere set up to run.
+fn e2e_config() -> leviath_cli::config::Config {
+    let mut config = leviath_cli::config::Config::default();
+    config.providers.provider_order = vec!["e2e".to_string()];
+    config
 }

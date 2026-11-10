@@ -225,14 +225,14 @@
         },
         "fallback_order": {
           "type": "array",
-          "description": "Host-wide failover chain, best first, as \"provider/model\" strings. Tried after the blueprint's own list.",
+          "description": "Host-wide failover chain, best first, as \"provider/model\" strings. Tried after the blueprint's own list. An entry on a provider that is not in provider_order is skipped.",
           "items": {
             "type": "string"
           }
         },
         "provider_order": {
           "type": "array",
-          "description": "The providers a bare model name may run on, best first, as plain provider names. A provider is set up once it is listed here: one left out never serves a model a blueprint lists with no provider, and with the list empty such a stage is refused. The first entry is where override_model and fallback_model run. Naming a subscription transport here opts it into bare-name routing at that priority.",
+          "description": "The providers a bare model name may run on, best first, as plain provider names. A provider is set up once it is listed here: one left out runs nothing, whether a blueprint names it or not, and with the list empty every stage is refused. The first entry is where override_model and fallback_model run. Naming a subscription transport here opts it into bare-name routing at that priority.",
           "items": {
             "type": "string"
           }

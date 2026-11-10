@@ -862,6 +862,35 @@ fn config_check_names_a_provider_order_entry_for_no_configured_provider() {
     );
 }
 
+/// A provider with a key and no place in the order runs nothing, and the
+/// config check says which one and how to list it. One in the order is not
+/// mentioned.
+#[test]
+fn config_check_names_a_configured_provider_left_out_of_the_order() {
+    let mut config = crate::test_support::config_preferring(&["anthropic"]);
+    config.providers.anthropic_api_key = Some("sk-test".to_string());
+    config.providers.openai_api_key = Some("sk-test".to_string());
+    let check = checked(
+        "doctor-config_check_names_a_configured_provider_left_out_of_the_order",
+        &config,
+        &ProviderRegistry::new(),
+    );
+    assert_eq!(check.status, CheckStatus::Ok, "not broken wiring");
+    assert!(
+        check
+            .detail
+            .contains("\"openai\" is configured but not in provider_order"),
+        "{}",
+        check.detail
+    );
+    assert!(
+        check.detail.contains("lev providers order"),
+        "{}",
+        check.detail
+    );
+    assert!(!check.detail.contains("\"anthropic\""), "{}", check.detail);
+}
+
 #[test]
 fn config_check_is_quiet_when_every_rate_limit_names_a_real_provider() {
     let mut config = Config::default();
@@ -906,7 +935,7 @@ fn resolve_check_uses_the_configured_default() {
 #[test]
 fn resolve_check_honours_a_provider_slash_model_override() {
     let config = Config {
-        ..crate::test_support::config_preferring(&["anthropic"])
+        ..crate::test_support::config_preferring(&["anthropic", "stub"])
     };
     let registry = registry_with("stub", StubProvider::replying("hi"));
     let (check, resolved) = resolve_check(&config, Some("stub/m-2"), &registry);
@@ -1189,7 +1218,7 @@ fn resolve_check_says_so_when_the_configured_default_never_wins() {
 /// scopes itself to this check.
 #[test]
 fn resolve_check_notes_a_first_provider_the_fallback_chain_passed_over() {
-    let mut config = crate::test_support::config_preferring(&["openrouter"]);
+    let mut config = crate::test_support::config_preferring(&["openrouter", "anthropic"]);
     config.providers.fallback_order = vec!["anthropic/m-2".to_string()];
     let mut registry = registry_with("openrouter", StubProvider::replying("hi"));
     registry.register("anthropic".to_string(), StubProvider::replying("hi"));
@@ -1266,7 +1295,7 @@ fn resolve_check_does_not_second_guess_an_unregistered_head_of_the_order() {
     for override_model in [None, Some("m-1".to_string())] {
         let mut config = Config {
             override_model,
-            ..crate::test_support::config_preferring(&["ghost"])
+            ..crate::test_support::config_preferring(&["ghost", "anthropic"])
         };
         config.providers.fallback_order = vec!["anthropic/m-2".to_string()];
         let registry = registry_with("anthropic", StubProvider::replying("hi"));
@@ -1282,11 +1311,34 @@ fn resolve_check_stays_quiet_under_an_explicit_model_override() {
     // default was passed over is noise.
     let config = Config {
         override_model: None,
-        ..crate::test_support::config_preferring(&["openrouter"])
+        ..crate::test_support::config_preferring(&["openrouter", "stub"])
     };
     let registry = registry_with("stub", StubProvider::replying("hi"));
     let (check, _) = resolve_check(&config, Some("stub/m-2"), &registry);
     assert_eq!(check.detail, "stub / m-2");
+}
+
+/// A `--model provider/model` on a provider that is configured and left out
+/// of the order fails, and says the order is what is missing, not the key.
+#[test]
+fn resolve_check_refuses_an_override_on_a_provider_left_out_of_the_order() {
+    let config = crate::test_support::config_preferring(&["openrouter"]);
+    let registry = registry_with("stub", StubProvider::replying("hi"));
+    let (check, resolved) = resolve_check(&config, Some("stub/m-2"), &registry);
+    assert_eq!(check.status, CheckStatus::Fail);
+    assert!(resolved.is_none());
+    assert!(
+        check
+            .detail
+            .starts_with("resolved to 'stub', which is configured but not in"),
+        "{}",
+        check.detail
+    );
+    assert!(
+        check.detail.contains("lev providers order"),
+        "{}",
+        check.detail
+    );
 }
 
 // ─── inference_check ──────────────────────────────────────────────────────────

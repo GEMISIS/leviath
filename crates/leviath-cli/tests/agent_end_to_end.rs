@@ -223,7 +223,7 @@ async fn an_agent_runs_a_tool_and_the_file_lands_on_disk() {
 
     let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
     let mut host = leviath_cli::daemon::setup::build_host(leviath_cli::daemon::setup::HostParts {
-        config: leviath_cli::config::Config::default(),
+        config: e2e_config(),
         providers,
         runs_dir: runs.path().to_path_buf(),
         shared_mcp: mcp,
@@ -397,7 +397,7 @@ fn always_done_host(runs: &std::path::Path) -> leviath_runtime::host::WorldHost 
     providers.register("e2e".to_string(), Arc::new(AlwaysDone));
     let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
     leviath_cli::daemon::setup::build_host(leviath_cli::daemon::setup::HostParts {
-        config: leviath_cli::config::Config::default(),
+        config: e2e_config(),
         providers,
         runs_dir: runs.to_path_buf(),
         shared_mcp: mcp,
@@ -477,4 +477,12 @@ async fn a_run_that_takes_an_edge_records_the_move_in_its_run_file() {
     );
     let last = file.latest_state().expect("the last state");
     assert_eq!(last.last_transition.as_ref(), Some(&moves[0]));
+}
+
+/// A config whose provider order lists the one provider these tests
+/// register, so its stages have somewhere set up to run.
+fn e2e_config() -> leviath_cli::config::Config {
+    let mut config = leviath_cli::config::Config::default();
+    config.providers.provider_order = vec!["e2e".to_string()];
+    config
 }

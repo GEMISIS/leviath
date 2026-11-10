@@ -292,14 +292,15 @@ impl LintEnv {
             // The pinned entries the stage names after its head, on providers
             // this install has, which are what a failover would reach. An open
             // entry resolves through the same preference the head did, and is
-            // judged there; a provider that is not configured here is not in
-            // the failover list either.
+            // judged there; a provider that is not set up here (no key, or
+            // left out of the provider order) is not in the failover list
+            // either.
             for (provider, model) in stage
                 .model
                 .models
                 .iter()
                 .map(route)
-                .filter(|(p, _)| !p.is_empty() && registry.has(p))
+                .filter(|(p, _)| !p.is_empty() && defaults.is_set_up(p, registry))
             {
                 consider(provider, model, false);
             }
@@ -313,17 +314,19 @@ impl LintEnv {
 
     /// Add the answer to "can this install reach the providers the blueprint
     /// names", asked of the same registry the runtime resolves stages against
-    /// so a script provider counts exactly when it would really load.
+    /// so a script provider counts exactly when it would really load, and of
+    /// the same provider order, so one left out of it does not count.
     pub(crate) fn with_providers(
         mut self,
         graph: &RunGraph,
         config: &crate::config::Config,
     ) -> Self {
         let registry = crate::commands::run::build_provider_registry_from_config(config);
+        let defaults = crate::daemon::spawn::model_defaults(config);
         self.available_providers = Some(
             model_entries(graph)
                 .map(|e| route(e).0.to_string())
-                .filter(|p| registry.as_ref().is_ok_and(|r| r.has(p)))
+                .filter(|p| registry.as_ref().is_ok_and(|r| defaults.is_set_up(p, r)))
                 .collect(),
         );
         self

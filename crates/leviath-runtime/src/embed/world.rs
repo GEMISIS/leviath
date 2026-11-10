@@ -48,6 +48,7 @@ fn closed() -> SpawnIssues {
 /// ```ignore
 /// let world = AgentWorld::builder()
 ///     .provider(ProviderCreds::anthropic(api_key))
+///     .provider_order(["anthropic"])
 ///     .build()?;
 /// ```
 pub struct AgentWorldBuilder {
@@ -136,12 +137,12 @@ impl AgentWorldBuilder {
         self
     }
 
-    /// The providers a model named with no provider may run on, best first.
+    /// The providers a stage may run on, best first.
     /// The embedded form of `[providers] provider_order`.
     ///
-    /// It is the whole answer: a registered provider left out is reached only
-    /// by a stage that names it, and with no order at all a stage that leaves
-    /// its route open is refused. The first entry is the provider
+    /// It is the whole answer: a registered provider left out is not set up
+    /// and runs nothing, and with no order at all every stage is refused. The
+    /// first entry is the provider
     /// [`fallback_model`](Self::fallback_model) is asked of.
     pub fn provider_order<I, S>(mut self, order: I) -> Self
     where
@@ -655,6 +656,7 @@ mod tests {
 
     fn mock_world(responses: Vec<InferenceResponse>) -> AgentWorld {
         AgentWorld::builder()
+            .provider_order(["mock"])
             .register_provider(
                 "mock",
                 Arc::new(Mock {
@@ -803,12 +805,15 @@ budget = 20000
         let starter = EmbedStarter {
             registry,
             creds: Vec::new(),
-            defaults: Default::default(),
+            defaults: ModelDefaults {
+                provider_order: vec!["mock".to_string()],
+                ..Default::default()
+            },
             hints: Default::default(),
             basic_tools: None,
             blueprints,
             workdir: Some(std::env::temp_dir()),
-            preferred: Vec::new(),
+            preferred: vec!["mock".to_string()],
         };
         let named = |name: &str| {
             SpawnRequest::new(SpawnSource::Blueprint(BlueprintRef::parse(name).unwrap()))
@@ -882,6 +887,7 @@ budget = 20000
     #[test]
     fn build_outside_a_tokio_runtime_is_refused() {
         let err = AgentWorld::builder()
+            .provider_order(["mock"])
             .register_provider(
                 "mock",
                 Arc::new(Mock {
@@ -904,6 +910,7 @@ budget = 20000
             .build()
             .unwrap();
         let world = AgentWorld::builder()
+            .provider_order(["mock"])
             .register_provider(
                 "mock",
                 Arc::new(Mock {
@@ -1104,6 +1111,7 @@ budget = 20000
         let mut pool = InferencePoolConfig::new();
         pool.set_limit("m", 0);
         let world = AgentWorld::builder()
+            .provider_order(["mock"])
             .register_provider(
                 "mock",
                 Arc::new(Mock {
@@ -1273,6 +1281,7 @@ budget = 20000
         let dir = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
         let world = AgentWorld::builder()
+            .provider_order(["mock"])
             .provider(ProviderCreds::simple("ollama"))
             .register_provider(
                 "mock",
@@ -1357,6 +1366,7 @@ budget = 20000
         let dir = tempfile::tempdir().unwrap();
         let seen = Arc::new(Mutex::new(Vec::new()));
         let world = AgentWorld::builder()
+            .provider_order(["mock"])
             .register_provider(
                 "mock",
                 Arc::new(Recorder {
@@ -1422,6 +1432,7 @@ budget = 20000
     async fn a_custom_tool_service_replaces_the_builtin_one() {
         let dir = tempfile::tempdir().unwrap();
         let world = AgentWorld::builder()
+            .provider_order(["mock"])
             .register_provider(
                 "mock",
                 Arc::new(Mock {
@@ -1559,6 +1570,7 @@ budget = 20000
         let mut pool = InferencePoolConfig::new();
         pool.set_limit("m", 0);
         let world = AgentWorld::builder()
+            .provider_order(["mock"])
             .register_provider(
                 "mock",
                 Arc::new(Mock {

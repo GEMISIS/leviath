@@ -92,7 +92,7 @@ async fn old_runs_convert_at_start_with_this_machines_models_and_tools() {
         .max_context_tokens("gpt-mock");
     let shared = Arc::new(tokio::sync::Mutex::new(leviath_mcp::ToolExecutor::new()));
     let pool = McpPool::new(shared.clone(), HashSet::new());
-    let config = crate::config::Config::default();
+    let config = crate::test_support::config_preferring(&["openai"]);
     let agents = fixture("agents");
     let home_path = home.path().to_str().unwrap().to_string();
     let board = StartupBoard::default();
@@ -192,7 +192,7 @@ fn what_the_machine_cannot_answer_comes_back_as_why() {
         Arc::new(tokio::sync::Mutex::new(leviath_mcp::ToolExecutor::new())),
         HashSet::new(),
     );
-    let config = crate::config::Config::default();
+    let config = crate::test_support::config_preferring(&["openai"]);
     let start = AtStart {
         config: &config,
         registry: leviath_runtime::ProviderRegistry::new(),

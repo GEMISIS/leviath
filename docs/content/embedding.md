@@ -36,6 +36,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
             ..ProviderCreds::simple("anthropic")
         })
+        .provider_order(["anthropic"])
         .blueprint(coder)
         .workdir(std::env::current_dir()?)
         .build()?;
@@ -85,7 +86,7 @@ returning.
 | `blueprint(loaded)` | Offer a blueprint to the world's requests, under its own name. Repeatable. `world.add_blueprint` does the same later. |
 | `workdir(dir)` | The directory a run works in when its request names none. Without it, every request names one. |
 | `register_provider(name, arc)` | Register your own `Provider` implementation, including mocks for tests. Wins over a credentials entry with the same name. |
-| `provider_order(names)` | The providers bare model names may route to, best first. Each stage keeps the model its blueprint names. With none, only a stage that names its provider runs. |
+| `provider_order(names)` | The providers bare model names may route to, best first. Each stage keeps the model its blueprint names. A provider you registered and did not name here is not set up: no stage runs on it, so with none every stage is refused. |
 | `override_model(provider, model)` | The embedded `override_model`. One model every stage that allows a user default starts on. |
 | `fallback_model(model)` | The embedded `fallback_model`. A last model to try when a stage's own list is spent. |
 | `fallback_route(provider, model)` | Where a run moves when its provider fails mid-run. |

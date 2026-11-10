@@ -222,7 +222,8 @@ table for Bedrock; see [AWS Bedrock](/docs/providers#aws-bedrock).
 
 `fallback_order` is where a run goes when the provider it is using stops being usable: out of
 credits, or a rejected key. Entries are `provider/model` pairs, best first, tried after the stage's
-own model list and your default model. One naming a provider you have not configured is skipped.
+own model list and your default model. One naming a provider you have not configured, or one
+that is not in `provider_order`, is skipped.
 It is read per run, so a change takes effect on the next `lev run` with no restart. See
 [Providers](/docs/providers#a-host-wide-fallback-chain).
 
@@ -243,14 +244,16 @@ serves a bare name, and a run whose stage leaves its route open fails at spawn w
 `no provider is set up`. `lev setup` writes the list for you, and `lev providers order <name>...`
 changes it.
 
-The list is the whole answer: a configured provider that is not in it never serves a bare name,
-however many models it carries. It is still reachable by an explicit `provider/model` in a
-blueprint or a `fallback_order` entry, and a stage that pins it while it is not configured is
-refused at spawn rather than quietly moved elsewhere. So configuring a key never silently moves a
-bare-named stage, and what it bills, onto a provider nobody listed; that holds for a ChatGPT
+The list is the whole answer: a configured provider that is not in it is not set up, and runs
+nothing, however many models it carries. That covers a stage that names it as `provider/model`
+and a `fallback_order` entry on it as well as a bare name. A stage that names it moves on to the
+next thing it could run on (a later model in its list, your `fallback_model`, the
+`fallback_order`), and is refused at spawn, naming the provider and this setting, only when
+nothing else is left. So configuring a key never silently moves a
+stage, and what it bills, onto a provider nobody listed; that holds for a ChatGPT
 (Codex) subscription as much as for an API key. Put `codex` first and a stage that names
 `gpt-5.6-sol` with no provider runs on your plan, ahead of an OpenAI key that also serves the
-name. Leave it out and only a `codex/...` pin reaches it. `lev setup`'s priority modal is where
+name. Leave it out and nothing reaches it. `lev setup`'s priority modal is where
 a provider is taken in or out of the list.
 
 It shapes routes, not models: a blueprint that chose a different model per stage keeps each stage's

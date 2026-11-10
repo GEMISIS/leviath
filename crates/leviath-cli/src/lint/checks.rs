@@ -796,7 +796,7 @@ pub(super) fn lint_models(stage: &StageDef, env: &LintEnv) -> Vec<LintFinding> {
     // reaches the runtime as "no usable provider" at spawn.
     //
     // An entry is reachable when this install can actually run it: a pinned one
-    // needs its provider registered, an open one needs something that serves
+    // needs its provider set up, an open one needs something that serves
     // its model, which arrives here as `unrouted_models`. That is empty both
     // when nobody asked and when everything routes, and both read as reachable
     // here: a question nobody asked must not turn into a finding.
@@ -826,7 +826,10 @@ pub(super) fn lint_models(stage: &StageDef, env: &LintEnv) -> Vec<LintFinding> {
                 ),
             )
             .in_stage(stage.name.as_str())
-            .with_fix("run `lev setup` to configure one of them, or name a model you have"),
+            .with_fix(
+                "run `lev setup` to configure one of them, list it with \
+                 `lev providers order`, or name a model you have",
+            ),
         );
     }
 

@@ -1,11 +1,11 @@
 use super::*;
-use crate::bind::host::tests::{registry, stage};
+use crate::bind::host::tests::{ordered, registry, stage};
 use crate::spec::graph::{SeedToolCall, ToolSelector};
 use crate::spec::inputs::InputValues;
 use crate::spec::names::ToolName;
 
 fn env() -> EmbedEnv {
-    EmbedEnv::new(registry(&["mock"]), ModelDefaults::default())
+    EmbedEnv::new(registry(&["mock"]), ordered(&["mock"]))
 }
 
 fn loaded(digest: Option<Digest>) -> LoadedBlueprint {
@@ -339,8 +339,11 @@ async fn mcp_dependencies_are_never_met_and_checks_run_from_the_runs_code() {
 fn providers_are_fingerprinted_by_their_credentials_or_their_name() {
     let mut creds = ProviderCreds::simple("keyed");
     creds.base_url = Some("https://x.example".into());
-    let e = EmbedEnv::new(registry(&["keyed", "custom"]), ModelDefaults::default())
-        .with_creds(vec![creds.clone()]);
+    let e = EmbedEnv::new(
+        registry(&["keyed", "custom"]),
+        ordered(&["keyed", "custom"]),
+    )
+    .with_creds(vec![creds.clone()]);
     let name = |n: &str| ProviderName::new(n).unwrap();
     assert_eq!(
         ResolveEnv::provider_fingerprint(&e, &name("keyed")),
