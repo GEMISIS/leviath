@@ -64,7 +64,15 @@ pub(crate) fn apply(
     }
 
     let mut agents_installed = Vec::new();
-    let mut warnings = Vec::new();
+    let mut warnings: Vec<String> = unlisted_providers(&plan.config)
+        .iter()
+        .map(|name| {
+            format!(
+                "{name} is configured but not in the provider priority, so nothing \
+                 runs on it. `lev providers order` lists it."
+            )
+        })
+        .collect();
     for agent in &plan.agents {
         match crate::bundled::install_bundled(agent, agents_dir) {
             Ok(()) => agents_installed.push(agent.name.to_string()),
@@ -77,6 +85,17 @@ pub(crate) fn apply(
         agents_installed,
         warnings,
     })
+}
+
+/// The providers `config` configures and leaves out of `[providers]
+/// provider_order`. A provider is set up once it is in the order, so each of
+/// these has a credential and runs nothing.
+pub(crate) fn unlisted_providers(config: &Config) -> Vec<String> {
+    let order = &config.providers.provider_order;
+    super::configured_providers(config)
+        .into_iter()
+        .filter(|name| !order.contains(name))
+        .collect()
 }
 
 /// A human-readable list of what this plan changes against `before`, for the
@@ -350,7 +369,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.toml");
         let agents_dir = dir.path().join("agents");
-        let mut config = Config::default();
+        let mut config = crate::test_support::config_preferring(&["anthropic"]);
         config.providers.anthropic_api_key = Some("sk-ant-x".to_string());
         let plan = SetupPlan {
             config,
@@ -432,6 +451,33 @@ mod tests {
         )
         .unwrap();
         assert!(!dir.path().join("ui-state.json").exists());
+    }
+
+    /// A provider with a key and no place in the order is written as asked,
+    /// and the summary says nothing runs on it. One in the order is not
+    /// mentioned.
+    #[test]
+    fn apply_warns_about_a_configured_provider_left_out_of_the_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = crate::test_support::config_preferring(&["anthropic"]);
+        config.providers.anthropic_api_key = Some("sk-ant-test".to_string());
+        config.providers.openai_api_key = Some("sk-test".to_string());
+        assert_eq!(unlisted_providers(&config), ["openai"]);
+
+        let applied = apply(
+            &plan_of(config),
+            &dir.path().join("config.toml"),
+            &dir.path().join("agents"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(applied.warnings.len(), 1, "{:?}", applied.warnings);
+        let warning = applied.warnings[0].as_str();
+        assert!(
+            warning.starts_with("openai is configured but not in the provider priority"),
+            "{warning}"
+        );
+        assert!(warning.contains("lev providers order"), "{warning}");
     }
 
     #[test]

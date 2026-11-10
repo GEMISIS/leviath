@@ -15,6 +15,10 @@ same list.
 
 ### Changed
 
+- `lev setup` says when a provider is configured and not in the provider priority. The Review
+  screen lists each one before the config is written, and the closing summary, in the wizard
+  and with `--non-interactive`, warns about each one, because a provider outside
+  `provider_order` runs nothing until `lev providers order` or the priority modal lists it.
 - **Breaking.** `default_provider` is gone, and `[providers] provider_order` is the one setting
   that decides where a stage runs. A provider is set up once it is in that list:
   only listed providers serve a model a blueprint names with no provider, in that order, and

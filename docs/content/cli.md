@@ -1434,7 +1434,9 @@ move the one under the cursor with `Shift+↑`/`Shift+↓`. Use `K`/`J` on a ter
 Shift+arrows for itself (Apple Terminal does). Space takes a configured provider out of the order
 or brings it back in. A provider left out is still configured and is not set up: no stage runs on
 it, including one that names it as `provider/model`. Configuring a new provider
-does not add it to the order on its own, and at least one provider always stays in. It writes the
+does not add it to the order on its own, and at least one provider always stays in. The Review
+screen lists each provider that is configured and not in the order, and so does the summary
+printed once the config is saved, since nothing runs on one until it is listed. It writes the
 same [`provider_order`](/docs/configuration#provider-preference-order) that `lev providers order`
 and `PUT /api/config` set, so putting a subscription like Codex first there is how you route bare
 model names onto your plan.
