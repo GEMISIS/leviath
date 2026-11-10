@@ -1030,6 +1030,25 @@ fn build_review(wizard: &Wizard) -> Screen {
         }
     }
 
+    let unlisted = wizard.unlisted_providers();
+    if !unlisted.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Configured, but not in the provider priority, so nothing runs on them:",
+            Style::default().fg(C_WARN),
+        )));
+        for name in unlisted {
+            lines.push(Line::from(Span::styled(
+                format!("  • {name}"),
+                Style::default().fg(C_WARN),
+            )));
+        }
+        lines.push(Line::from(Span::styled(
+            "Add one under Defaults › Provider priority, or later with `lev providers order`.",
+            Style::default().fg(C_WARN),
+        )));
+    }
+
     let failures: Vec<String> = wizard
         .providers
         .iter()
@@ -1979,6 +1998,32 @@ mod tests {
             models: vec!["a".into()],
         };
         assert!(rendered(&w).contains("1 model · checked 2 hours ago"));
+    }
+
+    /// The review screen names a provider that is configured and left out
+    /// of the priority, and says nothing once it is in.
+    #[test]
+    fn the_review_warns_about_a_configured_provider_left_out_of_the_priority() {
+        let (_dir, mut w) = wizard();
+        w.providers[0].selected = true;
+        w.enter(Step::Defaults);
+        w.providers[1].selected = true;
+        w.enter(Step::Review);
+        assert_eq!(w.unlisted_providers(), ["openai"]);
+        let screen = rendered(&w);
+        assert!(
+            screen.contains("Configured, but not in the provider priority"),
+            "{screen}"
+        );
+        assert!(screen.contains("• openai"), "{screen}");
+        assert!(screen.contains("lev providers order"), "{screen}");
+
+        w.providers[1].selected = false;
+        assert!(w.unlisted_providers().is_empty());
+        assert!(
+            !rendered(&w).contains("not in the provider priority"),
+            "nothing is left out"
+        );
     }
 
     #[test]

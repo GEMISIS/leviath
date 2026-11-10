@@ -67,6 +67,17 @@ impl Wizard {
         }
     }
 
+    /// The configured providers the priority leaves out, which therefore run
+    /// nothing: what the review screen warns about before the config is
+    /// written.
+    pub(crate) fn unlisted_providers(&self) -> Vec<String> {
+        let order = self.current_provider_order();
+        self.configured_provider_names()
+            .into_iter()
+            .filter(|name| !order.contains(name))
+            .collect()
+    }
+
     /// Every configured provider the priority may name: the built-ins by id,
     /// and an endpoint preset by each entry under it, since the entry's name
     /// is what `provider_order` has to hold.
