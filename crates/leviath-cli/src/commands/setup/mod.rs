@@ -208,9 +208,17 @@ impl SetupEnv {
 pub fn run_non_interactive(args: &SetupArgs, env: &SetupEnv) -> anyhow::Result<()> {
     let mut config = Config::load_from_path(&env.config_path).unwrap_or_default();
     apply_flags(&mut config, args);
-    // The wizard refuses to finish without a provider; this path is scripted
-    // and writes what it was given, so it says so instead. A config with no
-    // provider is a valid file that cannot run an agent.
+    // A provider is set up once it is in the provider order, and neither the
+    // wizard nor this path leaves a config with none: a run on it could only
+    // fail. Refused before anything is written.
+    if config.providers.provider_order.is_empty() {
+        anyhow::bail!(
+            "no provider is set up, so nothing was written. Give a key flag (`--anthropic-key`, \
+             `--openai-key`, ...), or run `lev setup` interactively."
+        );
+    }
+    // An order whose providers have all lost their credential is still the
+    // user's, and is written as given; this says what it means.
     if configured_providers(&config).is_empty() {
         eprintln!(
             "warning: no provider is configured; runs will fail until one is (give a key \
@@ -282,6 +290,7 @@ fn report(applied: &plan::Applied) {
 
 /// Copy the flag values onto a config.
 fn apply_flags(config: &mut Config, args: &SetupArgs) {
+    let before = configured_providers(config);
     if let Some(ref k) = args.anthropic_key {
         config.providers.anthropic_api_key = Some(k.clone());
     }
@@ -334,7 +343,7 @@ fn apply_flags(config: &mut Config, args: &SetupArgs) {
     if let Some(enabled) = args.grok {
         config.providers.grok_enabled = enabled;
     }
-    retarget_default_provider(config);
+    list_configured_providers(config, &before);
 }
 
 /// The providers this config holds a credential for, best first.
@@ -370,7 +379,7 @@ fn configured_providers(config: &Config) -> Vec<String> {
         .filter(|id| kind(id) != Some(catalog::Credential::Signin) || grant_exists(id))
         .collect();
     // A provider that needed no credential sorts last, and the first name in
-    // this list is what `--default-provider` picks when nothing else says.
+    // this list is what heads the provider order when nothing else says.
     // A local server the user happens to have is the weakest thing to choose
     // on somebody's behalf: it should lose to every key they went and got,
     // and to every endpoint they wrote down.
@@ -392,23 +401,31 @@ fn grant_exists(provider: &str) -> bool {
         .is_some_and(|store| store.get(provider).is_some())
 }
 
-/// Point `default_provider` at a provider this config can actually reach.
+/// Put the providers this run configured into `[providers] provider_order`,
+/// and make sure the order holds one this config can actually reach.
 ///
-/// It defaults to `anthropic` and nothing in non-interactive mode ever moved
-/// it, so `lev setup --non-interactive --openrouter-key ...` produced a config
-/// whose very next `lev doctor` said it "resolved to 'anthropic', which is not
-/// configured". The install was fine; the default was pointing at a provider
-/// the user had not asked for.
+/// A provider is set up once it is in the order, so `lev setup
+/// --non-interactive --openrouter-key ...` has to list OpenRouter, or the
+/// very next run is refused for want of a provider. `before` is what was
+/// configured when the run started: each provider configured since is
+/// appended, behind whatever the file already preferred.
 ///
-/// Only ever moves a default that is unreachable, so a deliberate choice
-/// already in the file survives.
-fn retarget_default_provider(config: &mut Config) {
+/// An order none of whose entries is reachable then gets the best configured
+/// provider put first. One that already names a reachable provider is left as
+/// it is, so a deliberate arrangement in the file survives.
+fn list_configured_providers(config: &mut Config, before: &[String]) {
     let configured = configured_providers(config);
-    if configured.contains(&config.default_provider) {
+    let order = &mut config.providers.provider_order;
+    for name in &configured {
+        if !before.contains(name) && !order.contains(name) {
+            order.push(name.clone());
+        }
+    }
+    if order.iter().any(|name| configured.contains(name)) {
         return;
     }
     if let Some(first) = configured.first() {
-        config.default_provider = first.clone();
+        order.insert(0, first.clone());
     }
 }
 
@@ -609,6 +626,15 @@ mod tests {
     use crate::tui::{TestEventSource, TestSetup, key, key_with, test_terminal};
     use crossterm::event::{KeyCode, KeyModifiers};
 
+    /// [`args`] with one key, for a test that needs the scripted path to
+    /// write: it refuses a config with no provider in it.
+    fn keyed() -> SetupArgs {
+        SetupArgs {
+            anthropic_key: Some("sk-ant-test".to_string()),
+            ..args()
+        }
+    }
+
     /// Args with everything off, so each test names only what it exercises.
     fn args() -> SetupArgs {
         SetupArgs {
@@ -745,14 +771,14 @@ mod tests {
         wizard
     }
 
-    // ─── default_provider retargeting ───────────────────────────────────────
+    // ─── listing what was configured in the provider order ──────────────────
 
     #[test]
-    fn a_single_non_anthropic_key_becomes_the_default_provider() {
-        // The bug this exists for: setup succeeded, then `lev doctor` said the
-        // install resolved to a provider the user had never configured.
+    fn a_key_given_by_flag_puts_its_provider_in_the_order() {
+        // A provider is set up once it is in the order, so a setup that only
+        // stored the key would leave an install whose first run is refused.
         let mut config = Config::default();
-        assert_eq!(config.default_provider, "anthropic");
+        assert_eq!(config.head_provider(), None);
         apply_flags(
             &mut config,
             &SetupArgs {
@@ -760,11 +786,11 @@ mod tests {
                 ..args()
             },
         );
-        assert_eq!(config.default_provider, "openrouter");
+        assert_eq!(config.head_provider(), Some("openrouter"));
     }
 
     #[test]
-    fn a_reachable_default_provider_is_left_alone() {
+    fn every_provider_a_run_configures_is_listed() {
         let mut config = Config::default();
         apply_flags(
             &mut config,
@@ -774,15 +800,22 @@ mod tests {
                 ..args()
             },
         );
-        assert_eq!(config.default_provider, "anthropic");
+        assert_eq!(config.providers.provider_order, ["anthropic", "openrouter"]);
+
+        // A second run that repeats a key adds nothing twice.
+        apply_flags(
+            &mut config,
+            &SetupArgs {
+                anthropic_key: Some("sk-ant-other".to_string()),
+                ..args()
+            },
+        );
+        assert_eq!(config.providers.provider_order, ["anthropic", "openrouter"]);
     }
 
     #[test]
-    fn a_deliberate_default_provider_survives() {
-        let mut config = Config {
-            default_provider: "google".to_string(),
-            ..Config::default()
-        };
+    fn an_order_already_in_the_file_keeps_its_head() {
+        let mut config = crate::test_support::config_preferring(&["google"]);
         apply_flags(
             &mut config,
             &SetupArgs {
@@ -791,13 +824,13 @@ mod tests {
                 ..args()
             },
         );
-        assert_eq!(config.default_provider, "google");
+        assert_eq!(config.providers.provider_order, ["google", "openrouter"]);
     }
 
-    /// An endpoint written by hand is a deliberate provider, so it can be
-    /// the default, after any keyed provider and before Ollama.
+    /// An endpoint written by hand is a deliberate provider, so it can head
+    /// the order, after any keyed provider and before Ollama.
     #[test]
-    fn an_endpoint_entry_can_become_the_default_provider() {
+    fn an_endpoint_entry_can_head_the_provider_order() {
         use crate::config::{ModelProviderConfig, ModelProviderKind};
         let mut config = Config {
             ollama_base_url: Some("http://localhost:11434".to_string()),
@@ -823,10 +856,10 @@ mod tests {
         );
         // Ollama last: a local server nobody had to sign up for should not
         // outrank an endpoint the user wrote down when something has to pick
-        // a default.
+        // the head of the order.
         assert_eq!(configured_providers(&config), ["alpha", "zeta", "ollama"]);
         apply_flags(&mut config, &args());
-        assert_eq!(config.default_provider, "alpha");
+        assert_eq!(config.head_provider(), Some("alpha"));
 
         // A key still comes first.
         apply_flags(
@@ -838,18 +871,24 @@ mod tests {
         );
         assert_eq!(configured_providers(&config)[0], "openai");
         assert_eq!(
-            config.default_provider, "alpha",
-            "already reachable, so kept"
+            config.providers.provider_order,
+            ["alpha", "openai"],
+            "the head is already reachable, so kept; the new key goes behind it"
         );
     }
 
     #[test]
-    fn configuring_nothing_leaves_the_default_provider_untouched() {
-        // Nothing to retarget to, so moving it would only make it wrong
-        // differently.
+    fn configuring_nothing_leaves_the_provider_order_empty() {
+        // Nothing to list, and no provider is assumed in its place.
         let mut config = Config::default();
         apply_flags(&mut config, &args());
-        assert_eq!(config.default_provider, "anthropic");
+        assert_eq!(config.head_provider(), None);
+
+        // An order whose only entry has no credential is the user's own, and
+        // with nothing configured there is nothing better to put first.
+        let mut listed = crate::test_support::config_preferring(&["google"]);
+        apply_flags(&mut listed, &args());
+        assert_eq!(listed.providers.provider_order, ["google"]);
     }
 
     #[test]
@@ -865,7 +904,7 @@ mod tests {
                 ..args()
             },
         );
-        assert_eq!(config.default_provider, "google");
+        assert_eq!(config.head_provider(), Some("google"));
 
         let mut ollama_only = Config::default();
         apply_flags(
@@ -875,13 +914,13 @@ mod tests {
                 ..args()
             },
         );
-        assert_eq!(ollama_only.default_provider, "ollama");
+        assert_eq!(ollama_only.head_provider(), Some("ollama"));
     }
 
     #[test]
     fn the_codex_transport_counts_only_once_it_is_signed_in() {
-        // Enabled alone would let a headless run retarget `default_provider`
-        // onto a provider with no credential, and the next run would fail on
+        // Enabled alone would let a headless run put at the head of the order
+        // a provider with no credential, and the next run would fail on
         // one nobody had been asked for.
         let dir = tempfile::tempdir().unwrap();
         temp_env::with_var("LEVIATH_HOME", Some(dir.path()), || {
@@ -1077,7 +1116,7 @@ mod tests {
     fn setup_writes_the_blueprint_schema_into_the_data_directory() {
         let dir = tempfile::tempdir().unwrap();
         let env = env_in(dir.path());
-        run_non_interactive(&args(), &env).unwrap();
+        run_non_interactive(&keyed(), &env).unwrap();
         let path = dir.path().join(crate::blueprint_schema::FILE_NAME);
         let schema: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -1110,7 +1149,7 @@ mod tests {
             ui_state_path: None,
             ..env_in(dir.path())
         };
-        run_non_interactive(&args(), &env).unwrap();
+        run_non_interactive(&keyed(), &env).unwrap();
         assert!(!dir.path().join(crate::blueprint_schema::FILE_NAME).exists());
     }
 
@@ -1169,16 +1208,29 @@ mod tests {
             Some(dir.path().to_path_buf().into_os_string()),
         ));
         temp_env::with_vars(vars, || {
-            // No keys anywhere, so the scripted path says so rather than writing
-            // a config that cannot run an agent and saying nothing.
-            run_non_interactive(&args(), &env).unwrap();
+            // No keys anywhere, so the scripted path refuses rather than
+            // writing a config that cannot run an agent, and writes nothing.
+            let refused = run_non_interactive(&args(), &env).unwrap_err().to_string();
+            assert!(refused.contains("no provider is set up"), "{refused}");
+            assert!(refused.contains("--anthropic-key"), "{refused}");
+            assert!(!env.config_path.exists(), "nothing was written");
+
+            run_non_interactive(&keyed(), &env).unwrap();
         });
         assert!(!env.agents_dir.exists(), "nothing was asked for");
+        assert_eq!(
+            Config::load_from_path(&env.config_path)
+                .unwrap()
+                .providers
+                .provider_order,
+            ["anthropic"],
+            "the provider the key belongs to is set up"
+        );
 
         run_non_interactive(
             &SetupArgs {
                 install_agents: true,
-                ..args()
+                ..keyed()
             },
             &env,
         )
@@ -1192,12 +1244,44 @@ mod tests {
         run_non_interactive(
             &SetupArgs {
                 install_agents: true,
-                ..args()
+                ..keyed()
             },
             &env,
         )
         .unwrap();
         assert!(env.agents_dir.join(BUNDLED_AGENTS[0].name).exists());
+    }
+
+    /// An order already in the file is the user's, and is written back as
+    /// given even when none of its providers has a credential: the run says
+    /// so and still saves what it was asked to.
+    #[test]
+    fn the_non_interactive_path_keeps_an_order_nothing_in_it_can_reach() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = env_in(dir.path());
+        std::fs::write(
+            &env.config_path,
+            "[providers]\nprovider_order = [\"google\"]\n",
+        )
+        .unwrap();
+        let mut vars = crate::config::config_isolation_vars(dir.path());
+        vars.push((
+            "LEVIATH_HOME",
+            Some(dir.path().to_path_buf().into_os_string()),
+        ));
+        temp_env::with_vars(vars, || {
+            run_non_interactive(
+                &SetupArgs {
+                    fallback_model: Some("gemini-flash".to_string()),
+                    ..args()
+                },
+                &env,
+            )
+            .unwrap();
+            let written = Config::load_from_path(&env.config_path).unwrap();
+            assert_eq!(written.providers.provider_order, ["google"]);
+            assert_eq!(written.fallback_model.as_deref(), Some("gemini-flash"));
+        });
     }
 
     #[test]
@@ -1238,7 +1322,7 @@ mod tests {
         let mut env = env_in(dir.path());
         env.config_path = blocked.join("config.toml");
 
-        assert!(run_non_interactive(&args(), &env).is_err());
+        assert!(run_non_interactive(&keyed(), &env).is_err());
     }
 
     // ─── building the wizard from the environment ───────────────────────────
@@ -1344,10 +1428,7 @@ mod tests {
 
         let wizard = build_wizard(&env_in(dir.path()));
 
-        assert_eq!(
-            wizard.base.default_provider,
-            Config::default().default_provider
-        );
+        assert!(wizard.base.providers.provider_order.is_empty());
     }
 
     // ─── the verification background loop ───────────────────────────────────

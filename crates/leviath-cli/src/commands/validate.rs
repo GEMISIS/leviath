@@ -332,7 +332,8 @@ fn print_dependencies(
 /// What each stage would actually dispatch to on this machine, and why.
 ///
 /// A graph lists an ordered set of models per stage, and the resolver
-/// reorders it: registered candidates on `default_provider` move to the front,
+/// reorders it: registered candidates on a provider in `provider_order` move
+/// to the front,
 /// `override_model` first among them. The line under each stage is the
 /// blueprint's own order, so a promotion is visible as a difference rather
 /// than something to take on trust.
@@ -483,12 +484,13 @@ fn model_resolution_lines(
     if let Some(compaction) = &graph.compaction {
         lines.extend(compaction_lines(compaction, &defaults, registry));
     }
-    if !config.default_provider.is_empty() {
+    let order = config.provider_order();
+    if !order.is_empty() {
         let over = config.override_model.as_deref().unwrap_or("(unset)");
         let fall = config.fallback_model.as_deref().unwrap_or("(unset)");
         lines.push(format!(
-            "  default_provider = {}, override_model = {over}, fallback_model = {fall}",
-            config.default_provider
+            "  provider_order = [{}], override_model = {over}, fallback_model = {fall}",
+            order.join(", ")
         ));
     }
     lines
@@ -752,12 +754,12 @@ async fn primed_registry_with(
     let registry =
         crate::commands::run::build_provider_registry_from_config_with(config, build_client)
             .ok()?;
-    // The machine's default, so `lev validate` reports the model a run would
-    // really use on a machine whose default is a script provider rather than
-    // the one it would have used before that provider could answer. Plus every
-    // provider this blueprint pins, so the catalogue check has something to
-    // check against - see `pinned_providers`.
-    let mut also: Vec<&str> = vec![config.default_provider.as_str()];
+    // The machine's provider order, so `lev validate` reports the model a run
+    // would really use on a machine that prefers a script provider, which
+    // answers what it serves only once it is primed. Plus every provider this
+    // blueprint pins, so the catalogue check has something to check against -
+    // see `pinned_providers`.
+    let mut also: Vec<&str> = config.provider_order();
     also.extend(pinned.iter().map(String::as_str));
     registry
         .prime_capabilities(
@@ -988,10 +990,10 @@ system_prompt = "hi"
     /// what these tests are about.
     fn keyed_config(default_provider: &str) -> crate::config::Config {
         crate::config::Config {
-            default_provider: default_provider.to_string(),
             override_model: None,
             openrouter_api_key: Some("test-key".to_string()),
             providers: crate::config::ProviderConfig {
+                provider_order: vec![default_provider.to_string()],
                 anthropic_api_key: Some("test-key".to_string()),
                 ..Default::default()
             },
@@ -1010,7 +1012,7 @@ system_prompt = "hi"
 
     /// A blueprint leading with a model nothing configured serves falls
     /// through to the next one, and the listing says so. That fallthrough is
-    /// the only thing that substitutes: `default_provider` chooses between
+    /// the only thing that substitutes: `provider_order` chooses between
     /// routes to a model, never between models.
     #[test]
     fn model_resolution_explains_falling_through_to_the_next_model() {
@@ -1048,7 +1050,6 @@ system_prompt = "hi"
     fn model_resolution_names_a_stage_that_cannot_run_here() {
         let graph = checked_graph(&model_manifest("{ provider = \"nowhere\", model = \"m\" }"));
         let config = crate::config::Config {
-            default_provider: String::new(),
             ..crate::config::Config::default()
         };
         let lines = model_resolution_lines(&graph, &config, &registry_for(&config));
@@ -1082,7 +1083,7 @@ system_prompt = "hi"
                 .expect("a compaction line");
             lines[at..]
                 .iter()
-                .take_while(|l| !l.contains("default_provider"))
+                .take_while(|l| !l.contains("provider_order ="))
                 .cloned()
                 .collect()
         };
@@ -1235,17 +1236,15 @@ system_prompt = "hi"
         assert!(
             lines
                 .iter()
-                .any(|l| l.contains("default_provider = openrouter")
+                .any(|l| l.contains("provider_order = [openrouter]")
                     && l.contains("override_model = (unset), fallback_model = (unset)")),
             "and the setting responsible has to be named: {lines:#?}"
         );
 
         // No preference expressed: blueprint order stands on its own and
         // there is no setting to name, so the trailing line is omitted.
-        let no_preference = crate::config::Config {
-            default_provider: String::new(),
-            ..keyed_config("anthropic")
-        };
+        let mut no_preference = keyed_config("anthropic");
+        no_preference.providers.provider_order.clear();
         let lines = model_resolution_lines(&graph, &no_preference, &registry_for(&no_preference));
         assert!(
             lines
@@ -1254,7 +1253,7 @@ system_prompt = "hi"
             "{lines:#?}"
         );
         assert!(
-            !lines.iter().any(|l| l.contains("default_provider =")),
+            !lines.iter().any(|l| l.contains("provider_order =")),
             "nothing to name: {lines:#?}"
         );
     }

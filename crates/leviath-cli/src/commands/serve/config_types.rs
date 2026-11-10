@@ -34,7 +34,6 @@ where
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct RedactedConfig {
-    pub(super) default_provider: String,
     /// `override_model`: the one model every stage that allows a user default
     /// starts on while it is set, ahead of what its blueprint names.
     ///
@@ -49,10 +48,11 @@ pub(super) struct RedactedConfig {
     /// serialized, `null` when unset, for the same reason as `override_model`.
     pub(super) fallback_model: Option<String>,
     /// `[providers] provider_order`: the ordered provider preference for a bare
-    /// model name, best first. Empty when the user set none, in which case
-    /// `default_provider` alone decides. Always serialized (empty array, not
-    /// omitted) so a console can tell "no order set" from an old daemon that
-    /// cannot report it.
+    /// model name, best first, and the only one: its first entry is the
+    /// provider `override_model` and `fallback_model` are asked of. Empty
+    /// when no provider is set up, in which case no bare model name is
+    /// served. Always serialized (empty array, not omitted) so a console can
+    /// tell "no order set" from an old daemon that cannot report it.
     pub(super) provider_order: Vec<String>,
     pub(super) has_anthropic_key: bool,
     pub(super) has_openai_key: bool,
@@ -483,6 +483,12 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // apart has to keep showing the config as authoritative while the user's
     // edits are quietly going nowhere.
     "config.health",
+    // `provider_order` is the whole routing preference on `GET` and `PUT
+    // /api/config`, and `default_provider` is on neither. Announced because a
+    // console written against the two settings has to know which it is
+    // talking to before it writes: this server refuses a `default_provider`,
+    // and one that does not announce this ignores an order of one.
+    "config.provider_order_only",
     // `POST /graphql`. Announced because a client picks its transport once, at
     // start-up: a Lair that would use GraphQL where it exists and REST
     // otherwise has to know which server it is talking to before it builds its
@@ -669,7 +675,6 @@ pub(super) struct ModelsQuery {
 /// writes, so a newcomer can configure providers entirely from the browser.
 #[derive(Debug, Default, Deserialize)]
 pub(super) struct WriteConfigReq {
-    pub(super) default_provider: Option<String>,
     /// Three-state, unlike every field beside it: absent leaves the setting
     /// alone, `null` clears it, a string sets it. See [`double_option`].
     ///
@@ -757,8 +762,8 @@ pub(super) struct WriteConfigReq {
     pub(super) remove_gateways: Option<Vec<String>>,
     /// The ordered provider preference for a bare model name (`[providers]
     /// provider_order`), best first. Absent leaves it untouched; a present list
-    /// replaces it whole, and an empty list clears it back to
-    /// `default_provider` alone. A whole-list replace rather than an add/remove
+    /// replaces it whole, and an empty list clears it, after which no
+    /// provider serves a bare model name. A whole-list replace rather than an add/remove
     /// pair because an order is short and a console edits it as one field, so
     /// the read-modify-write hazard the gateway split avoids does not arise.
     #[serde(default)]

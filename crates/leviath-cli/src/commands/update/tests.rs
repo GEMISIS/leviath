@@ -586,12 +586,12 @@ fn a_config_that_will_not_parse_is_reported_and_the_rest_still_plans() {
 /// mechanism runs rather than being wiring nobody has ever exercised.
 static SAMPLE: &[Migration] = &[
     Migration {
-        name: "sample-default-provider",
-        description: "point a config with no default_provider at ollama",
-        applies: |config, raw| config.default_provider != "ollama" && !raw.is_empty(),
+        name: "sample-override-model",
+        description: "pin a config with no override_model to llama3",
+        applies: |config, raw| config.override_model.is_none() && !raw.is_empty(),
         apply: |config, _raw| {
-            let was = std::mem::replace(&mut config.default_provider, "ollama".to_string());
-            vec![format!("default_provider: {was} -> ollama")]
+            config.override_model = Some("llama3".to_string());
+            vec!["override_model: (unset) -> llama3".to_string()]
         },
     },
     Migration {
@@ -609,8 +609,8 @@ static ALWAYS: &[Migration] = &[Migration {
     description: "a migration every config needs",
     applies: |_, _| true,
     apply: |config, _raw| {
-        config.default_provider = "ollama".to_string();
-        vec!["default_provider -> ollama".to_string()]
+        config.override_model = Some("llama3".to_string());
+        vec!["override_model -> llama3".to_string()]
     },
 }];
 
@@ -621,7 +621,7 @@ fn a_migration_is_selected_by_its_predicate_over_the_config_and_the_raw_toml() {
     let fixture = Fixture::new();
     std::fs::write(
         fixture.dir.path().join("config.toml"),
-        "default_provider = \"anthropic\"\n",
+        "update_check = true\n",
     )
     .expect("write the config");
     let env = fixture.env_with("/opt/homebrew/bin/lev", true, true, SAMPLE);
@@ -631,7 +631,7 @@ fn a_migration_is_selected_by_its_predicate_over_the_config_and_the_raw_toml() {
     let names: Vec<&str> = selected.migrations.iter().map(|m| m.name).collect();
     assert_eq!(
         names,
-        ["sample-default-provider"],
+        ["sample-override-model"],
         "only the one whose predicate holds"
     );
 
@@ -682,7 +682,7 @@ fn the_renamed_keys_migration_rewrites_a_legacy_default_model() {
         let fixture = Fixture::new();
         std::fs::write(
             fixture.dir.path().join("config.toml"),
-            "default_provider = \"ollama\"\ndefault_model = \"qwen3.8:latest\"\n",
+            "update_check = true\ndefault_model = \"qwen3.8:latest\"\n",
         )
         .expect("write the config");
         let args = UpdateArgs {
@@ -719,6 +719,51 @@ fn the_renamed_keys_migration_rewrites_a_legacy_default_model() {
         let after = Config::load_from_path(&env.config_path).expect("parses");
         assert_eq!(after.fallback_model.as_deref(), Some("qwen3.8:latest"));
         assert_eq!(after.override_model, None);
+        // Taken once: the rewritten file no longer needs it.
+        assert!(plan(&args, &env).migrations.is_empty());
+    });
+}
+
+/// The shipped `default-provider` migration, end to end: a config still
+/// carrying `default_provider` is planned for it, the report says where the
+/// name went, and the write leaves a file that lists it in `provider_order`
+/// and says nothing of the old key. An order already in the file keeps its
+/// other entries behind it.
+#[test]
+fn the_default_provider_migration_moves_the_name_into_the_provider_order() {
+    with_tracing(|| {
+        let fixture = Fixture::new();
+        std::fs::write(
+            fixture.dir.path().join("config.toml"),
+            "default_provider = \"openai\"\n[providers]\nprovider_order = [\"codex\", \"openai\"]\n",
+        )
+        .expect("write the config");
+        let args = UpdateArgs {
+            yes: true,
+            ..UpdateArgs::default()
+        };
+        let env = fixture.env_with("/home/u/.cargo/bin/lev", true, true, MIGRATIONS);
+
+        let planned = plan(&args, &env);
+        let names: Vec<&str> = planned.migrations.iter().map(|m| m.name).collect();
+        assert_eq!(names, vec!["default-provider"]);
+        let ConfigState::Loaded(loaded) = &planned.config else {
+            panic!("the config loaded");
+        };
+        let lines = (planned.migrations[0].apply)(&mut loaded.config.clone(), &loaded.raw);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains("`default_provider = \"openai\"`"),
+            "{lines:?}"
+        );
+        assert!(lines[0].contains("now [openai, codex]"), "{lines:?}");
+
+        execute_with(&args, &env, "0.6.4").expect("the flow succeeds");
+
+        let on_disk = std::fs::read_to_string(&env.config_path).expect("still there");
+        assert!(!on_disk.contains("default_provider"), "{on_disk}");
+        let after = Config::load_from_path(&env.config_path).expect("parses");
+        assert_eq!(after.providers.provider_order, ["openai", "codex"]);
         // Taken once: the rewritten file no longer needs it.
         assert!(plan(&args, &env).migrations.is_empty());
     });
@@ -837,7 +882,7 @@ fn the_report_lists_every_pending_migration() {
     let fixture = Fixture::new();
     std::fs::write(
         fixture.dir.path().join("config.toml"),
-        "default_provider = \"anthropic\"\n",
+        "update_check = true\n",
     )
     .expect("write the config");
     let env = fixture.env_with("/opt/homebrew/bin/lev", true, true, SAMPLE);
@@ -845,9 +890,9 @@ fn the_report_lists_every_pending_migration() {
     let report = format_plan(&plan(&UpdateArgs::default(), &env), "0.3.4");
 
     assert!(report.contains("1 migration(s)"), "{report}");
-    assert!(report.contains("sample-default-provider"), "{report}");
+    assert!(report.contains("sample-override-model"), "{report}");
     assert!(
-        report.contains("point a config with no default_provider"),
+        report.contains("pin a config with no override_model"),
         "{report}"
     );
 }
@@ -857,7 +902,7 @@ fn the_json_shape_carries_the_method_channel_command_and_rows() {
     let fixture = Fixture::new();
     std::fs::write(
         fixture.dir.path().join("config.toml"),
-        "default_provider = \"anthropic\"\n",
+        "update_check = true\n",
     )
     .expect("write the config");
     let env = fixture.env_with("/opt/homebrew/bin/lev", true, true, SAMPLE);
@@ -874,7 +919,7 @@ fn the_json_shape_carries_the_method_channel_command_and_rows() {
     assert_eq!(json["binary"]["action"], "run");
     assert_eq!(json["binary"]["command"][0], "brew");
     assert_eq!(json["agents"][0]["changes"], true);
-    assert_eq!(json["migrations"][0]["name"], "sample-default-provider");
+    assert_eq!(json["migrations"][0]["name"], "sample-override-model");
     assert_eq!(json["config_error"], serde_json::Value::Null);
     // Kept for the clients that read it, and always empty.
     assert_eq!(json["renamed_keys"], serde_json::json!([]));
@@ -1094,7 +1139,7 @@ fn a_binary_with_nothing_to_do_still_reaches_the_blueprints_and_the_config() {
         let fixture = Fixture::new();
         std::fs::write(
             fixture.dir.path().join("config.toml"),
-            "default_provider = \"anthropic\"\n",
+            "update_check = true\n",
         )
         .expect("write the config");
         let args = UpdateArgs {
@@ -1118,7 +1163,8 @@ fn a_binary_with_nothing_to_do_still_reaches_the_blueprints_and_the_config() {
         }
         let after = Config::load_from_path(&env.config_path).expect("still parses");
         assert_eq!(
-            after.default_provider, "ollama",
+            after.override_model.as_deref(),
+            Some("llama3"),
             "the config migration ran too"
         );
     });
@@ -1235,7 +1281,7 @@ fn an_agreed_migration_is_described_and_then_written() {
     with_tracing(|| {
         let fixture = Fixture::new();
         let config_path = fixture.dir.path().join("config.toml");
-        std::fs::write(&config_path, "default_provider = \"anthropic\"\n").expect("write it");
+        std::fs::write(&config_path, "update_check = true\n").expect("write it");
         let args = UpdateArgs {
             yes: true,
             ..UpdateArgs::default()
@@ -1245,7 +1291,7 @@ fn an_agreed_migration_is_described_and_then_written() {
         execute_with(&args, &env, "0.3.4").expect("the migration applies");
 
         let after = Config::load_from_path(&config_path).expect("still parses");
-        assert_eq!(after.default_provider, "ollama");
+        assert_eq!(after.override_model.as_deref(), Some("llama3"));
     });
 }
 
@@ -1255,7 +1301,7 @@ fn a_declined_migration_writes_nothing() {
     with_tracing(|| {
         let fixture = Fixture::new();
         let config_path = fixture.dir.path().join("config.toml");
-        let before = "default_provider = \"anthropic\"\n";
+        let before = "update_check = true\n";
         std::fs::write(&config_path, before).expect("write it");
         let env = fixture.env_with("/opt/homebrew/bin/lev", false, true, SAMPLE);
 
@@ -1274,7 +1320,7 @@ fn a_dry_run_migration_writes_nothing() {
     with_tracing(|| {
         let fixture = Fixture::new();
         let config_path = fixture.dir.path().join("config.toml");
-        let before = "default_provider = \"anthropic\"\n";
+        let before = "update_check = true\n";
         std::fs::write(&config_path, before).expect("write it");
         let args = UpdateArgs {
             dry_run: true,
@@ -1323,7 +1369,7 @@ fn a_config_that_cannot_be_written_is_an_error() {
     with_tracing(|| {
         let fixture = Fixture::new();
         let config_path = fixture.dir.path().join("config.toml");
-        std::fs::write(&config_path, "default_provider = \"anthropic\"\n").expect("write it");
+        std::fs::write(&config_path, "update_check = true\n").expect("write it");
         let args = UpdateArgs {
             yes: true,
             ..UpdateArgs::default()
@@ -1414,18 +1460,18 @@ fn load_config_reads_the_document_behind_the_parsed_value() {
     // No file: the defaults, and an empty document behind them.
     let loaded = load_config(&path).expect("a missing config loads as defaults");
     assert!(loaded.raw.is_empty());
-    assert_eq!(loaded.config.default_provider, "anthropic");
+    assert_eq!(loaded.config.head_provider(), None);
 
     std::fs::write(&path, "default_provider = \"ollama\"\n").expect("write it");
     let loaded = load_config(&path).expect("it parses");
-    assert_eq!(loaded.config.default_provider, "ollama");
+    assert_eq!(loaded.config.head_provider(), Some("ollama"));
     assert!(loaded.raw.contains_key("default_provider"));
 
     std::fs::write(&path, "nope = = nope").expect("write it");
     assert!(load_config(&path).is_err());
 
     // A document that parses and a config that does not.
-    std::fs::write(&path, "default_provider = 3\n").expect("write it");
+    std::fs::write(&path, "update_check = 3\n").expect("write it");
     assert!(load_config(&path).is_err());
 
     // A config that cannot be read at all.

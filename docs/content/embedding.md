@@ -85,7 +85,7 @@ returning.
 | `blueprint(loaded)` | Offer a blueprint to the world's requests, under its own name. Repeatable. `world.add_blueprint` does the same later. |
 | `workdir(dir)` | The directory a run works in when its request names none. Without it, every request names one. |
 | `register_provider(name, arc)` | Register your own `Provider` implementation, including mocks for tests. Wins over a credentials entry with the same name. |
-| `default_provider(provider)` | The provider bare model names route to. Each stage keeps the model its blueprint names. |
+| `provider_order(names)` | The providers bare model names may route to, best first. Each stage keeps the model its blueprint names. With none, only a stage that names its provider runs. |
 | `override_model(provider, model)` | The embedded `override_model`. One model every stage that allows a user default starts on. |
 | `fallback_model(model)` | The embedded `fallback_model`. A last model to try when a stage's own list is spent. |
 | `fallback_route(provider, model)` | Where a run moves when its provider fails mid-run. |
@@ -96,9 +96,10 @@ returning.
 | `tool_concurrency(n)` | How many tool batches may execute at once (default 4). |
 | `runtime(handle)` | Run on a specific Tokio runtime instead of the ambient one. |
 
-`override_model` sets the default provider as well. Its model goes ahead of what a stage's
-blueprint names, on every stage that allows a user default. `fallback_model` names a model on the
-default provider, tried after every model a stage names and never ahead of them. `fallback_route`
+`override_model` puts its provider first in the provider order as well. Its model goes ahead of
+what a stage's blueprint names, on every stage that allows a user default. `fallback_model` names a
+model on the first provider in the order, tried after every model a stage names and never ahead of
+them. `fallback_route`
 is how a single-model blueprint survives an outage.
 
 ## Asking for a run

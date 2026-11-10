@@ -440,7 +440,7 @@ under way keeps the servers it started with: a removed one stays connected for
 `[limits] mcp_idle_disconnect_secs` so nothing loses a tool mid-call, and is torn down after that.
 
 Provider credentials reload as well. Add a key, replace one, remove one by untoggling it in
-`lev setup`, point a provider at another base URL, or change `default_provider`. The daemon
+`lev setup`, point a provider at another base URL, or change `provider_order`. The daemon
 compares the file's credentials against the ones its registry was built from, and rebuilds the
 registry when they differ, before the next run resolves its stages.
 

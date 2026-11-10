@@ -41,6 +41,7 @@ mod defaults;
 mod model_provider;
 mod provider_config;
 pub mod renamed;
+pub mod retired;
 mod settings;
 
 pub use creds::{provider_creds, signin_options};
@@ -226,7 +227,7 @@ pub struct UserCreds {
     /// The providers to register, as
     /// [`build_provider_registry`](crate::build_provider_registry) takes them.
     pub creds: Vec<ProviderCreds>,
-    /// The default provider, provider order, fallback chain, override and
+    /// The provider order, fallback chain, override and
     /// fallback models, and retention settings a stage resolves against.
     pub defaults: ModelDefaults,
     /// Where the config says secrets are kept.
@@ -387,7 +388,7 @@ fn read_settings(
         source,
     })?;
     let (text, renames) = renamed::rename_in_text(&text);
-    let settings: UserSettings = match toml::from_str(&text) {
+    let mut settings: UserSettings = match toml::from_str(&text) {
         Ok(settings) => settings,
         Err(source) => return Err(UserCredsError::Parse { path, source }),
     };
@@ -405,6 +406,10 @@ fn read_settings(
             .filter(|renamed| READ_TABLES.contains(&renamed.key.section))
             .map(renamed::notice),
     );
+    warnings.extend(retired::fold_default_provider(
+        retired::default_provider_in_text(&text),
+        &mut settings.providers.provider_order,
+    ));
     Ok(settings)
 }
 

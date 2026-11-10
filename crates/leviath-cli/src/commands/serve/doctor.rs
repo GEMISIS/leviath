@@ -193,8 +193,8 @@ mod tests {
 
     /// The endpoint over the shared production route table, against an empty
     /// isolated config: `config` parses (ok), `search` warns (no key in the
-    /// isolated environment), `resolve` fails (nothing
-    /// registered answers to the default provider), and the chain stops there -
+    /// isolated environment), `resolve` fails (no provider is set up), and the
+    /// chain stops there -
     /// before any billed call. The failure arrives as an `ok: false` entry in
     /// a 200, which is the endpoint's whole contract.
     #[tokio::test]
@@ -229,7 +229,7 @@ mod tests {
             assert_eq!(resolve_check.name, "resolve");
             assert!(!resolve_check.ok);
             assert!(
-                resolve_check.detail.contains("not configured"),
+                resolve_check.detail.contains("no provider is set up"),
                 "{}",
                 resolve_check.detail
             );

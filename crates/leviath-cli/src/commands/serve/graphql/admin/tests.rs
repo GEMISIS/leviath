@@ -126,8 +126,8 @@ async fn every_admin_mutation_is_gated() {
              { isNew } }"#,
         r#"mutation { deleteMimeRow(request: { mimeType: "image/png" })
              { deletedMimeType } }"#,
-        r#"mutation { updateConfig(request: { set: { defaultProvider: "openai" } })
-             { config { routing { defaultProvider } } } }"#,
+        r#"mutation { updateConfig(request: { set: { providerOrder: ["openai"] } })
+             { config { routing { providerOrder } } } }"#,
         r#"mutation { upsertScript(request: { script: { kind: TOOL, name: "x" },
              content: "fn x(){}" }) { script { path } } }"#,
         r#"mutation { deleteScript(request: { script: { kind: TOOL, name: "x" } })
@@ -622,7 +622,7 @@ async fn every_config_setting_reads_back_as_it_was_written() {
         crate::commands::serve::mcp::TEST_PATHS
             .scope(paths, async {
                 let written = ask(r#"mutation { updateConfig(request: {
-                         set: { defaultProvider: "openai", providerOrder: ["openai", "anthropic"],
+                         set: { providerOrder: ["openai", "anthropic"],
                                 overrideModel: "gpt-5.6", fallbackModel: "gpt-5.4",
                                 allowsFileUploads: true },
                          providers: [
@@ -644,7 +644,7 @@ async fn every_config_setting_reads_back_as_it_was_written() {
                            baseUrl: "http://127.0.0.1:1234/v1", apiKey: "sk-l",
                            models: ["llama"], headers: [{ key: "X-Thing", value: "1" }] }]
                        }) { config {
-                         routing { defaultProvider providerOrder overrideModel fallbackModel }
+                         routing { providerOrder overrideModel fallbackModel }
                          allowsFileUploads
                          providers { id name auth isEnabled hasKey baseUrl region
                            options { __typename ... on CodexOptionsOutput {
@@ -655,7 +655,6 @@ async fn every_config_setting_reads_back_as_it_was_written() {
                 .await;
                 let config = &written["updateConfig"]["config"];
                 let routing = &config["routing"];
-                assert_eq!(routing["defaultProvider"], "openai");
                 assert_eq!(
                     routing["providerOrder"],
                     serde_json::json!(["openai", "anthropic"])
@@ -712,8 +711,7 @@ async fn every_config_setting_reads_back_as_it_was_written() {
                 // field. It reads the config this server holds rather than the
                 // file this test just wrote, which is what makes it the read
                 // side: the values above are the write's own read-back.
-                let read = ask(
-                    "{ config { routing { defaultProvider providerOrder overrideModel
+                let read = ask("{ config { routing { providerOrder overrideModel
                            fallbackModel }
                          providers { id name auth isEnabled hasKey baseUrl region
                            options { __typename } }
@@ -722,8 +720,7 @@ async fn every_config_setting_reads_back_as_it_was_written() {
                          health { error { kind } savedAt }
                          server { apiVersion capabilities isAdminEnabled
                            limits { maxPageSize } }
-                         allowsFileUploads blueprintPaths mcpServerCount } }",
-                )
+                         allowsFileUploads blueprintPaths mcpServerCount } }")
                 .await;
                 let config = &read["config"];
                 assert_eq!(
@@ -747,14 +744,15 @@ async fn every_config_setting_reads_back_as_it_was_written() {
                          clear: [OVERRIDE_MODEL, FALLBACK_MODEL],
                          providers: [{ provider: "google", clearKey: true }],
                          deleteGateways: ["local"]
-                       }) { config { routing { overrideModel fallbackModel defaultProvider }
+                       }) { config { routing { overrideModel fallbackModel providerOrder }
                             providers { id hasKey } gateways { name } } } }"#)
                 .await;
                 let config = &cleared["updateConfig"]["config"];
                 assert!(config["routing"]["overrideModel"].is_null(), "cleared");
                 assert!(config["routing"]["fallbackModel"].is_null(), "cleared");
                 assert_eq!(
-                    config["routing"]["defaultProvider"], "openai",
+                    config["routing"]["providerOrder"],
+                    serde_json::json!(["openai", "anthropic"]),
                     "and the setting nobody named is untouched"
                 );
                 let google = config["providers"]
@@ -769,6 +767,23 @@ async fn every_config_setting_reads_back_as_it_was_written() {
                     Some(0),
                     "and the gateway with it"
                 );
+
+                // The order is a list, so it is cleared by sending an empty
+                // one: the machine is back to having no provider set up, and
+                // both the answer and the file say so.
+                let emptied = ask(r#"mutation { updateConfig(request: {
+                         set: { providerOrder: [] }
+                       }) { config { routing { providerOrder overrideModel } } } }"#)
+                .await;
+                assert_eq!(
+                    emptied["updateConfig"]["config"]["routing"]["providerOrder"],
+                    serde_json::json!([])
+                );
+                let saved = crate::config::Config::load_from_path(
+                    &crate::commands::serve::mcp::admin_paths().config,
+                )
+                .expect("the file still loads");
+                assert!(saved.providers.provider_order.is_empty());
             })
             .await;
     })
@@ -1687,7 +1702,6 @@ fn the_admin_inputs_round_trip() {
 
     let request = UpdateConfigRequest {
         set: Some(ConfigWrite {
-            default_provider: Some("openai".to_string()),
             provider_order: Some(vec!["openai".to_string()]),
             override_model: Some("gpt-5.6".to_string()),
             fallback_model: None,
@@ -1785,7 +1799,7 @@ fn the_admin_inputs_round_trip() {
     let Ok(wire) = empty.into_request() else {
         panic!("and the writer takes it");
     };
-    assert!(wire.default_provider.is_none() && wire.override_model.is_none());
+    assert!(wire.provider_order.is_none() && wire.override_model.is_none());
 }
 
 /// Every input object refuses what it cannot read.
@@ -1825,7 +1839,7 @@ fn an_input_object_refuses_what_it_cannot_read() {
         "a number"
     );
     assert!(ConfigWrite::parse(scalar()).is_err());
-    assert!(ConfigWrite::parse(one("defaultProvider", number())).is_err());
+    assert!(ConfigWrite::parse(one("overrideModel", number())).is_err());
     assert!(UpdateConfigRequest::parse(scalar()).is_err());
     assert!(UpdateConfigRequest::parse(one("clear", number())).is_err());
     assert!(UpdateConfigRequest::parse(one("toolCredentials", number())).is_err());
@@ -1857,12 +1871,11 @@ fn an_input_object_refuses_what_it_cannot_read() {
         panic!("a gateway needs only its name");
     };
     assert_eq!(gateway.name, "house");
-    let Ok(config) =
-        ConfigWrite::parse(one("defaultProvider", Value::String("openai".to_string())))
+    let Ok(config) = ConfigWrite::parse(one("overrideModel", Value::String("gpt-5.6".to_string())))
     else {
         panic!("one setting is a whole edit");
     };
-    assert_eq!(config.default_provider.as_deref(), Some("openai"));
+    assert_eq!(config.override_model.as_deref(), Some("gpt-5.6"));
     let Ok(provider) =
         ProviderConfigWrite::parse(one("provider", Value::String("anthropic".to_string())))
     else {
@@ -1946,7 +1959,7 @@ fn an_input_object_refuses_what_it_cannot_read() {
     );
     assert!(
         ConfigWrite::parse(two(
-            ("defaultProvider", Value::String("openai".to_string())),
+            ("overrideModel", Value::String("gpt-5.6".to_string())),
             ("providerOrder", number()),
         ))
         .is_err(),
@@ -1954,7 +1967,7 @@ fn an_input_object_refuses_what_it_cannot_read() {
     );
     assert!(
         ConfigWrite::parse(two(
-            ("defaultProvider", Value::String("openai".to_string())),
+            ("overrideModel", Value::String("gpt-5.6".to_string())),
             ("allowsFileUploads", number()),
         ))
         .is_err(),

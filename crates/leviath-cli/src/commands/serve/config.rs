@@ -58,7 +58,6 @@ pub(super) fn redact(
     RedactedConfig {
         config_error,
         config_mtime,
-        default_provider: c.default_provider.clone(),
         override_model: c.override_model.clone(),
         fallback_model: c.fallback_model.clone(),
         provider_order: c.providers.provider_order.clone(),
@@ -154,6 +153,17 @@ pub(super) async fn put_config(
 pub(super) fn config_edit(
     body: serde_json::Value,
 ) -> Result<WriteConfigReq, super::core::error::ServeError> {
+    // Refused by name rather than dropped as an unknown key: a client that
+    // still sends it believes it chose where bare model names run, and an
+    // answer of 200 would leave it believing so.
+    if body.get(crate::config::retired::DEFAULT_PROVIDER).is_some() {
+        return Err(super::core::error::ServeError::BadRequest(
+            "`default_provider` is not a setting: send `provider_order`, the list of providers \
+             a bare model name may run on, best first. Its first entry is what \
+             `default_provider` named."
+                .to_string(),
+        ));
+    }
     serde_path_to_error::deserialize(body).map_err(|error| {
         let path = error.path().to_string();
         let message = error.inner().to_string();
@@ -643,7 +653,7 @@ mod tests {
             .await
             .unwrap();
         let config: RedactedConfig = serde_json::from_slice(&body).unwrap();
-        assert_eq!(config.default_provider, "anthropic");
+        assert!(config.provider_order.is_empty(), "no provider is assumed");
         assert!(!config.has_anthropic_key);
         assert!(!config.has_openai_key);
         assert!(!config.has_openrouter_key);
@@ -658,8 +668,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let good = crate::config::Config {
-            default_provider: "google".to_string(),
-            ..Default::default()
+            ..crate::test_support::config_preferring(&["google"])
         };
         write_config(&path, &toml::to_string(&good).unwrap());
         let state = crate::commands::serve::testutil::state_with_config_at(&path);
@@ -688,7 +697,8 @@ mod tests {
             "the mtime is the config in force, not the file that failed"
         );
         assert_eq!(
-            config.default_provider, "google",
+            config.provider_order,
+            ["google"],
             "the last good config is still what is served"
         );
 
@@ -696,7 +706,7 @@ mod tests {
         write_config(&path, "default_provider = \"openai\"\n");
         let config = fetch_config(&state).await;
         assert!(config.config_error.is_none());
-        assert_eq!(config.default_provider, "openai");
+        assert_eq!(config.provider_order, ["openai"]);
     }
 
     /// Write a config file with an mtime strictly newer than the last write,
@@ -1011,7 +1021,6 @@ mod tests {
     #[test]
     fn redacted_config_hides_keys() {
         let config = RedactedConfig {
-            default_provider: "anthropic".to_string(),
             override_model: None,
             fallback_model: None,
             provider_order: Vec::new(),
@@ -1053,7 +1062,6 @@ mod tests {
     #[test]
     fn redacted_config_with_ollama_url() {
         let config = RedactedConfig {
-            default_provider: "ollama".to_string(),
             override_model: None,
             fallback_model: None,
             provider_order: Vec::new(),
@@ -1185,16 +1193,21 @@ mod tests {
         let state = state_watching_config_path(path.clone());
 
         let before = get_config_request(state.clone()).await;
-        assert_ne!(before["default_provider"], "openai");
+        assert_eq!(before["provider_order"], serde_json::json!([]));
+        assert!(
+            before.get("default_provider").is_none(),
+            "the order is the only routing preference reported: {before}"
+        );
 
-        let body = serde_json::json!({ "default_provider": "openai" }).to_string();
+        let body = serde_json::json!({ "provider_order": ["openai"] }).to_string();
         let resp = put_config_request(state.clone(), &body).await;
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
         bump_mtime(&path);
 
         let after = get_config_request(state).await;
         assert_eq!(
-            after["default_provider"], "openai",
+            after["provider_order"],
+            serde_json::json!(["openai"]),
             "the edit this server just wrote must be what it reports"
         );
     }
@@ -1303,7 +1316,7 @@ mod tests {
             ["codex", "openrouter", "openai"]
         );
 
-        // An empty list clears it back to default_provider alone.
+        // An empty list clears it: no provider is set up after that.
         let empty: [&str; 0] = [];
         let body = serde_json::json!({ "provider_order": empty }).to_string();
         let resp = put_config_request(state_with_config_path(path.clone()), &body).await;
@@ -1392,7 +1405,7 @@ mod tests {
         config.providers.codex_verbosity = Some("high".to_string());
         config.save_to_path(&path).unwrap();
 
-        let body = serde_json::json!({ "default_provider": "codex" }).to_string();
+        let body = serde_json::json!({ "provider_order": ["codex"] }).to_string();
         let resp = put_config_request(state_with_config_path(path.clone()), &body).await;
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
 
@@ -1437,7 +1450,7 @@ mod tests {
         Config::default().save_to_path(&path).unwrap();
 
         let body = serde_json::json!({
-            "default_provider": "openai",
+            "provider_order": ["openai"],
             "override_model": "gpt-5",
             "anthropic_key": "sk-ant-x",
             "openai_key": "sk-openai-x",
@@ -1462,7 +1475,7 @@ mod tests {
         );
         assert!(rc.has_bedrock_key);
         assert_eq!(rc.bedrock_region.as_deref(), Some("us-west-2"));
-        assert_eq!(rc.default_provider, "openai");
+        assert_eq!(rc.provider_order, ["openai"]);
 
         let saved = Config::load_from_path(&path).unwrap();
         assert_eq!(
@@ -1556,7 +1569,7 @@ mod tests {
         let path = dir.path().join("config.toml");
         pinned_config_at(&path);
 
-        let body = serde_json::json!({ "default_provider": "openai" }).to_string();
+        let body = serde_json::json!({ "provider_order": ["openai"] }).to_string();
         let resp = put_config_request(state_with_config_path(path.clone()), &body).await;
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
 
@@ -1566,7 +1579,7 @@ mod tests {
             Some("gpt-5"),
             "an absent key changes nothing"
         );
-        assert_eq!(saved.default_provider, "openai");
+        assert_eq!(saved.provider_order(), ["openai"]);
     }
 
     /// `null` is the other door: it writes the setting away, so every stage
@@ -2032,7 +2045,7 @@ mod tests {
         // refused: the valid half must not survive the refusal.
         let resp = put_config_request(
             state_with_config_path(path.clone()),
-            r#"{"default_provider":"openai","gateways":[{"name":"bare","kind":"openai-compatible"}]}"#,
+            r#"{"provider_order":["openai"],"gateways":[{"name":"bare","kind":"openai-compatible"}]}"#,
         )
         .await;
         assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
@@ -2041,6 +2054,34 @@ mod tests {
             before,
             "a refused write must not touch the file"
         );
+    }
+
+    /// `default_provider` is refused by name, with the setting to send in
+    /// its place, rather than accepted and dropped: a client that sends it
+    /// believes it chose where bare model names run. Nothing is written.
+    #[tokio::test]
+    async fn put_config_refuses_default_provider_and_names_provider_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        Config::default().save_to_path(&path).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let resp = put_config_request(
+            state_with_config_path(path.clone()),
+            r#"{"default_provider":"openai","override_model":"gpt-5"}"#,
+        )
+        .await;
+        assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let said = String::from_utf8_lossy(&bytes);
+        assert!(
+            said.contains("`default_provider` is not a setting"),
+            "{said}"
+        );
+        assert!(said.contains("`provider_order`"), "{said}");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     async fn probe(body: serde_json::Value) -> (axum::http::StatusCode, serde_json::Value) {

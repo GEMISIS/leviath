@@ -3228,9 +3228,6 @@
                 "type": "object",
                 "description": "Every field is optional and an absent one is left untouched, so a console can change one setting without reading the rest back and writing it again.",
                 "properties": {
-                  "default_provider": {
-                    "type": "string"
-                  },
                   "override_model": {
                     "type": [
                       "string",
@@ -3369,7 +3366,7 @@
                     "items": {
                       "type": "string"
                     },
-                    "description": "Ordered provider preference for a bare model name, best first (e.g. [\"codex\", \"openrouter\", \"openai\"]). Absent leaves it untouched; a present list replaces it whole; an empty list clears it back to default_provider alone. Naming a subscription transport here opts it into bare-name routing at that priority."
+                    "description": "The providers a bare model name may run on, best first (e.g. [\"codex\", \"openrouter\", \"openai\"]), and the only routing preference: its first entry is where override_model and fallback_model run. Absent leaves it untouched; a present list replaces it whole; an empty list clears it, after which no provider is set up and a stage that names no provider is refused. Naming a subscription transport here opts it into bare-name routing at that priority. A body that sends `default_provider` is a 400 that names this field."
                   },
                   "tool_credentials": {
                     "type": "object",
@@ -6395,7 +6392,6 @@
         "type": "object",
         "description": "The active configuration with every credential reduced to whether one is set, plus what this server can do and how much it accepts.",
         "required": [
-          "default_provider",
           "override_model",
           "fallback_model",
           "provider_order",
@@ -6414,29 +6410,26 @@
           "limits"
         ],
         "properties": {
-          "default_provider": {
-            "type": "string"
-          },
           "override_model": {
             "type": [
               "string",
               "null"
             ],
-            "description": "The model every stage that allows a user default starts on while it is set, ahead of what its blueprint names, as a bare model id on `default_provider`. `null` when nothing is pinned, which is the usual and generally better state: each blueprint then picks its own model per stage. Always sent, so a missing key means the server predates this field rather than meaning nothing is set."
+            "description": "The model every stage that allows a user default starts on while it is set, ahead of what its blueprint names, as a bare model id on the first provider in `provider_order`. `null` when nothing is pinned, which is the usual and generally better state: each blueprint then picks its own model per stage. Always sent, so a missing key means the server predates this field rather than meaning nothing is set."
           },
           "fallback_model": {
             "type": [
               "string",
               "null"
             ],
-            "description": "The model a stage falls back to when none of the models it names is configured here, never ahead of them, as a bare model id on `default_provider`. `null` when unset. Always sent."
+            "description": "The model a stage falls back to when none of the models it names is configured here, never ahead of them, as a bare model id on the first provider in `provider_order`. `null` when unset. Always sent."
           },
           "provider_order": {
             "type": "array",
             "items": {
               "type": "string"
             },
-            "description": "Ordered provider preference for a bare model name, best first. Empty when the user set none, in which case `default_provider` alone decides. Always sent (empty array, not omitted) so a console can tell \"no order set\" from an old daemon that cannot report it."
+            "description": "The providers a bare model name may run on, best first, and the only routing preference: the first entry is where `override_model` and `fallback_model` run. Empty when no provider is set up, in which case no bare model name is served. Always sent (empty array, not omitted) so a console can tell \"no order set\" from an old daemon that cannot report it."
           },
           "has_anthropic_key": {
             "type": "boolean"

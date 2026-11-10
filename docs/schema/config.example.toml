@@ -5,7 +5,6 @@
 # Not a recommended configuration. Nothing here is required, and a real install
 # with one provider key needs almost none of it.
 
-default_provider = "anthropic"
 override_model = "claude-sonnet-5-5"
 fallback_model = "claude-haiku-5-5"
 agent_paths = ["~/work/agents"]
@@ -18,6 +17,7 @@ batch_tool_hint = true
 shell_hint = true
 
 [providers]
+provider_order = ["anthropic", "openrouter"]
 anthropic_api_key = "sk-ant-example"
 openai_api_key = "sk-example"
 google_api_key = "AIza-example"

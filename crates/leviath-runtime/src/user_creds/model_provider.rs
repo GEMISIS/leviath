@@ -91,7 +91,7 @@ pub struct ModelProviderConfig {
     /// directly, and its answer is preferred over this list. Without either,
     /// the provider claims no models and can only be reached by a blueprint
     /// that pins it, which leaves a local model unreachable however the machine
-    /// sets `default_provider`.
+    /// sets `provider_order`.
     /// `None` when the file does not mention it, `Some` when it does - including
     /// `Some(vec![])` for an explicit `serves = []`.
     ///

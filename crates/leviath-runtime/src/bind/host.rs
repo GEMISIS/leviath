@@ -150,8 +150,8 @@ pub fn choose_model(
 
 /// Where a summary goes over `registry`: the compaction models `named`,
 /// resolved as a stage's models are, by the stage resolver itself. Each entry
-/// with no provider is an open route the operator's `provider_order` and
-/// `default_provider` answer; `override_model`, `fallback_model` and
+/// with no provider is an open route the operator's `provider_order`
+/// answers; `override_model`, `fallback_model` and
 /// `fallback_order` take the places they take for a stage. When something
 /// here serves them, the routes are the head first and the failover chain
 /// after it, every entry naming its provider, with the resolver's notes: one

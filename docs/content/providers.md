@@ -230,27 +230,34 @@ In order:
    [fan-out](/docs/sub-agents#fan-out) worker, and every sub-agent spawned with `spawn_agent`. A
    worker's own blueprint may list different models; they are its failover candidates when the run
    names no model, and are not consulted when it does.
-2. Your `default_provider` from `config.toml`, when that provider is configured and the stage did
-   not set `allow_user_default = false`. Every entry in the stage's `models` on that provider moves
-   to the front, keeping the blueprint's order among them. This is what a preference means: your
-   provider first, then whatever the blueprint asked for.
-   An entry that names a model and **no** provider is an *open route*: the providers configured
-   here are asked which of them serves that model, and yours is asked first. That is how the
-   bundled agents run on whichever key you have without ever naming it. A
-   [script provider](/docs/rhai-providers) is asked too when it is the one you named as
-   `default_provider`. See [preferring a script provider](#preferring-a-script-provider) for what
-   it has to report before it can answer.
-3. Your `override_model`, when it is set, first among the entries from step 2. It leads even when the
-   blueprint lists that same provider with a different model: `default_provider = "ollama"` with
-   `override_model = "qwen3.8:latest"` runs on `qwen3.8:latest`, and the blueprint's own
-   `qwen3.5:9b` becomes the failover. The name says what it does: it overrides the blueprint.
+2. Your [`provider_order`](/docs/configuration#provider-preference-order) from `config.toml`, for
+   each provider in it that is configured, unless the stage set `allow_user_default = false`. Every
+   entry in the stage's `models` on one of those providers moves to the front, keeping the
+   blueprint's order among them. This is what a preference means: your providers first, then
+   whatever the blueprint asked for.
+   An entry that names a model and **no** provider is an *open route*: the providers in your order
+   are asked which of them serves that model, in that order, and no other provider is asked. That
+   is how the bundled agents run on whichever key you have without ever naming it. A
+   [script provider](/docs/rhai-providers) is asked too when the order names it. See
+   [preferring a script provider](#preferring-a-script-provider) for what it has to report before
+   it can answer.
+3. Your `override_model`, when it is set, first among the entries from step 2, on the first provider
+   in your order. It leads even when the blueprint lists that same provider with a different model:
+   `provider_order = ["ollama"]` with `override_model = "qwen3.8:latest"` runs on `qwen3.8:latest`,
+   and the blueprint's own `qwen3.5:9b` becomes the failover. The name says what it does: it
+   overrides the blueprint.
 4. The first entry in `models` whose provider is configured.
-5. Your `fallback_model`, when it is set, on `default_provider`. It sits behind every model the stage
-   named and is never moved ahead of them, so it only ever carries a stage none of whose own models
-   is configured here.
+5. Your `fallback_model`, when it is set, on the first provider in your order. It sits behind every
+   model the stage named and is never moved ahead of them, so it only ever carries a stage none of
+   whose own models is configured here.
 6. The host-wide `fallback_order`, for the stages that got past everything above with nothing left.
 7. The first entry in the list, whether or not its provider exists. If it does not, the run fails at
    spawn with `stage '<name>' has no usable provider`.
+
+A provider is set up once it is in `provider_order`, and nothing stands in for an order that is
+empty: no provider is assumed. A stage that leaves its route open then fails at spawn with
+`no provider is set up`, and the fix is `lev setup` or `lev providers order <name>`. A stage that
+names its provider as `provider/model` still runs on any configured provider, listed or not.
 
 Everything below the first line is the failover chain, in that same order, so a stage that starts on
 your override still has the blueprint's own entries to fall back to.
@@ -281,8 +288,8 @@ anything is spent.
 > [!IMPORTANT]
 > `override_model` pins **one** model across every stage, which is usually not what you want. A
 > blueprint picks per stage on purpose: `deep-researcher` gathers on a mid-tier model and analyses
-> on a top one. Setting `default_provider` alone keeps that shape and moves it onto your
-> provider, gathering on that provider's mid-tier entry and analysing on its top one. Setting
+> on a top one. Listing a provider in `provider_order` alone keeps that shape and moves it onto
+> your provider, gathering on that provider's mid-tier entry and analysing on its top one. Setting
 > `override_model` too flattens it, and the cheap stages start paying top-tier prices while the
 > deciding stage loses the model the author chose for it. `fallback_model` is the safe one: it
 > changes nothing for a stage that can run what it asked for.
@@ -310,25 +317,25 @@ Models this install would use:
   analyze          openrouter/anthropic/claude-opus-5.5
                      falls back to: openai/gpt-5.5
                      blueprint order: anthropic/claude-opus-5-5, openai/gpt-5.5, ...
-  default_provider = openrouter, override_model = (unset), fallback_model = (unset)
+  provider_order = [openrouter], override_model = (unset), fallback_model = (unset)
 ```
 
 `override_model` and `fallback_model` take a bare model id: `qwen3.8:latest`, not
-`ollama/qwen3.8:latest`. The provider is `default_provider`. That differs from `--model` and
-`[providers] fallback_order`, which take
-`provider/model` in one string, so a leading `<default_provider>/` is dropped rather than sent
-(`lev doctor` names the reading when it happens). The slash in an OpenRouter id such as
+`ollama/qwen3.8:latest`. The provider is the first one in `provider_order`. That differs from
+`--model` and `[providers] fallback_order`, which take
+`provider/model` in one string, so a leading `<provider>/` naming that first provider is dropped
+rather than sent (`lev doctor` names the reading when it happens). The slash in an OpenRouter id such as
 `deepseek/deepseek-v4-flash` is part of the model id itself, and OpenRouter's own
 `openrouter/auto`-style ids are left as written.
 
 ### A gateway is a route, not a model
 
-`default_provider` picks the route, not the answer. This matters most for OpenRouter, which serves
+`provider_order` picks the route, not the answer. This matters most for OpenRouter, which serves
 models from every vendor: preferring the gateway should change who bills you and nothing else.
 
 It once took discipline to keep that true. A stage listed one entry per route, and the entries were
 matched whole. So `{ provider = "openrouter", model = "..." }` naming a cheaper model than the
-Anthropic entry beside it meant `default_provider = "openrouter"` quietly ran the cheaper model
+Anthropic entry beside it meant preferring `openrouter` quietly ran the cheaper model
 everywhere. A blueprint asking for `gemini-3.1-pro-preview` could and did run sonnet instead,
 because the route it happened to match named sonnet.
 
@@ -381,14 +388,16 @@ provider that knows its models by name, such as Anthropic or OpenAI, always have
 
 ### Running the bundled agents on your provider
 
-The [bundled agents](/docs/agent-catalog) name models rather than routes, so any configured key
-works out of the box: whichever provider you set up is asked which of the listed models it serves.
-Each blueprint's own order still decides which model is tried first. Naming yours as the default is
-what puts it in front:
+The [bundled agents](/docs/agent-catalog) name models rather than routes, so any provider you set
+up works out of the box: each provider in your order is asked which of the listed models it serves.
+Each blueprint's own order still decides which model is tried first. Listing yours is what sets it
+up, and listing it first is what puts it in front. `lev setup` writes both lines:
 
 ```toml
-default_provider = "openrouter"
 openrouter_api_key = "sk-or-..."
+
+[providers]
+provider_order = ["openrouter"]
 ```
 
 Every stage now starts on OpenRouter, on the model its author picked for that stage, and keeps the
@@ -420,11 +429,12 @@ to the next model listed.
 
 ### Preferring a script provider
 
-A [script provider](/docs/rhai-providers) is preferred the same way any other is. Name it as your
-`default_provider` and stages start there, each on the model its author picked for it:
+A [script provider](/docs/rhai-providers) is preferred the same way any other is. Put it first in
+your `provider_order` and stages start there, each on the model its author picked for it:
 
 ```toml
-default_provider = "spark"
+[providers]
+provider_order = ["spark"]
 ```
 
 One extra thing is true of a script provider, and the failure is silent. It has to be able to say
@@ -449,7 +459,7 @@ A provider that reports neither claims nothing. A blueprint can then only reach 
 broken.
 
 > [!NOTE]
-> Only the provider you name as `default_provider` is asked. Every other script on disk is left
+> Only the script providers you name in `provider_order` are asked. Every other script on disk is left
 > alone, because a script is compiled the first time it is used and asking all of them what they
 > serve would compile every `.rhai` file on the machine before any run started.
 
@@ -460,14 +470,14 @@ lev models list --provider spark   # does it claim the model at all
 lev validate <agent>               # which model each stage would actually use here
 ```
 
-`lev validate` is the one that answers the real question. On a machine with `default_provider =
-"spark"` it prints the route per stage, so a tiered blueprint shows its shape intact:
+`lev validate` is the one that answers the real question. On a machine with `provider_order =
+["spark"]` it prints the route per stage, so a tiered blueprint shows its shape intact:
 
 ```
 Models this install would use:
   cheap            spark/deepseek-v4-flash
   deciding         spark/deepseek-v4-max
-  default_provider = spark, override_model = (unset), fallback_model = (unset)
+  provider_order = [spark], override_model = (unset), fallback_model = (unset)
 ```
 
 Both stages on your provider, each still on the model its author chose. Add `override_model` and
@@ -523,8 +533,8 @@ compaction = { models = [{ model = "claude-sonnet-5-5" }, { model = "gpt-5.4-min
 compaction = {}
 ```
 
-An entry with no provider goes to whichever configured provider serves it, in your
-`provider_order` or `default_provider` order. `override_model`, `fallback_model` and
+An entry with no provider goes to whichever provider in your `provider_order` serves it, in
+that order. `override_model`, `fallback_model` and
 `fallback_order` take the same places they take for a stage, so `override_model` leads here too.
 An entry that names a provider is used as named. Everything after the first route is the failover
 chain. A summary whose provider turns out to be unusable before it wrote anything, out of credits
@@ -1056,7 +1066,7 @@ models included. The differences:
   show this week's and this month's use against the plan's limits, and a rate limit with no
   `Retry-After` waits for the billing period to reset.
 - **It never wins a bare model name.** Like Codex, it is only used when named: `grok/grok-4.6`,
-  a `fallback_order` entry, `provider_order`, or `default_provider`.
+  a `fallback_order` entry, or `provider_order`.
 - **Retention.** xAI publishes no retention policy for this route. `lev providers retention` quotes
   the account's coding data opt-out as xAI reports it.
 
@@ -1174,9 +1184,9 @@ config and nothing saying so.
 
 So it is only reachable deliberately, which is the rule for every configured
 provider: an explicit `codex/...` in a blueprint or `--model`, an explicit
-`fallback_order` entry, naming it in
-[`provider_order`](/docs/configuration#provider-preference-order), or being your
-`default_provider`. Naming it in `provider_order` is how you say a bare name
+`fallback_order` entry, or naming it in
+[`provider_order`](/docs/configuration#provider-preference-order). Naming it in
+`provider_order` is how you say a bare name
 *should* run on the subscription. Put `codex` first there, and a stage that lists
 `gpt-5.6-sol` with no provider runs on your plan, ahead of an OpenAI key that
 also serves it. Leave it out and no bare name ever lands on it.

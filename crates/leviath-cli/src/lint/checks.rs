@@ -19,8 +19,8 @@ pub(super) fn lint_declarations(stage: &StageDef) -> Vec<LintFinding> {
             LintFinding::new(
                 LintSeverity::Warning,
                 "stage-missing-model",
-                "names no model, so the stage runs on your configured \
-                 default_provider, whatever that is"
+                "names no model, so the stage runs only where the machine sets an \
+                 override_model or fallback_model, and is refused everywhere else"
                     .to_string(),
             )
             .in_stage(stage.name.as_str())

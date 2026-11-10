@@ -15,7 +15,6 @@ use crate::commands::run::session::{ProviderCreds, provider_creds_from_config};
 /// `[model_providers]` endpoint. Some keys and hosts are left out of the file
 /// so the environment fills them.
 const FIXTURE: &str = r#"
-default_provider = "openai"
 override_model = "gpt-override"
 fallback_model = "gpt-fallback"
 request_timeout_secs = 77

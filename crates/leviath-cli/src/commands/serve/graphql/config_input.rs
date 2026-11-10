@@ -161,11 +161,9 @@ impl ToolCredentialWrite {
 /// The settings that belong to no one provider.
 #[derive(Debug, InputObject)]
 pub(crate) struct ConfigWrite {
-    /// The provider a bare model name resolves on.
-    pub(crate) default_provider: Option<String>,
     /// Providers allowed to serve a bare model name, best first. A list
-    /// replaces the order whole, and an empty one takes it back to
-    /// `defaultProvider` alone.
+    /// replaces the order whole, and an empty one clears it: no provider is
+    /// set up then, and only a stage that names its provider runs.
     pub(crate) provider_order: Option<Vec<String>>,
     /// The model every stage that permits it starts on, ahead of its own list.
     /// Name it in `clear` to remove the pin; an empty string is refused rather
@@ -182,7 +180,6 @@ impl ConfigWrite {
     /// only touches providers amounts to.
     fn nothing() -> Self {
         Self {
-            default_provider: None,
             provider_order: None,
             override_model: None,
             fallback_model: None,
@@ -219,7 +216,6 @@ pub(crate) struct UpdateConfigRequest {
 /// A request that changes nothing, which every field then fills in.
 fn nothing() -> WriteConfigReq {
     WriteConfigReq {
-        default_provider: None,
         provider_order: None,
         override_model: None,
         fallback_model: None,
@@ -401,7 +397,6 @@ impl UpdateConfigRequest {
         let cleared = self.clear.unwrap_or_default();
         let set = self.set.unwrap_or_else(ConfigWrite::nothing);
 
-        req.default_provider = set.default_provider;
         req.provider_order = set.provider_order;
         req.file_uploads = set.allows_file_uploads;
         for (what, sent, slot) in [

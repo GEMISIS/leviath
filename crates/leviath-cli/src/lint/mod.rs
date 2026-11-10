@@ -392,10 +392,14 @@ impl LintEnv {
         // The open entries, asked the way the resolver asks: does a provider
         // in the preference claim this model. A provider outside the
         // preference never serves a bare name, so it is not asked. A script
-        // provider is not in `native_providers`, so the machine's default is
-        // offered the question too, matching the resolver.
+        // provider is not in `native_providers`, so each one the preference
+        // names is offered the question too, matching the resolver.
         let defaults = crate::daemon::spawn::model_defaults(config);
-        let default_script = registry.script_provider_named(&config.default_provider);
+        let preferred_scripts: Vec<_> = defaults
+            .order()
+            .into_iter()
+            .filter_map(|name| registry.script_provider_named(name))
+            .collect();
         for (_, model) in model_entries(graph)
             .map(route)
             .filter(|(p, _)| p.is_empty())
@@ -405,9 +409,9 @@ impl LintEnv {
                 .native_providers()
                 .iter()
                 .any(|(name, p)| defaults.is_preferred(name) && p.serves_model(key).is_some())
-                || default_script
-                    .as_ref()
-                    .is_some_and(|p| p.serves_model(key).is_some());
+                || preferred_scripts
+                    .iter()
+                    .any(|p| p.serves_model(key).is_some());
             if !routed {
                 self.unrouted_models.insert(model.to_string());
             }

@@ -59,8 +59,9 @@ impl Wizard {
             field.value = FieldValue::Order(order);
         }
         self.dirty = true;
-        // The head of the order is the default provider, so the concurrency
-        // default follows it exactly as the picker's does.
+        // The head of the order is where the override and fallback models
+        // run, so the concurrency default follows it exactly as the picker's
+        // does.
         if self.reorder_field == Self::PROVIDER_FIELD {
             self.apply_provider_concurrency_default();
         }
@@ -68,7 +69,7 @@ impl Wizard {
 
     /// Every configured provider the priority may name: the built-ins by id,
     /// and an endpoint preset by each entry under it, since the entry's name
-    /// is what `default_provider` has to hold.
+    /// is what `provider_order` has to hold.
     pub(super) fn configured_provider_names(&self) -> Vec<String> {
         self.selected_providers()
             .iter()
@@ -83,18 +84,18 @@ impl Wizard {
             .collect()
     }
 
-    /// The default provider as it currently stands in the form, or the base
-    /// config's value before the form exists.
-    ///
-    /// The provider field is the priority order now, so the default provider is
-    /// its head - the one a bare model name prefers first.
-    pub(super) fn current_default_provider(&self) -> String {
+    /// The head of the provider priority as it currently stands in the form,
+    /// or of the base config's order before the form exists: the provider a
+    /// bare model name prefers first, and the one the override and fallback
+    /// models are asked of. Empty when no provider is in the order.
+    pub(super) fn current_head_provider(&self) -> String {
         self.defaults
             .first()
             .and_then(|f| f.value.order())
             .and_then(|order| order.first())
             .cloned()
-            .unwrap_or_else(|| self.base.default_provider.clone())
+            .or_else(|| self.base.head_provider().map(str::to_string))
+            .unwrap_or_default()
     }
 
     /// The provider priority as it currently stands in the form.

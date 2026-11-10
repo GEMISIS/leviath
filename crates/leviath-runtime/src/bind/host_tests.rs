@@ -164,7 +164,7 @@ fn a_requested_model_wins_and_an_unservable_stage_is_an_issue() {
 #[test]
 fn a_chosen_name_that_is_not_a_valid_name_is_an_issue() {
     let bad_provider = ModelDefaults {
-        provider: "has space".into(),
+        provider_order: vec!["has space".into()],
         override_model: Some("m".into()),
         ..Default::default()
     };
@@ -173,7 +173,7 @@ fn a_chosen_name_that_is_not_a_valid_name_is_an_issue() {
     assert!(issue.message.starts_with("the chosen provider"), "{issue}");
 
     let bad_model = ModelDefaults {
-        provider: "mock".into(),
+        provider_order: vec!["mock".into()],
         override_model: Some("has space".into()),
         ..Default::default()
     };
@@ -566,7 +566,6 @@ fn compaction_models_resolve_as_a_stages_do() {
     r.register("cfg".to_string(), Arc::new(Serves(&["small"])));
     r.register("other".to_string(), Arc::new(Serves(&["small", "big"])));
     let prefer = |order: &[&str]| ModelDefaults {
-        provider: order[0].to_string(),
         provider_order: order.iter().map(ToString::to_string).collect(),
         ..ModelDefaults::default()
     };
@@ -659,7 +658,7 @@ fn a_compaction_moved_by_override_model_says_so() {
     let mut r = ProviderRegistry::new();
     r.register("cfg".to_string(), Arc::new(Serves(&["small", "big"])));
     let defaults = ModelDefaults {
-        provider: "cfg".to_string(),
+        provider_order: vec!["cfg".to_string()],
         override_model: Some("big".into()),
         ..ModelDefaults::default()
     };
@@ -845,7 +844,6 @@ fn routes_by_output() -> (ProviderRegistry, ModelDefaults) {
         )))),
     );
     let defaults = ModelDefaults {
-        provider: "wordy".into(),
         provider_order: vec!["wordy".into(), "unsure".into(), "speaks".into()],
         ..Default::default()
     };

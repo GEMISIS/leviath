@@ -2,10 +2,10 @@
 //!
 //! This table is what keeps the wizard a pick-list rather than a fixed march
 //! through every provider (asking for four API keys whether or not the user
-//! has them) ending in a free-text `default_provider` with no validation -
-//! where a typo produces a config that only fails at the first agent run. The
-//! wizard shows the table as a pick-list, and the default-provider choice is a
-//! radio over what was actually configured.
+//! has them) ending in a free-text provider name with no validation - where a
+//! typo produces a config that only fails at the first agent run. The wizard
+//! shows the table as a pick-list, and the provider priority is arranged over
+//! what was actually configured.
 //!
 //! Everything a provider needs to differ by lives here as data, so adding one
 //! is a table entry rather than another branch in the wizard.
@@ -601,18 +601,6 @@ mod tests {
         // A script entry at that address is not an endpoint.
         config.model_providers.get_mut("box").unwrap().kind = None;
         assert!(!is_configured(&config, "llama-cpp"));
-    }
-
-    #[test]
-    fn the_default_provider_is_in_the_table() {
-        // Otherwise a fresh config would name a provider the wizard can't
-        // configure - which is exactly how a free-text prompt once went wrong.
-        let config = Config::default();
-        assert!(
-            providers().iter().any(|p| p.id == config.default_provider),
-            "default_provider {} is not offered by the wizard",
-            config.default_provider
-        );
     }
 
     // ─── credential accessors ───────────────────────────────────────────────

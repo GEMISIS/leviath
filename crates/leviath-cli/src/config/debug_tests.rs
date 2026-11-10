@@ -74,10 +74,7 @@ fn debug_prints_no_secret_wherever_the_config_holds_one() {
         assert!(rendered.contains("GITHUB_TOKEN"), "{rendered}");
         assert!(rendered.contains("Authorization"), "{rendered}");
         assert!(rendered.contains("SEARCH"), "{rendered}");
-        assert!(
-            rendered.contains("default_provider: \"anthropic\""),
-            "{rendered}"
-        );
+        assert!(rendered.contains("agent_paths: []"), "{rendered}");
     }
 
     let unset = format!("{:?}", Config::default());

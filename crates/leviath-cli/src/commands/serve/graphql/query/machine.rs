@@ -392,7 +392,6 @@ pub(crate) fn config_of(
     let providers = providers_of(&redacted);
     Config {
         routing: RoutingConfig {
-            default_provider: redacted.default_provider,
             provider_order: redacted.provider_order,
             override_model: redacted.override_model,
             fallback_model: redacted.fallback_model,

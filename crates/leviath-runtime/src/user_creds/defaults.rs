@@ -7,9 +7,8 @@ use crate::spec::names::ModelRef;
 use leviath_providers::retention::{Retention, RetentionSettings, request_knobs};
 use std::collections::HashMap;
 
-/// The defaults a stage resolves against: the default provider, the override
-/// and fallback models, the provider order, the fallback chain, and the
-/// retention settings.
+/// The defaults a stage resolves against: the provider order, the override
+/// and fallback models, the fallback chain, and the retention settings.
 ///
 /// A malformed `[providers] fallback_order` entry is dropped and named in
 /// `warnings` rather than failing: a typo in a safety net should not stop a
@@ -31,7 +30,6 @@ pub fn model_defaults(settings: &UserSettings, warnings: &mut Vec<String>) -> Mo
         })
         .collect();
     ModelDefaults {
-        provider: settings.default_provider.clone(),
         override_model: settings.override_model.clone(),
         fallback_model: settings.fallback_model.clone(),
         fallback_order,

@@ -685,7 +685,7 @@ impl Provider for RhaiProvider {
     /// `base` for every model it has no override for, so the default says "no"
     /// to everything and a local box serving one fast model can never win a
     /// blueprint entry that names that model, however the machine sets
-    /// `default_provider`.
+    /// `provider_order`.
     ///
     /// Three sources, cheapest evidence last:
     ///

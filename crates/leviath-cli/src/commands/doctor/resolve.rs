@@ -26,9 +26,8 @@ pub(super) struct Resolved {
 /// that states no preference of its own.
 ///
 /// The chain's last resort is unchecked: with nothing to pick from it hands
-/// back the placeholder every model-less stage carries (`anthropic` /
-/// `claude-sonnet-5-5`) whether or not anything answers to that name. That
-/// placeholder is not a finding about the user's config, so it is never
+/// back an empty candidate, no provider and no model, which nothing answers
+/// to. That is not a finding about the user's config, so it is never
 /// reported as one. Reaching it means the config names no model of its own,
 /// and the verdict is then about the provider preference instead
 /// ([`preference_check`]): a preferred provider that is registered passes,
@@ -53,7 +52,7 @@ pub(super) fn resolve_check(
                 "resolve",
                 format!(
                     "{provider_name} / {model}{}{}",
-                    default_provider_note(config, &provider_name, model_override, registry),
+                    head_provider_note(config, &provider_name, model_override, registry),
                     qualified_user_model_notes(config, model_override),
                 ),
             ),
@@ -65,7 +64,8 @@ pub(super) fn resolve_check(
         );
     }
     // A `--model` names its own provider (`provider/model`) or pairs a bare id
-    // with `default_provider`, and either can name one that is not here. The
+    // with the first provider in the order, and either can name one that is
+    // not here. The
     // chain reported exactly that provider, so the answer is about it.
     if model_override.is_some() {
         return (
@@ -90,11 +90,11 @@ pub(super) fn resolve_check(
 /// in play: pass, and let the later checks pick a model from its catalogue,
 /// because that is the state of every fresh install with one provider and
 /// nothing wrong with it. A preferred provider is registered but
-/// `override_model` or `fallback_model` is set: those pair with
-/// `default_provider`, which must then be the one that is not configured, and
-/// the message names that. Nothing preferred is registered: the plain
-/// failure, said in terms of the provider the user named rather than the
-/// placeholder the chain fell back to.
+/// `override_model` or `fallback_model` is set: those pair with the first
+/// provider in the order, which must then be the one that is not configured,
+/// and the message names that. Nothing preferred is registered: the plain
+/// failure, said in terms of the providers the user listed, or of the empty
+/// order when they listed none.
 fn preference_check(
     config: &Config,
     defaults: &ModelDefaults,
@@ -135,18 +135,18 @@ fn preference_check(
             Check::fail(
                 "resolve",
                 format!(
-                    "`override_model` and `fallback_model` pair with default_provider = \
-                     '{}', which is not configured (registered: {registered}). Configure \
-                     it with `lev setup`, or set default_provider to a configured \
-                     provider such as '{name}'.",
-                    config.default_provider
+                    "`override_model` and `fallback_model` pair with the first provider \
+                     in provider_order, '{}', which is not configured (registered: \
+                     {registered}). Configure it with `lev setup`, or put a configured \
+                     provider such as '{name}' first with `lev providers order`.",
+                    preferred[0]
                 ),
             ),
             None,
         ),
         None => {
-            let named = match defaults.provider_order.is_empty() {
-                true => format!("default_provider = '{preference}' is not configured"),
+            let named = match preferred.is_empty() {
+                true => "no provider is set up, `[providers] provider_order` is empty".to_string(),
                 false => format!("nothing in provider_order = [{preference}] is configured"),
             };
             (
@@ -154,9 +154,8 @@ fn preference_check(
                     "resolve",
                     format!(
                         "no configured provider to run on: {named} (registered: \
-                         {registered}). Run `lev setup` to add a provider, or name a \
-                         configured one in `default_provider` or `[providers] \
-                         provider_order` in config.toml."
+                         {registered}). Run `lev setup` to add a provider, or list a \
+                         configured one with `lev providers order <name>`."
                     ),
                 ),
                 None,

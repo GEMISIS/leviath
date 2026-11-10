@@ -476,15 +476,16 @@ mod tests {
         }
     }
 
-    /// A machine whose `default_provider` is a script provider can win an open
-    /// route.
+    /// A machine whose `provider_order` names a script provider can win an
+    /// open route.
     ///
     /// The shape that makes this delicate: `native_providers` does not
     /// enumerate script providers, since they are compiled on demand, so an
     /// open route is offered to every built-in and to no script unless the
-    /// named default is reached explicitly. Without that, a local box serving
-    /// the one fast model every bundled blueprint asks for by bare id never
-    /// gets the route, and setting `default_provider` changes nothing.
+    /// one the order names is reached explicitly. Without that, a local box
+    /// serving the one fast model every bundled blueprint asks for by bare id
+    /// never gets the route, and listing it in `provider_order` changes
+    /// nothing.
     #[tokio::test]
     async fn a_script_provider_named_as_default_can_answer_what_it_serves() {
         let dir = tempfile::tempdir().unwrap();

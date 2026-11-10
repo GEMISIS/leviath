@@ -15,7 +15,6 @@ impl std::fmt::Debug for Config {
         // to the config is a compile error here until someone has decided
         // how it prints.
         let Self {
-            default_provider,
             providers,
             agent_paths,
             openrouter_api_key,
@@ -57,7 +56,6 @@ impl std::fmt::Debug for Config {
             None => "<unset>",
         };
         f.debug_struct("Config")
-            .field("default_provider", default_provider)
             .field("providers", providers)
             .field("agent_paths", agent_paths)
             .field("openrouter_api_key", &openrouter_api_key)

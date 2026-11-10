@@ -19,7 +19,7 @@ where you look up the exact name, type, and default. The same contract ships mac
 > [!NOTE]
 > The daemon watches this file and reloads it when it changes, so an edit takes effect on the
 > **next** `lev run` with no restart. That includes providers, `[[mcp_servers]]` and
-> `[observability]`: a key you add, replace or remove, a changed `default_provider`, a
+> `[observability]`: a key you add, replace or remove, a changed `provider_order`, a
 > `[model_providers]` entry, an MCP server, or a collector to export to are all picked up by the
 > next run started, whether it came from `lev run`, the API or the dashboard, and it makes no
 > difference whether the edit came from `lev setup`, `PUT /api/config` or an editor. A run already
@@ -31,7 +31,6 @@ where you look up the exact name, type, and default. The same contract ships mac
 ## Top level
 
 ```toml
-default_provider     = "anthropic"   # provider used when a blueprint names none
 override_model       = "claude-sonnet-5-5"   # every stage starts on this; unset lets each blueprint decide
 fallback_model       = "claude-haiku-5-5"    # only for a stage none of whose own models is configured
 agent_paths          = ["~/projects/my-agents"]   # extra directories scanned for blueprints
@@ -47,7 +46,6 @@ load_dotenv          = false         # read ./.env from the directory lev runs i
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `default_provider` | string | `"anthropic"` | |
 | `override_model` | string | unset | One model every stage that allows a user default starts on, ahead of the models its blueprint names |
 | `fallback_model` | string | unset | The model a stage falls back to when none of the models it names is configured here |
 | `agent_paths` | array of paths | `[]` | Searched in addition to `~/.leviath/agents` |
@@ -62,9 +60,14 @@ load_dotenv          = false         # read ./.env from the directory lev runs i
 
 All three of those cascade: a stage setting beats a blueprint setting, which beats this file.
 
-`override_model` and `fallback_model` both take a bare model id on `default_provider`, not
-`provider/model`. A leading `<default_provider>/` is dropped and named at load, so
-`"ollama/qwen3.8:latest"` under `default_provider = "ollama"` still works.
+`override_model` and `fallback_model` both take a bare model id, not `provider/model`. The
+provider is the first one in [`[providers] provider_order`](#provider-preference-order). A leading
+`<provider>/` naming that provider is dropped and named at load, so `"ollama/qwen3.8:latest"`
+under `provider_order = ["ollama"]` still works.
+
+Which provider a run goes to is not a top-level setting. It is `provider_order`, under
+`[providers]`. A file that still has `default_provider = "x"` loads with `x` as the first entry of
+that order and says so; `lev update` rewrites it.
 
 Leaving `override_model` unset is usually the better state. Over the API, `PUT /api/config` with
 `"override_model": null` writes it away. It was called `default_model` before 0.6. See
@@ -227,8 +230,18 @@ It is read per run, so a change takes effect on the next `lev run` with no resta
 
 `provider_order` decides which providers may serve a **bare** model name, one a blueprint lists
 with no provider. It also sets the order when more than one of them serves it. Entries are plain
-provider names, best first. It generalizes `default_provider` from a single front-runner into a
-full ordering; leave it empty and `default_provider` alone serves bare names.
+provider names, best first. The first entry is also the provider `override_model` and
+`fallback_model` are asked of.
+
+```toml
+[providers]
+provider_order = ["anthropic", "openrouter"]
+```
+
+A provider is set up once it is in this list. Nothing is assumed when it is empty: no provider
+serves a bare name, and a run whose stage leaves its route open fails at spawn with
+`no provider is set up`. `lev setup` writes the list for you, and `lev providers order <name>...`
+changes it.
 
 The list is the whole answer: a configured provider that is not in it never serves a bare name,
 however many models it carries. It is still reachable by an explicit `provider/model` in a
@@ -241,7 +254,7 @@ name. Leave it out and only a `codex/...` pin reaches it. `lev setup`'s priority
 a provider is taken in or out of the list.
 
 It shapes routes, not models: a blueprint that chose a different model per stage keeps each stage's
-model, the same way `default_provider` does. `lev doctor` flags an entry naming a provider that is
+model. `lev doctor` flags an entry naming a provider that is
 not configured. Like the rest of `[providers]`, it is read per run, so a change takes effect on the
 next `lev run` with no restart.
 
@@ -1144,10 +1157,10 @@ are presets in `lev setup`; the rest go through the wizard's **Custom OpenAI-com
 entry, or straight into the file.
 
 ```toml
-default_provider = "llama-cpp"
 override_model   = "qwen3-8b"
 
 [providers]
+provider_order    = ["llama-cpp", "anthropic"]
 anthropic_api_key = "sk-ant-..."
 
 [model_providers.llama-cpp]
@@ -1172,7 +1185,7 @@ zero_retention_request = "openai"    # send store = false when zero_retention is
 
 This is three providers: two llama.cpp servers under their own names, and Anthropic. A blueprint
 reaches a model on one of them as `llama-cpp/qwen3-8b` or `llama-cpp-big/llama-3-70b`, and the
-`default_provider` above sends every stage that allows a user default to the first. `base_url` is
+`provider_order` above sends every stage that allows a user default to the first. `base_url` is
 required and includes the path prefix the server expects, usually `/v1`. Each entry may also carry
 `rate_limit` and `serves`, which mean what they mean for a script provider. An endpoint entry refuses
 to load with a key it does not read. A script entry forwards such keys to its `initialize`, while

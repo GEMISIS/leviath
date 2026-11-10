@@ -529,7 +529,7 @@ does not, and a **note** never does. Each finding prints with its code in bracke
 | error | `fanout-worker-missing` | A `fan_out` stage names a worker blueprint this install cannot load. A spawn refuses it too |
 | error | `retention-not-zero` | `[providers] zero_retention` is on and the model this stage would start on keeps something. See below |
 | warning | `retention-fallback-dropped` | `[providers] zero_retention` is on and a listed fallback keeps something, so failover skips it |
-| warning | `stage-missing-model` | No `model`, so the stage runs on whatever your `default_provider` is |
+| warning | `stage-missing-model` | No `model`, so the stage runs only on a machine that sets `override_model` or `fallback_model` |
 | warning | `stage-missing-max-iterations` | Unbounded unless `[limits] default_max_iterations` is set. Fan-out stages are exempt |
 | warning | `blocking-tool-in-autonomous-stage` | An autonomous stage grants a tool that waits for a person. See below |
 | warning | `implicit-shell-policy` | A shell grant with no policy behind it. See below |
@@ -1322,7 +1322,7 @@ because there is no daemon to ask.
 | Check | What it proves | A failure means |
 |---|---|---|
 | `config` | `config.toml` parses and a provider registry can be built. See below | The config file is malformed |
-| `resolve` | Your defaults pick a provider that is actually registered. See below | Nothing in `default_provider` or `provider_order` is configured: a key is missing or misspelled, or `lev setup` never ran |
+| `resolve` | Your defaults pick a provider that is actually registered. See below | `provider_order` is empty, or nothing in it is configured: a key is missing or misspelled, or `lev setup` never ran |
 | `inference` | One real call reaches the model | A bad key, an unknown model id, or a billing problem |
 | `daemon` | A one-stage agent spawns over the control socket, runs, and finishes | The handoff is broken even though the credentials are fine |
 | `journal` | The running daemon has written every run record it tried to | Something on the filesystem is stopping the daemon recording what its runs do |
@@ -1335,7 +1335,7 @@ preference. The next check then picks a model from that provider's catalogue.
 ```bash
 $ lev doctor
 
-  config     OK  default_provider=openrouter; registered: ollama, openrouter (script providers resolve by name)
+  config     OK  provider_order=openrouter; registered: ollama, openrouter (script providers resolve by name)
   journal    OK  1284 record(s) written, none lost
   resolve    OK  openrouter / anthropic/claude-sonnet-5.5
   inference  OK  12 in / 4 out / 16 total, replied PONG  (1.2s)
@@ -1354,8 +1354,8 @@ the run. Nothing is left in `lev ps` or on disk.
 | `--offline` | Stop after the second check. Proves the config parses and the model resolves, and bills nothing |
 | `--json` | Print the checks as `{"checks": [...], "passed": bool}` |
 
-`--model` takes `provider/model` to pick both, and a bare model id pairs with your
-`default_provider`. `--model provider/model` is the way to reach a
+`--model` takes `provider/model` to pick both, and a bare model id pairs with the first provider
+in your `provider_order`. `--model provider/model` is the way to reach a
 [Rhai script provider](/docs/rhai-providers), which is resolved by name. Use it to try a model
 string before wiring it into a blueprint: it goes further than `lev models list --provider`, which
 compiles the provider and reads its catalog but never sends an inference.
@@ -1428,8 +1428,8 @@ of each key, never the key, made with a random key of this install's own
 (`~/.leviath/provider-check.key`). `lev rage` includes the cache in a bug report and never that
 key, so a shared report gives nothing to guess a key back from.
 
-The Defaults screen leads with **Provider priority**: the order a bare model name prefers, whose
-head is your default provider. Enter opens a modal to arrange it. Drag a row by its `⠿` grip, or
+The Defaults screen leads with **Provider priority**: the providers a bare model name may run on,
+best first. The first is where your override and fallback models run. Enter opens a modal to arrange it. Drag a row by its `⠿` grip, or
 move the one under the cursor with `Shift+↑`/`Shift+↓`. Use `K`/`J` on a terminal that keeps
 Shift+arrows for itself (Apple Terminal does). Space takes a configured provider out of the order
 or brings it back in. A provider left out is still configured, and still runs any stage that names
@@ -1453,7 +1453,7 @@ turns uploads off whatever it says. See [Files and size limits](/docs/mime#files
 
 | Flag | Purpose |
 |---|---|
-| `--non-interactive` | Use only flag values, ask nothing |
+| `--non-interactive` | Use only flag values, ask nothing. Each provider the flags configure is added to `[providers] provider_order`, and a config that would have no provider in that order is refused, with nothing written |
 | `--no-verify` | Skip checking credentials against the provider APIs |
 | `--anthropic-key`, `--openai-key`, `--google-key`, `--xai-key`, `--meta-key`, `--openrouter-key`, `--bedrock-key <KEY>` | Provider API keys |
 | `--file-uploads <true\|false>` | Upload large parts to a provider's file storage once and name them by id. On unless set |
@@ -1488,7 +1488,7 @@ and **Remove this endpoint** on each, so two llama.cpp servers on two ports are 
 **Check this endpoint** asks the server for its models. On success they are listed, and the
 **Default model** row cycles through them. On failure the entry is kept, and the **Models** row
 takes the ids by hand, which is what the entry's `models` list is. Every endpoint
-appears in the default-provider choice by its own name. These entries have no flags; script them
+appears in the provider priority by its own name. These entries have no flags; script them
 by writing `config.toml`.
 
 > [!NOTE]
@@ -1545,7 +1545,7 @@ serves it.
 |---|---|---|
 | `lev providers` (or `lev providers list`) | `--json` | List configured providers and the current priority order |
 | `lev providers order <NAME>...` | | Set the order, best first (e.g. `lev providers order codex openrouter openai`) |
-| `lev providers order --clear` | | Remove the order, so `default_provider` alone decides |
+| `lev providers order --clear` | | Empty the order. No provider serves a bare model name until one is listed again |
 | `lev providers retention` | `--json` | What each provider keeps of a request, how that is controlled, and Bedrock's live account mode. See [data retention](/docs/providers#data-retention) |
 | `lev providers retention set <zero\|off>` | | Write `[providers] zero_retention`; `zero` also sets Bedrock's account mode to `none` |
 | `lev providers retention bedrock <MODE>` | | Set Bedrock's account data retention mode directly: `none`, `default`, `aws_review`, `provider_data_share` or `inherit` |

@@ -2740,8 +2740,8 @@ expect_contains = "x"
     #[test]
     fn build_registry_from_config_registers_all_providers() {
         let config = Config {
-            default_provider: "anthropic".to_string(),
             providers: crate::config::ProviderConfig {
+                provider_order: vec!["anthropic".to_string()],
                 anthropic_api_key: Some("fake-anthropic-key".to_string()),
                 openai_api_key: Some("fake-openai-key".to_string()),
                 google_api_key: Some("fake-google-key".to_string()),

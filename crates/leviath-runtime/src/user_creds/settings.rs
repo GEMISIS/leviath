@@ -20,8 +20,6 @@ use std::collections::{BTreeMap, HashMap};
 #[derive(Clone, Deserialize)]
 #[serde(default)]
 pub struct UserSettings {
-    /// `default_provider`: the single front-runner for a bare model name.
-    pub default_provider: String,
     /// `openrouter_api_key`: the one key at the top of the file rather than
     /// under `[providers]`.
     pub openrouter_api_key: Option<String>,
@@ -48,11 +46,9 @@ pub struct UserSettings {
 }
 
 impl Default for UserSettings {
-    /// What a missing file means: `lev`'s defaults, `anthropic` as the
-    /// default provider included.
+    /// What a missing file means: `lev`'s defaults, with no provider set up.
     fn default() -> Self {
         Self {
-            default_provider: "anthropic".to_string(),
             openrouter_api_key: None,
             ollama_base_url: None,
             override_model: None,

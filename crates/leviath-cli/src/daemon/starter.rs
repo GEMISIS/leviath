@@ -218,7 +218,7 @@ impl DaemonStarter {
             .warm_models(
                 &model_names(&graph),
                 std::time::Duration::from_secs(MODEL_WARM_TIMEOUT_SECS),
-                Some(config.default_provider.as_str()),
+                &config.provider_order(),
             )
             .await;
     }

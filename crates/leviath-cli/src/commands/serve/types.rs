@@ -1188,10 +1188,9 @@ mod tests {
     #[test]
     fn redacted_config_serde_roundtrip() {
         let config = RedactedConfig {
-            default_provider: "anthropic".to_string(),
             override_model: Some("claude-sonnet-5".to_string()),
             fallback_model: None,
-            provider_order: Vec::new(),
+            provider_order: vec!["anthropic".to_string(), "openai".to_string()],
             has_anthropic_key: true,
             has_openai_key: false,
             has_google_key: false,
@@ -1221,7 +1220,7 @@ mod tests {
         };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: RedactedConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.default_provider, "anthropic");
+        assert_eq!(parsed.provider_order, ["anthropic", "openai"]);
         assert_eq!(parsed.override_model.as_deref(), Some("claude-sonnet-5"));
         assert!(parsed.has_anthropic_key);
         assert!(!parsed.has_openai_key);
@@ -1372,7 +1371,7 @@ mod tests {
                 DoctorCheck {
                     name: "config".to_string(),
                     ok: true,
-                    detail: "default_provider=anthropic".to_string(),
+                    detail: "provider_order=anthropic".to_string(),
                     elapsed_ms: None,
                 },
                 DoctorCheck {
@@ -1386,7 +1385,7 @@ mod tests {
         let json = serde_json::to_string(&resp).unwrap();
         // An untimed check omits the field entirely rather than sending null.
         assert!(
-            json.contains(r#"{"name":"config","ok":true,"detail":"default_provider=anthropic"}"#)
+            json.contains(r#"{"name":"config","ok":true,"detail":"provider_order=anthropic"}"#)
         );
         assert!(json.contains("\"elapsed_ms\":1200"));
         let parsed: DoctorResp = serde_json::from_str(&json).unwrap();

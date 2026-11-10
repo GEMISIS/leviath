@@ -2262,9 +2262,8 @@ fn mouse_events_that_are_not_a_click_or_a_wheel_are_ignored() {
 fn a_configured_provider_outside_the_catalog_still_describes_itself() {
     let dir = tempfile::tempdir().unwrap();
     let config = crate::config::Config {
-        default_provider: "in-house".to_string(),
         override_model: Some("ghost-model".to_string()),
-        ..Default::default()
+        ..crate::test_support::config_preferring(&["in-house"])
     };
     let mut w = Wizard::new(
         config,
