@@ -1432,8 +1432,8 @@ The Defaults screen leads with **Provider priority**: the providers a bare model
 best first. The first is where your override and fallback models run. Enter opens a modal to arrange it. Drag a row by its `⠿` grip, or
 move the one under the cursor with `Shift+↑`/`Shift+↓`. Use `K`/`J` on a terminal that keeps
 Shift+arrows for itself (Apple Terminal does). Space takes a configured provider out of the order
-or brings it back in. A provider left out is still configured, and still runs any stage that names
-it as `provider/model`. A bare model name is never routed to it. Configuring a new provider
+or brings it back in. A provider left out is still configured and is not set up: no stage runs on
+it, including one that names it as `provider/model`. Configuring a new provider
 does not add it to the order on its own, and at least one provider always stays in. It writes the
 same [`provider_order`](/docs/configuration#provider-preference-order) that `lev providers order`
 and `PUT /api/config` set, so putting a subscription like Codex first there is how you route bare
@@ -1551,9 +1551,9 @@ serves it.
 | `lev providers retention bedrock <MODE>` | | Set Bedrock's account data retention mode directly: `none`, `default`, `aws_review`, `provider_data_share` or `inherit` |
 | `lev providers quota` | `--json` | How much of each signed-in subscription (Codex, Grok) is used, against what limit, and when each window resets |
 
-The order is the whole list of providers a bare model name may run on. A configured provider that
-is not in it is reachable only by an explicit `provider/model`, so configuring it never silently
-moves a stage or its billing. That holds for a subscription transport (Codex, Grok) as much
+The order is the whole list of providers a stage may run on. A configured provider that is not in
+it runs nothing, so configuring it never silently moves a stage or its billing. `lev providers`
+marks each one, and `lev doctor` names it. That holds for a subscription transport (Codex, Grok) as much
 as for an API key. A name that is not a configured provider is refused rather than written, since it
 could never win a route.
 

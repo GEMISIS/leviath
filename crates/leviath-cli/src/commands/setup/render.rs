@@ -1634,7 +1634,7 @@ mod tests {
             "a configured provider outside the order is shown as such:\n{screen}"
         );
         assert!(
-            screen.contains("A provider left out is never chosen for a bare model name"),
+            screen.contains("A provider left out is not set up"),
             "{screen}"
         );
         assert!(

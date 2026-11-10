@@ -290,7 +290,7 @@ binds = [{ region = "task" }]
         let request = request_for(&launch).expect("the parent's request reads");
         let env = spawner
             .starter
-            .env_for(&request, Arc::new(Config::default()));
+            .env_for(&request, spawner.starter.config.check().config);
         let prepared = crate::daemon::block_on::block_on(spawner.starter.start_with(
             env,
             request,

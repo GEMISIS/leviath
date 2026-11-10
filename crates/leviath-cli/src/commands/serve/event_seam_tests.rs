@@ -31,7 +31,6 @@ use tokio::sync::{Mutex, broadcast};
 
 use super::testutil::WsTestClient;
 use super::types::AppState;
-use crate::config::Config;
 
 /// A model that answers in one turn and calls no tools.
 ///
@@ -127,7 +126,7 @@ async fn stand_up(runs_dir: &std::path::Path) -> Seam {
     providers.register("seam".to_string(), Arc::new(AnswersOnce));
 
     let mut host = crate::daemon::setup::build_host(crate::daemon::setup::HostParts {
-        config: Config::default(),
+        config: crate::test_support::config_preferring(&["seam"]),
         providers,
         runs_dir: runs_dir.to_path_buf(),
         shared_mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
@@ -178,7 +177,9 @@ async fn stand_up(runs_dir: &std::path::Path) -> Seam {
         signer: Default::default(),
         update_check: Default::default(),
         update_jobs: Default::default(),
-        config: crate::commands::serve::testutil::fixed_config(Config::default()),
+        config: crate::commands::serve::testutil::fixed_config(
+            crate::test_support::config_preferring(&["seam"]),
+        ),
         event_tx: event_tx.into(),
         control: control.clone(),
         mcp: super::mcp::McpAdmin::default(),

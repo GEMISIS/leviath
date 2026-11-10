@@ -689,7 +689,7 @@ mod tests {
     /// A config whose registry actually has `anthropic` in it, so a spawn of a
     /// manifest naming that provider is not refused for having none.
     fn config_with_anthropic_key() -> Config {
-        let mut config = Config::default();
+        let mut config = crate::test_support::config_preferring(&["anthropic"]);
         config.providers.anthropic_api_key = Some("test-key".to_string());
         config
     }
@@ -705,7 +705,7 @@ mod tests {
     #[tokio::test]
     async fn the_watcher_prepares_an_edit_and_the_housekeeper_installs_it() {
         crate::config::with_isolated_config_path_async("housekeeper", |dir| async move {
-            let world_config = Config::default();
+            let world_config = crate::test_support::config_preferring(&["anthropic"]);
             let mut world = PipelineWorld::new(
                 ProviderRegistry::new(),
                 Arc::new(CliToolService::new()),
@@ -781,10 +781,14 @@ mod tests {
         );
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.toml");
-        std::fs::write(&config_path, toml::to_string(&Config::default()).unwrap()).unwrap();
+        std::fs::write(
+            &config_path,
+            toml::to_string(&crate::test_support::config_preferring(&["anthropic"])).unwrap(),
+        )
+        .unwrap();
         let reloader = Arc::new(crate::daemon::config_reload::ConfigReloader::new(
             config_path.clone(),
-            Config::default(),
+            crate::test_support::config_preferring(&["anthropic"]),
         ));
         let mut resumer = make_resumer(tool_service.clone(), reloader.clone());
 
@@ -798,7 +802,7 @@ mod tests {
         let state = crate::daemon::tool_service::test_state_for_resume(dir.path());
         tool_service.register(entity, state.clone());
         assert!(!state.blueprint_may_loosen());
-        let mut edited = Config::default();
+        let mut edited = crate::test_support::config_preferring(&["anthropic"]);
         edited.security.allow_blueprint_permissions = true;
         std::fs::write(&config_path, toml::to_string(&edited).unwrap()).unwrap();
         let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
@@ -963,7 +967,7 @@ mod tests {
                 // host: see `setup_daemon_host_builds_a_working_host`.
                 let runs = tempfile::tempdir().unwrap();
                 let mut host = setup_daemon_host(
-                    Config::default(),
+                    crate::test_support::config_preferring(&["anthropic"]),
                     runs.path().to_path_buf(),
                     Handle::current(),
                     &StartupBoard::default(),
@@ -1056,7 +1060,7 @@ mod tests {
                 // host: see `setup_daemon_host_builds_a_working_host`.
                 let runs = tempfile::tempdir().unwrap();
                 let mut host = setup_daemon_host(
-                    Config::default(),
+                    crate::test_support::config_preferring(&["anthropic"]),
                     runs.path().to_path_buf(),
                     Handle::current(),
                     &StartupBoard::default(),
@@ -1163,7 +1167,7 @@ mod tests {
                 "python3",
                 vec!["-c".to_string(), "pass".to_string()],
             )],
-            ..Config::default()
+            ..crate::test_support::config_preferring(&["anthropic"])
         };
         let runs = tempfile::tempdir().unwrap();
         let _host = build_host(HostParts {
@@ -1196,7 +1200,7 @@ mod tests {
                 log_file_max_bytes: leviath_core::config::DEFAULT_LOG_FILE_MAX_BYTES,
                 capture_model_input: false,
             },
-            ..Config::default()
+            ..crate::test_support::config_preferring(&["anthropic"])
         };
         let runs = tempfile::tempdir().unwrap();
         let mut host = build_host(HostParts {
@@ -1239,7 +1243,7 @@ mod tests {
                 log_file_max_bytes: leviath_core::config::DEFAULT_LOG_FILE_MAX_BYTES,
                 capture_model_input: false,
             },
-            ..Config::default()
+            ..crate::test_support::config_preferring(&["anthropic"])
         };
         let runs = tempfile::tempdir().unwrap();
         let mut host = build_host(HostParts {
@@ -1286,7 +1290,7 @@ mod tests {
                     &[],
                 );
                 let mut host = build_host(HostParts {
-                    config: Config::default(),
+                    config: crate::test_support::config_preferring(&["fake"]),
                     providers,
                     runs_dir: runs.path().to_path_buf(),
                     shared_mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
@@ -1845,7 +1849,7 @@ binds = [{{ region = "task" }}]
     /// A host over `providers`, keeping its runs in `runs`.
     fn host_over(runs: &std::path::Path, providers: ProviderRegistry) -> WorldHost {
         build_host(HostParts {
-            config: Config::default(),
+            config: crate::test_support::config_preferring(&["anthropic"]),
             providers,
             runs_dir: runs.to_path_buf(),
             shared_mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
@@ -1880,8 +1884,12 @@ binds = [{{ region = "task" }}]
                 let manifest = agent.path().join("agent.toml");
                 std::fs::write(&manifest, crate::test_support::inline_coder_manifest()).unwrap();
                 let runs = tempfile::tempdir().unwrap();
-                let run_id =
-                    run_on_disk(Config::default(), fake_registry(), runs.path(), &manifest);
+                let run_id = run_on_disk(
+                    crate::test_support::config_preferring(&["anthropic"]),
+                    fake_registry(),
+                    runs.path(),
+                    &manifest,
+                );
 
                 let mut host = fake_host(runs.path());
 
@@ -1906,8 +1914,12 @@ binds = [{{ region = "task" }}]
                 let manifest = agent.path().join("agent.toml");
                 std::fs::write(&manifest, crate::test_support::inline_coder_manifest()).unwrap();
                 let runs = tempfile::tempdir().unwrap();
-                let run_id =
-                    run_on_disk(Config::default(), fake_registry(), runs.path(), &manifest);
+                let run_id = run_on_disk(
+                    crate::test_support::config_preferring(&["anthropic"]),
+                    fake_registry(),
+                    runs.path(),
+                    &manifest,
+                );
 
                 let mut host = host_over(runs.path(), ProviderRegistry::new());
 
@@ -1934,7 +1946,12 @@ binds = [{{ region = "task" }}]
 
         // Recorded only now - build_host's startup resume already ran, so it
         // is on disk but absent from the world.
-        let run_id = run_on_disk(Config::default(), fake_registry(), runs.path(), &manifest);
+        let run_id = run_on_disk(
+            crate::test_support::config_preferring(&["anthropic"]),
+            fake_registry(),
+            runs.path(),
+            &manifest,
+        );
 
         // It is not loaded yet: a read-only Status does not page it in.
         assert_eq!(status_of(&mut host, &run_id).await, None);
@@ -2024,7 +2041,7 @@ binds = [{{ region = "task" }}]
         // Better than accepting runs it could never infer for: the error names
         // the cause, where the previous behaviour was a panic at start-up.
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut config = Config::default();
+        let mut config = crate::test_support::config_preferring(&["anthropic"]);
         config.providers.anthropic_api_key = Some("k".to_string());
         let err = setup_daemon_host_with(
             config,

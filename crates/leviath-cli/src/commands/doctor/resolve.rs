@@ -46,7 +46,12 @@ pub(super) fn resolve_check(
     let defaults = model_defaults(config);
     let (provider_name, model) = resolve_stage_model(&empty, model_override, &defaults, registry);
 
-    if let Some(provider) = registry.get(&provider_name) {
+    // In the order as well as registered: a `--model provider/model` names
+    // its provider outright, and one left out of the order is not set up.
+    let set_up = registry
+        .get(&provider_name)
+        .filter(|_| defaults.is_preferred(&provider_name));
+    if let Some(provider) = set_up {
         return (
             Check::ok(
                 "resolve",
@@ -68,15 +73,18 @@ pub(super) fn resolve_check(
     // not here. The
     // chain reported exactly that provider, so the answer is about it.
     if model_override.is_some() {
-        return (
-            Check::fail(
-                "resolve",
-                format!(
-                    "resolved to '{provider_name}', which is not configured (tried: {}). \
-                     Configure it with `lev setup`, or add it to config.toml.",
-                    providers_tried(&empty, model_override, &defaults)
-                ),
+        let why = match registry.has(&provider_name) {
+            true => "which is configured but not in `[providers] provider_order`, so it \
+                     is not set up. List it with `lev providers order <names, best first>`."
+                .to_string(),
+            false => format!(
+                "which is not configured (tried: {}). Configure it with `lev setup`, or \
+                 add it to config.toml.",
+                providers_tried(&empty, model_override, &defaults)
             ),
+        };
+        return (
+            Check::fail("resolve", format!("resolved to '{provider_name}', {why}")),
             None,
         );
     }

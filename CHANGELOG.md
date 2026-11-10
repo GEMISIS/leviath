@@ -16,14 +16,24 @@ same list.
 ### Changed
 
 - **Breaking.** `default_provider` is gone, and `[providers] provider_order` is the one setting
-  that decides where a bare model name runs. A provider is set up once it is in that list:
+  that decides where a stage runs. A provider is set up once it is in that list:
   only listed providers serve a model a blueprint names with no provider, in that order, and
   `override_model`, `fallback_model` and a bare `--model` are asked of the first one. Nothing is
   assumed in its place, `anthropic` included. With the order empty a stage that leaves its route
   open is refused at spawn with `no provider is set up`, naming `lev setup` and
   `lev providers order <name>`, and a stage that lists no model at all is refused unless
-  `override_model` or `fallback_model` supplies one. A stage that names its provider as
-  `provider/model`, and a `fallback_order` entry, still reach any configured provider (#1099).
+  `override_model` or `fallback_model` supplies one (#1099).
+- **Breaking.** The same rule holds for a stage that names its provider. An entry such as
+  `openai/gpt-5.5` is passed over while `openai` is configured and not in `provider_order`, the
+  way it is while `openai` has no key: the stage moves on to its next model, your
+  `fallback_model` or the `fallback_order`, and is refused at spawn, naming the provider and the
+  setting, only when nothing else is left. A `fallback_order` entry on a provider outside the
+  order is skipped, and `--model provider/model` on one is refused. If a blueprint of yours names
+  a provider you have a key for and never listed, add it with `lev providers order`.
+  `lev providers` marks a configured provider that is not in the order, `lev doctor` names it in
+  its `config` line and fails `resolve` for a `--model` on it, and `lev validate` counts such an
+  entry as unreachable. An embedded world needs `AgentWorldBuilder::provider_order` to name
+  every provider its stages run on; a provider that is registered and not named runs nothing.
 - A config that still has `default_provider = "x"` keeps routing where it did: it loads with `x`
   as the first entry of `provider_order`, ahead of whatever the order already held, and the load
   and `lev doctor` say so. `lev update` rewrites the file, as does any save. A config with no

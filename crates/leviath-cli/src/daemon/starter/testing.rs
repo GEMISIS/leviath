@@ -20,14 +20,28 @@ use crate::config::Config;
 use crate::daemon::resolve_env::DaemonEnv;
 use crate::daemon::tool_service::CliToolService;
 
+/// `config`, with every provider `registry` holds in its provider order when
+/// the order is empty: a test that hands over a registry means its providers
+/// to be set up, and one that writes an order of its own keeps it.
+pub(crate) fn listing(mut config: Config, registry: &leviath_runtime::ProviderRegistry) -> Config {
+    if config.providers.provider_order.is_empty() {
+        let mut names = registry.resolvable_names();
+        names.sort();
+        config.providers.provider_order = names;
+    }
+    config
+}
+
 /// A starter over `config` and `registry`, keeping its runs under `runs_dir`
 /// and its run files' blobs in memory. Nothing it reads or writes is the
-/// developer's own: the policy files it reads do not exist.
+/// developer's own: the policy files it reads do not exist. The config's
+/// provider order is filled by [`listing`].
 pub(crate) fn starter(
     config: Config,
     registry: leviath_runtime::ProviderRegistry,
     runs_dir: &Path,
 ) -> DaemonStarter {
+    let config = listing(config, &registry);
     let hub = InteractionHub::new();
     let shared_mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
     let pool = crate::daemon::mcp_pool::McpPool::for_daemon(shared_mcp.clone(), &[]);
@@ -123,7 +137,7 @@ pub(crate) fn env_for(world: &World, deps: TestDeps<'_>) -> DaemonEnv {
         .map(|p| p.0.mcp_overrides.clone())
         .unwrap_or_default();
     DaemonEnv {
-        config: Arc::new(deps.config.clone()),
+        config: Arc::new(listing(deps.config.clone(), &registry)),
         registry,
         agents_dir: leviath_core::paths::agents_dir(),
         workdir_root: None,

@@ -628,8 +628,8 @@ impl Wizard {
         // arrangement the form (or the config it loaded) already holds for
         // still-configured providers. A provider configured since is NOT
         // added on its own: being in the priority is a choice made in the
-        // reorder modal, and a provider left out of it still runs any stage
-        // that names it. The list is never left empty while something is
+        // reorder modal, and a provider left out of it runs nothing. The
+        // list is never left empty while something is
         // configured, because a provider is set up only once it is in the
         // order: when nothing of the prior arrangement is still configured,
         // it is seeded with the first configured provider.
@@ -656,8 +656,7 @@ impl Wizard {
                 label: "Provider priority",
                 help: "The providers a bare model name may run on, best first. The first is \
                        where your override and fallback models run. Enter opens a modal to drag the order and to add or \
-                       drop configured providers; one left out is never chosen for a bare \
-                       model name, and still runs any stage that names it as provider/model.",
+                       drop configured providers; one left out is not set up, and no stage runs on it.",
                 value: FieldValue::Order(order),
             },
             Field {

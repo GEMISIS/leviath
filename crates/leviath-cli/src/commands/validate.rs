@@ -353,18 +353,18 @@ fn print_model_resolution(
     }
 }
 
-/// Whether anything registered here can run this entry.
+/// Whether anything set up here can run this entry.
 ///
-/// A pinned entry needs its provider registered. An open one needs a provider
-/// in the preference to claim the model, which is the same question the
-/// resolver asks: a provider outside the preference never serves a bare name.
+/// A pinned entry needs its provider configured and in the provider order.
+/// An open one needs a provider in the order to claim the model. Both are
+/// the question the resolver asks: a provider outside the order runs nothing.
 fn model_is_reachable(
     entry: &ModelRef,
     defaults: &leviath_runtime::pipeline::ModelDefaults,
     registry: &leviath_runtime::ProviderRegistry,
 ) -> bool {
     if let Some(provider) = &entry.provider {
-        return registry.has(provider.as_str());
+        return defaults.is_set_up(provider.as_str(), registry);
     }
     let key = model_key(entry.model.as_str());
     registry
@@ -433,7 +433,7 @@ fn model_resolution_lines(
             && !model_is_reachable(first, &defaults, registry)
         {
             lines.push(format!(
-                "  {:<16}   prefers {}, which no configured provider serves - running {model}",
+                "  {:<16}   prefers {}, which no provider set up here serves - running {model}",
                 "", first.model
             ));
         }
@@ -985,15 +985,21 @@ system_prompt = "hi"
         }
     }
 
-    /// A registry with an Anthropic key and, when asked, an OpenRouter one.
-    /// Ollama is probed away: whether this machine runs it is not part of
-    /// what these tests are about.
-    fn keyed_config(default_provider: &str) -> crate::config::Config {
+    /// A config with an Anthropic key and an OpenRouter one, both in the
+    /// provider order with `first` leading. Ollama is probed away: whether
+    /// this machine runs it is not part of what these tests are about.
+    fn keyed_config(first: &str) -> crate::config::Config {
+        let mut order = vec![first.to_string()];
+        for name in ["anthropic", "openrouter"] {
+            if name != first {
+                order.push(name.to_string());
+            }
+        }
         crate::config::Config {
             override_model: None,
             openrouter_api_key: Some("test-key".to_string()),
             providers: crate::config::ProviderConfig {
-                provider_order: vec![default_provider.to_string()],
+                provider_order: order,
                 anthropic_api_key: Some("test-key".to_string()),
                 ..Default::default()
             },
@@ -1236,20 +1242,18 @@ system_prompt = "hi"
         assert!(
             lines
                 .iter()
-                .any(|l| l.contains("provider_order = [openrouter]")
+                .any(|l| l.contains("provider_order = [openrouter, anthropic]")
                     && l.contains("override_model = (unset), fallback_model = (unset)")),
             "and the setting responsible has to be named: {lines:#?}"
         );
 
-        // No preference expressed: blueprint order stands on its own and
-        // there is no setting to name, so the trailing line is omitted.
-        let mut no_preference = keyed_config("anthropic");
-        no_preference.providers.provider_order.clear();
-        let lines = model_resolution_lines(&graph, &no_preference, &registry_for(&no_preference));
+        // No provider in the order: both keys are there and neither is set
+        // up, so the stage cannot run, and there is no setting to name.
+        let mut no_order = keyed_config("anthropic");
+        no_order.providers.provider_order.clear();
+        let lines = model_resolution_lines(&graph, &no_order, &registry_for(&no_order));
         assert!(
-            lines
-                .iter()
-                .any(|l| l.contains("anthropic/claude-sonnet-5")),
+            lines.iter().any(|l| l.contains("cannot run here")),
             "{lines:#?}"
         );
         assert!(
@@ -1460,7 +1464,8 @@ tools = ["submit_output"]
                 // provider and the one warning is the one this test is about.
                 std::fs::write(
                     cfg_dir.join("config.toml"),
-                    "[providers]\nanthropic_api_key = \"test-key\"\n",
+                    "[providers]\nanthropic_api_key = \"test-key\"\n\
+                     provider_order = [\"anthropic\"]\n",
                 )
                 .unwrap();
                 let dir = tempfile::tempdir().unwrap();

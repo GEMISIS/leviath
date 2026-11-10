@@ -179,7 +179,7 @@ pub fn compaction_routes(
     };
     let about = Resolving::Compaction;
     let head = resolve_candidates(&choice, None, defaults, registry, &[], about).remove(0);
-    if !registry.has(&head.provider) {
+    if !defaults.is_set_up(&head.provider, registry) {
         return Ok(CompactionPlan {
             routes: named.to_vec(),
             notes: Vec::new(),

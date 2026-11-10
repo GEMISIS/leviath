@@ -44,6 +44,7 @@
 //!         api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
 //!         ..ProviderCreds::simple("anthropic")
 //!     })
+//!     .provider_order(["anthropic"])
 //!     .workdir(std::env::current_dir()?)
 //!     .build()?;
 //!

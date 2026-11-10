@@ -38,6 +38,14 @@ pub(crate) fn registry(names: &[&str]) -> ProviderRegistry {
     r
 }
 
+/// Model defaults whose provider order is `names`, best first.
+pub(crate) fn ordered(names: &[&str]) -> ModelDefaults {
+    ModelDefaults {
+        provider_order: names.iter().map(ToString::to_string).collect(),
+        ..ModelDefaults::default()
+    }
+}
+
 /// A stage with only a name and a model list.
 pub(crate) fn stage(models: &[&str]) -> StageDef {
     serde_json::from_value(serde_json::json!({
@@ -120,7 +128,7 @@ fn a_stage_gets_its_own_model_on_a_registered_provider_with_its_window() {
             ModelRef::parse("mock/backup").unwrap(),
             ModelRef::parse("ghost/unregistered").unwrap(),
         ],
-        ..Default::default()
+        ..ordered(&["mock"])
     };
     let plan = choose_model(
         &stage(&["mock/gpt-mock"]),
@@ -146,7 +154,7 @@ fn a_requested_model_wins_and_an_unservable_stage_is_an_issue() {
     let plan = choose_model(
         &stage(&["mock/gpt-mock"]),
         Some(&requested),
-        &ModelDefaults::default(),
+        &ordered(&["mock"]),
         &r,
     )
     .unwrap();
@@ -495,7 +503,7 @@ fn a_plan_carries_the_models_longest_reply() {
     let plan = choose_model(
         &stage(&["mock/gpt-mock"]),
         None,
-        &ModelDefaults::default(),
+        &ordered(&["mock"]),
         &registry(&["mock"]),
     )
     .unwrap();
@@ -594,7 +602,7 @@ fn compaction_models_resolve_as_a_stages_do() {
     );
     let overridden = ModelDefaults {
         override_model: Some("big".into()),
-        ..prefer(&["other"])
+        ..prefer(&["other", "cfg"])
     };
     assert_eq!(
         routes(&["cfg/small"], &overridden),
@@ -617,7 +625,7 @@ fn a_compaction_model_is_refused_only_where_it_would_keep_the_context() {
             zero_requested: true,
             ..Default::default()
         },
-        ..ModelDefaults::default()
+        ..ordered(&["openai"])
     };
     let r = registry(&["openai"]);
     let model = |m: &str| vec![ModelRef::parse(m).unwrap()];
@@ -627,7 +635,7 @@ fn a_compaction_model_is_refused_only_where_it_would_keep_the_context() {
         "{refused}"
     );
     assert_eq!(
-        compaction_routes(&model("openai/gpt-5.5"), &ModelDefaults::default(), &r)
+        compaction_routes(&model("openai/gpt-5.5"), &ordered(&["openai"]), &r)
             .map(|plan| plan.routes),
         Ok(model("openai/gpt-5.5"))
     );
@@ -640,7 +648,7 @@ fn a_compaction_model_its_provider_does_not_carry_is_refused() {
     let mut r = ProviderRegistry::new();
     r.register("cfg".to_string(), Arc::new(Serves(&["small"])));
     let named = [ModelRef::parse("cfg/big").unwrap()];
-    let refused = compaction_routes(&named, &ModelDefaults::default(), &r).unwrap_err();
+    let refused = compaction_routes(&named, &ordered(&["cfg"]), &r).unwrap_err();
     assert!(
         refused.starts_with("the compaction model names cfg/big, which provider 'cfg'"),
         "{refused}"

@@ -17,7 +17,7 @@ batch_tool_hint = true
 shell_hint = true
 
 [providers]
-provider_order = ["anthropic", "openrouter"]
+provider_order = ["anthropic", "openrouter", "openai"]
 anthropic_api_key = "sk-ant-example"
 openai_api_key = "sk-example"
 google_api_key = "AIza-example"

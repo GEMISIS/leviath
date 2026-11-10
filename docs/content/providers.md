@@ -246,7 +246,7 @@ In order:
    `provider_order = ["ollama"]` with `override_model = "qwen3.8:latest"` runs on `qwen3.8:latest`,
    and the blueprint's own `qwen3.5:9b` becomes the failover. The name says what it does: it
    overrides the blueprint.
-4. The first entry in `models` whose provider is configured.
+4. The first entry in `models` whose provider is set up: configured, and in your order.
 5. Your `fallback_model`, when it is set, on the first provider in your order. It sits behind every
    model the stage named and is never moved ahead of them, so it only ever carries a stage none of
    whose own models is configured here.
@@ -256,8 +256,14 @@ In order:
 
 A provider is set up once it is in `provider_order`, and nothing stands in for an order that is
 empty: no provider is assumed. A stage that leaves its route open then fails at spawn with
-`no provider is set up`, and the fix is `lev setup` or `lev providers order <name>`. A stage that
-names its provider as `provider/model` still runs on any configured provider, listed or not.
+`no provider is set up`, and the fix is `lev setup` or `lev providers order <name>`.
+
+That holds for a stage that names its provider too. An entry such as `openai/gpt-5.5` is passed
+over while `openai` is configured and not in the order, exactly as it is while `openai` has no
+key, and the stage carries on down the chain above. Only a stage with nothing else to run on
+stops: it is refused at spawn, naming the providers that are configured and not listed. A
+`fallback_order` entry on a provider outside the order is left out the same way, and
+`--model provider/model` is refused when that provider is not in the order.
 
 Everything below the first line is the failover chain, in that same order, so a stage that starts on
 your override still has the blueprint's own entries to fall back to.
@@ -1065,8 +1071,8 @@ models included. The differences:
 - **Cost is recorded as zero.** The subscription pays. `lev auth status` and `lev providers quota`
   show this week's and this month's use against the plan's limits, and a rate limit with no
   `Retry-After` waits for the billing period to reset.
-- **It never wins a bare model name.** Like Codex, it is only used when named: `grok/grok-4.6`,
-  a `fallback_order` entry, or `provider_order`.
+- **It runs nothing until it is in `provider_order`.** Like Codex, it is only used once you
+  list it there.
 - **Retention.** xAI publishes no retention policy for this route. `lev providers retention` quotes
   the account's coding data opt-out as xAI reports it.
 
@@ -1183,13 +1189,12 @@ provider on would otherwise move billing for every such stage with one line of
 config and nothing saying so.
 
 So it is only reachable deliberately, which is the rule for every configured
-provider: an explicit `codex/...` in a blueprint or `--model`, an explicit
-`fallback_order` entry, or naming it in
-[`provider_order`](/docs/configuration#provider-preference-order). Naming it in
-`provider_order` is how you say a bare name
+provider: nothing runs on it until you name it in
+[`provider_order`](/docs/configuration#provider-preference-order). Naming it there
+is how you say a stage
 *should* run on the subscription. Put `codex` first there, and a stage that lists
 `gpt-5.6-sol` with no provider runs on your plan, ahead of an OpenAI key that
-also serves it. Leave it out and no bare name ever lands on it.
+also serves it. Leave it out and nothing lands on it, a `codex/...` entry included.
 
 ### Measured caveats
 

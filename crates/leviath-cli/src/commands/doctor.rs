@@ -378,11 +378,31 @@ fn misdirected_rate_limits(config: &Config) -> Vec<String> {
     misdirected
 }
 
+/// The providers this config holds a credential for and leaves out of
+/// `[providers] provider_order`, each rendered as one report line.
+///
+/// A provider is set up once it is in the order, so one left out runs
+/// nothing, and a stage that names it is refused unless something else can
+/// carry it. Nothing about the config is broken, which is why it is a note.
+fn unlisted_providers(config: &Config) -> Vec<String> {
+    let order = config.provider_order();
+    crate::commands::setup::catalog::configured(config)
+        .into_iter()
+        .filter(|name| !order.contains(name))
+        .map(|name| {
+            format!(
+                "\"{name}\" is configured but not in provider_order, so nothing runs on \
+                 it (`lev providers order` lists it)"
+            )
+        })
+        .collect()
+}
+
 /// `[providers] provider_order` entries naming a provider that is not
 /// configured, each rendered as one report line.
 ///
-/// The order is only a preference, so a name nothing serves is not an error -
-/// it just never wins anything, silently. A provider counts as known if it is
+/// A name nothing serves is not an error - it just never wins anything,
+/// silently. A provider counts as known if it is
 /// one of the built-ins the wizard offers or a `[model_providers.<name>]`
 /// script entry, so a real custom provider does not read as a typo.
 fn misdirected_provider_order(config: &Config) -> Vec<String> {
@@ -567,6 +587,8 @@ fn config_check(config: &Config, registry: &ProviderRegistry) -> Check {
     // A provider_order entry that names nothing configured never wins a route
     // and says nothing about it, the same silent kind of misconfiguration.
     notes.extend(misdirected_provider_order(config));
+    // And the other way round: a key with no place in the order.
+    notes.extend(unlisted_providers(config));
     // A `[mime_types]` row that will not load is skipped by the daemon, which
     // then types that file by the built-in table instead of the operator's.
     notes.extend(malformed_mime_types(config));

@@ -184,6 +184,7 @@ pub use inference::{CaptureModelInput, MODEL_INPUT_ASSEMBLY_VERSION, with_effort
 pub(crate) use inference::{
     InFlightWork, abort_terminal_work, dispatch_inference, retry_policy_for, track_in_flight,
 };
+mod model_names;
 mod resolve;
 pub use resolve::{
     Candidate, HeadSource, ModelDefaults, bare_user_model, is_unread_catalog_refusal, model_key,

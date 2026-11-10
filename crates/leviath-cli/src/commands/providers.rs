@@ -5,10 +5,10 @@
 //! configured provider serves it. Setting it here writes the same key `lev
 //! setup` and `PUT /api/config` write, so the three agree on one file.
 //!
-//! Naming a provider in the order is also how a subscription transport (Codex)
-//! becomes eligible for a bare name: it is otherwise reachable
-//! only by an explicit `provider/model`, so that turning it on never silently
-//! moves billing. Listing it here is the deliberate choice that opts it in.
+//! Naming a provider in the order is what sets it up: one left out runs
+//! nothing, whether a stage names it or not, so that configuring a
+//! subscription transport (Codex) never silently moves billing. Listing it
+//! here is the deliberate choice that opts it in.
 
 pub(crate) mod quota;
 
@@ -106,11 +106,10 @@ struct ListArgs {
 #[derive(Args)]
 struct OrderArgs {
     /// Provider names in priority order, best first (e.g. `codex openrouter
-    /// openai`). A provider left out keeps its old priority; a subscription
-    /// left out stays excluded from a bare model name.
+    /// openai`). The list replaces the order: a provider left out is not set
+    /// up, and no stage runs on it.
     names: Vec<String>,
-    /// Clear the order. With none, no provider serves a bare model name, so
-    /// only a stage that names its provider runs.
+    /// Clear the order. With none, no provider is set up, so no stage runs.
     #[arg(long, conflicts_with = "names")]
     clear: bool,
 }
@@ -476,7 +475,7 @@ fn set_order(order: OrderArgs, env: &ProvidersEnv) -> anyhow::Result<()> {
 
     if new_order.is_empty() {
         println!(
-            "Cleared the provider priority. No provider serves a bare model name now; \
+            "Cleared the provider priority. No provider is set up now, so no stage runs; \
              `lev providers order <name>...` lists one."
         );
     } else {
@@ -512,10 +511,10 @@ fn list(json: bool, env: &ProvidersEnv) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    println!("Provider priority for a bare model name (best first):");
+    println!("Provider priority (best first):");
     if order.is_empty() {
         println!(
-            "  (none set - no provider serves a bare model name; `lev providers order <name>...` to list one)"
+            "  (none set - no provider is set up, so no stage runs; `lev providers order <name>...` to list one)"
         );
     } else {
         for (i, name) in order.iter().enumerate() {
@@ -533,7 +532,11 @@ fn list(json: bool, env: &ProvidersEnv) -> anyhow::Result<()> {
     for p in catalog::offered() {
         if configured.contains(&p.id) {
             any = true;
-            println!("  {:<12} {}", p.id, p.display);
+            let mark = match order.iter().any(|name| name == p.id) {
+                true => "",
+                false => "  (not in the priority - runs nothing until listed)",
+            };
+            println!("  {:<12} {}{mark}", p.id, p.display);
         }
     }
     if !any {
@@ -1035,6 +1038,18 @@ retention = "zero""#,
         let mut config = Config::default();
         config.providers.anthropic_api_key = Some("sk-test".to_string());
         config.providers.provider_order = vec!["anthropic".to_string()];
+        let (_d, env) = env_with(config);
+        execute_with(ProvidersArgs::list_for_test(), &env)
+            .await
+            .expect("table list");
+    }
+
+    /// A provider with a key and no place in the order is listed with the
+    /// reason nothing runs on it.
+    #[tokio::test]
+    async fn list_marks_a_configured_provider_left_out_of_the_order() {
+        let mut config = Config::default();
+        config.providers.anthropic_api_key = Some("sk-test".to_string());
         let (_d, env) = env_with(config);
         execute_with(ProvidersArgs::list_for_test(), &env)
             .await

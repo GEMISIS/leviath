@@ -3637,7 +3637,7 @@ fn registry_serving(providers: &[(&str, &str)]) -> leviath_runtime::ProviderRegi
 }
 
 fn zero_retention_config() -> crate::config::Config {
-    let mut config = crate::config::Config::default();
+    let mut config = crate::test_support::config_preferring(&["openai", "ollama"]);
     config.providers.zero_retention = true;
     config
 }

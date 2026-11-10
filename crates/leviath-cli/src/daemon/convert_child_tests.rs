@@ -202,7 +202,7 @@ async fn over_pipes(
 async fn a_child_converts_exactly_as_the_daemon_does() {
     let home = Home::new();
     let runs = home.runs();
-    let config = crate::config::Config::default();
+    let config = crate::test_support::config_preferring(&["openai"]);
     let agents = fixture("agents");
 
     let pool_a = pool();
@@ -347,7 +347,7 @@ impl Write for Refuses {
 /// had done. A line that is not a message is passed over.
 #[tokio::test]
 async fn the_daemon_stops_on_a_child_that_ends_goes_quiet_or_cannot_be_answered() {
-    let config = crate::config::Config::default();
+    let config = crate::test_support::config_preferring(&["openai"]);
     let agents = fixture("agents");
     let pool = pool();
     let start = at_start(&config, &agents, &pool, None);
@@ -546,7 +546,7 @@ fn child_stub() {
 /// died before it reported (`die-at-done`).
 #[tokio::test]
 async fn the_daemon_converts_in_a_child_and_takes_over_from_one_that_fails() {
-    let config = crate::config::Config::default();
+    let config = crate::test_support::config_preferring(&["openai"]);
     let agents = fixture("agents");
     let modes = [
         ("serve", 60),
@@ -587,7 +587,7 @@ async fn the_daemon_converts_in_a_child_and_takes_over_from_one_that_fails() {
 /// failed to convert before are left as they are.
 #[tokio::test]
 async fn nothing_to_convert_starts_no_child() {
-    let config = crate::config::Config::default();
+    let config = crate::test_support::config_preferring(&["openai"]);
     let agents = fixture("agents");
     let home = Home::new();
     let runs = home.runs();
