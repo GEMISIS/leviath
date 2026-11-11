@@ -278,7 +278,9 @@ pub(crate) async fn setup_daemon_host_with(
     let held_keys =
         tokio::task::spawn_blocking(move || leviath_runtime::host::held_keys(&keys_dir));
     board.begin("bringing back unfinished runs", 0);
-    mcp_pool.warm_recovered(&runs_dir).await;
+    // Held until the host is built, by which time every run that came back
+    // holds its own servers; one that did not leaves them to the idle timer.
+    let _recovering = mcp_pool.warm_recovered(&runs_dir).await;
     // The index `lev ps` and the dashboard list runs from follows the runs
     // as they change.
     crate::run_index::keep_fresh(&runtime, runs_dir.clone());
@@ -314,19 +316,11 @@ pub(crate) async fn setup_daemon_host_with(
 /// tears down its sandbox via [`CliToolService::reap`]. Factored out (rather than
 /// an inline closure) so its body is exercised by a unit test - the daemon itself
 /// only ever fires the reaper from the private `serve()` loop.
-fn make_reaper(
-    tool_service: Arc<CliToolService>,
-    mcp_pool: Arc<crate::daemon::mcp_pool::McpPool>,
-) -> leviath_runtime::host::Reaper {
+///
+/// The run's MCP servers need nothing here: its hold on them is a component
+/// of the entity, and the despawn after the reap lets go of them.
+fn make_reaper(tool_service: Arc<CliToolService>) -> leviath_runtime::host::Reaper {
     Box::new(move |world, entity| {
-        // Release the run's MCP leases before the entity goes away; servers
-        // nobody else holds get an idle-disconnect timer.
-        if let Some(lease) = world
-            .world()
-            .get::<crate::daemon::mcp_pool::McpLease>(entity)
-        {
-            mcp_pool.release(lease);
-        }
         // A finished run deletes what it put in providers' file storage.
         leviath_runtime::provider_files::forget_finished(world.world(), entity);
         tool_service.reap(entity)
@@ -618,7 +612,7 @@ pub fn build_host(parts: HostParts) -> WorldHost {
     // its per-agent tool state, which nothing else releases. Factored into
     // `make_reaper` so the closure body is unit-testable - the daemon only ever
     // drives it from `serve()`.
-    host.set_reaper(make_reaper(tool_service.clone(), parts.mcp_pool.clone()));
+    host.set_reaper(make_reaper(tool_service.clone()));
 
     // On the way out: every container a run still holds is removed, and the
     // removals reaps queued are waited for, so a stopped daemon leaves none
@@ -842,7 +836,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(leviath_mcp::ToolExecutor::new())),
             &[],
         );
-        let mut reaper = make_reaper(tool_service.clone(), pool.clone());
+        let mut reaper = make_reaper(tool_service.clone());
         // No registered state for this entity → a clean no-op (the reap-branch
         // logic itself is covered by CliToolService::reap's own unit test).
         let entity = bevy_ecs::entity::Entity::from_raw_u32(1)
@@ -850,9 +844,10 @@ mod tests {
         reaper(&mut world, entity);
         assert!(tool_service.take(entity).is_none());
 
-        // An entity that holds MCP servers hands them back on reap.
+        // An entity that holds MCP servers hands them back when the host
+        // despawns it after the reap.
         let server = leviath_mcp::MCPServerConfig::stdio("held", "true", vec![]);
-        let lease = pool.lease_servers(std::slice::from_ref(&server), "reaped-run");
+        let lease = pool.lease_servers(std::slice::from_ref(&server));
         assert_eq!(pool.leased_holders(&server), 1);
         let with_meta = world.spawn_agent((
             lease,
@@ -877,12 +872,15 @@ mod tests {
                 model_override: None,
             },
         ));
-        reaper(&mut world, with_meta.entity());
-        assert!(tool_service.take(with_meta.entity()).is_none());
+        let reaped = with_meta.entity();
+        reaper(&mut world, reaped);
+        assert!(tool_service.take(reaped).is_none());
+        assert_eq!(pool.leased_holders(&server), 1, "still on the entity");
+        world.world_mut().despawn(reaped);
         assert_eq!(
             pool.leased_holders(&server),
             0,
-            "the reap released the run's servers"
+            "the despawn let go of the run's servers"
         );
     }
 

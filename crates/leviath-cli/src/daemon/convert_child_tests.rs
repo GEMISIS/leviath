@@ -138,7 +138,7 @@ impl Home {
 fn at_start<'a>(
     config: &'a crate::config::Config,
     agents: &'a Path,
-    pool: &'a McpPool,
+    pool: &'a Arc<McpPool>,
     child: Option<ChildCmd>,
 ) -> AtStart<'a> {
     let mut registry = leviath_runtime::ProviderRegistry::new();

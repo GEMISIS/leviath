@@ -170,6 +170,15 @@ one run ends, its server is torn down after `[limits] mcp_idle_disconnect_secs`.
 live run still declares stays up, and so does every other run's server of the same name. If a
 server exits, only the runs that declared that exact server lose its tools.
 
+A server is started before its run is, because the stage's tools are bound from the list the
+server gives. A run that is then refused (a validator tool set to `ask`, a model nothing serves,
+a run file that cannot be written) lets go of its servers the same way a run that ended does:
+each one is torn down after `mcp_idle_disconnect_secs` unless a live run declares it too. A spawn
+the daemon is only asked to check, not start, does the same. The servers
+a run's fan-out workers declare are started with the run, so its first worker has their tools,
+and stay up for as long as the run does. A run paged back in, or continued, after its servers
+were torn down starts them again before it carries on.
+
 A run that declares a server with the same name as a global `[[mcp_servers]]` entry, but a
 different spec, reaches its own. Every other run keeps reaching the global one.
 

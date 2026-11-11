@@ -142,10 +142,9 @@ async fn bind_one(
         run.state.status = RunStatus::Paused;
         run.state.phase = leviath_runtime::state::PipelinePhase::Paused;
     }
-    let lease = starter.mcp_pool.lease_servers(
-        &crate::daemon::starter::mcp_configs(&run.spec.graph),
-        &run_id,
-    );
+    let lease = starter
+        .mcp_pool
+        .lease_servers(&crate::daemon::starter::mcp_configs(&run.spec.graph));
     Ok(Bound {
         run,
         bindings: bindings.with(lease),
@@ -293,6 +292,13 @@ pub(crate) async fn bind_paged(
         _ => false,
     };
     starter.providers.refresh(&config);
+    // A run that was away longer than the idle window finds its own MCP
+    // servers torn down: they are connected again, and held until the run
+    // holds them itself or is not placed.
+    let _held = starter
+        .mcp_pool
+        .connect_held(&crate::daemon::starter::mcp_configs(&run.spec.graph))
+        .await;
     bind_one(starter, run, revive)
         .await
         .map_err(|held| match held {

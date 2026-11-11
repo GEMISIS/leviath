@@ -93,6 +93,17 @@ same list.
   already said it was sent in a circle. The hint now names the spawn's `launch.allow` and, for an
   installed blueprint, the user's `[agent_tool_permissions.<name>]` and `[security]
   allow_blueprint_permissions`, and keeps the old advice only where it works.
+- An MCP server the daemon starts for a spawn that does not go ahead no longer runs until the
+  daemon stops. A blueprint's own server is started before the spawn is bound, since the stage's
+  tools are bound from the list it gives, and a spawn refused at binding (a validator tool set to
+  `ask`), at resolving, or while its run file was written left the process behind, as did a spawn
+  only checked, the servers of a parent's fan-out workers, a fan-out worker never placed, and an
+  unfinished run that could not be resumed at start. A server is now held by whatever needs it,
+  a spawn while it starts and a run while it is in the world, and once nothing holds it, it is
+  torn down after `[limits] mcp_idle_disconnect_secs` like the server of a run that ended. A server
+  a live run declares stays up (#1110).
+- A run paged back in, or continued, after its own MCP servers were torn down starts them again
+  before it is bound. It was held instead, for an MCP server "no longer configured or connected".
 - Media models are routed by what they make, after a sweep of every model Google, OpenRouter,
   OpenAI and Meta list:
   - Google's `gemini-nano-banana-2.1` was run as a chat model and failed on its token budget. A

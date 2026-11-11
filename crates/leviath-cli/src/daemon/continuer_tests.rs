@@ -184,3 +184,57 @@ async fn a_summary_no_provider_here_can_write_refuses_the_continuation() {
     );
     assert_eq!(std::fs::read_dir(runs.path()).unwrap().count(), 1);
 }
+
+/// A run continued after its own MCP server went idle and was torn down
+/// connects the server again before it is bound, and holds it once placed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_run_continued_after_its_mcp_server_went_idle_connects_it_again() {
+    let (_stub_dir, stub) = crate::daemon::starter::testing::stub_server_py();
+    let (agent, runs) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let manifest = crate::daemon::starter::testing::blueprint_with_mcp(agent.path(), &stub);
+    let with_fake = || {
+        let mut registry = registry();
+        registry.register(
+            "fake".to_string(),
+            Arc::new(FakeProvider::new().replying("done").context_window(100_000)),
+        );
+        registry
+    };
+    // Started as the daemon starts a run, its server connected first so the
+    // run records the server's tools, and then finished.
+    let first = starter(Config::default(), with_fake(), runs.path());
+    let started = first
+        .spawn(
+            crate::daemon::starter::testing::task_request(&manifest, "t"),
+            leviath_runtime::spec::env::Caller::TopLevel,
+        )
+        .await
+        .expect("the run starts");
+    let run_id = started.spec.run_id.to_string();
+    let server = crate::daemon::starter::mcp_configs(&started.spec.graph).remove(0);
+    drop(started);
+    let path = runs
+        .path()
+        .join(&run_id)
+        .join(leviath_core::files::RUN_FILE);
+    let mut writer = RunFileWriter::open(&path, Default::default()).unwrap();
+    let mut next = writer.state().clone();
+    next.status = RunStatus::Complete;
+    writer.record(next, 5, Vec::new()).unwrap();
+    drop(writer);
+
+    // A pool with nothing connected: the run's server is gone.
+    let starter = Arc::new(starter(Config::default(), with_fake(), runs.path()));
+    let place = prepare(starter.clone(), job(&run_id, false))
+        .await
+        .unwrap_or_else(|issues| panic!("the run continues: {issues}"));
+    assert_eq!(starter.mcp_pool.leased_holders(&server), 1);
+    let mut world = world_for(&starter);
+    let (placed, _) = place(&mut world).unwrap();
+    assert_eq!(placed, run_id);
+    assert_eq!(
+        starter.mcp_pool.leased_holders(&server),
+        1,
+        "the run holds it"
+    );
+}

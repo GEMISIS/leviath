@@ -493,3 +493,193 @@ binds = [{ region = "task" }]
         .unwrap();
     assert_eq!(state.status, RunStatus::Error(issues.to_string()));
 }
+
+/// A stdio MCP server with one tool, `check`, that writes a counter to the
+/// file named by its first argument every 20 ms while its process lives, so
+/// a test sees the process end on every platform without asking the OS.
+/// Bounded, so one a failing test leaves behind stops by itself.
+fn beating_server(dir: &Path) -> PathBuf {
+    let path = dir.join("beating.py");
+    let beat = "import sys, threading, time\n\
+                def _beat(path=sys.argv[1]):\n    \
+                    for n in range(3000):\n        \
+                        with open(path, 'w') as f:\n            \
+                            f.write(str(n))\n        \
+                        time.sleep(0.02)\n\
+                threading.Thread(target=_beat, daemon=True).start()\n";
+    let stub = crate::test_support::McpStub::new()
+        .tool("check", Some("judges an answer"))
+        .input_schema(r#"{"type": "object", "properties": {"content": {"type": "string"}}}"#)
+        .replying("fine");
+    std::fs::write(&path, format!("{beat}{}", stub.source())).unwrap();
+    path
+}
+
+/// Whether the server beating into `beat` is still running: its counter
+/// moves within a few beats.
+async fn beating(beat: &Path) -> bool {
+    let before = std::fs::read_to_string(beat).unwrap_or_default();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    std::fs::read_to_string(beat).unwrap_or_default() != before
+}
+
+/// Wait for the server beating into `beat` to have started.
+async fn started(beat: &Path) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !beating(beat).await {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the server never started"
+        );
+    }
+}
+
+/// Wait for the server beating into `beat` to stop, failing after ten
+/// seconds: far past the pool's grace window in these tests.
+async fn stopped(beat: &Path) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while beating(beat).await {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the MCP server is still running"
+        );
+    }
+}
+
+/// `[[mcp_servers]]` entry `name` running the beating server at `script`,
+/// beating into `beat`.
+fn server_entry(name: &str, script: &Path, beat: &Path) -> String {
+    format!(
+        "{{ name = \"{name}\", command = \"python3\", args = ['{}', '{}'] }}",
+        script.display(),
+        beat.display()
+    )
+}
+
+/// A one-stage blueprint in `dir` declaring `servers` (TOML entries), with
+/// `stage` added to its stage and `permissions` as its tool permissions.
+fn declaring(dir: &Path, servers: &[String], stage: &str, permissions: &str) -> PathBuf {
+    manifest_in(
+        dir,
+        &format!(
+            r#"[blueprint]
+name = "judged"
+version = "0.1.0"
+
+[graph]
+entry = "main"
+mcp_servers = [{}]
+tool_permissions = {{ {permissions} }}
+
+[[graph.stages]]
+name = "main"
+system_prompt = "judge"
+model = {{ models = [{{ provider = "fake", model = "m" }}] }}
+{stage}
+
+[graph.layout]
+regions = [{{ name = "task", kind = "pinned", budget = 200 }}]
+total_budget_tokens = 200
+
+[[graph.inputs]]
+name = "task"
+type = {{ kind = "text", multiline = true }}
+binds = [{{ region = "task" }}]
+"#,
+            servers.join(", ")
+        ),
+    )
+}
+
+/// A starter whose MCP servers go idle after 20 ms rather than a minute.
+fn quick_starter(runs: &Path) -> DaemonStarter {
+    let mut starter = starter(Config::default(), registry(), runs);
+    starter.mcp_pool = Arc::new(
+        crate::daemon::mcp_pool::McpPool::new(
+            starter.shared_mcp.clone(),
+            std::collections::HashSet::new(),
+        )
+        .with_idle_disconnect(std::time::Duration::from_millis(20)),
+    );
+    starter
+}
+
+/// A spawn whose validator tool, served by its own stdio MCP server, is set
+/// to ask is refused at its binding. The server had to be started to bind
+/// the stage's tools; the refusal leaves its process to the idle timer,
+/// which ends it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_spawn_refused_at_its_binding_stops_the_mcp_server_it_started() {
+    let dir = tempfile::tempdir().unwrap();
+    let runs = tempfile::tempdir().unwrap();
+    let script = beating_server(dir.path());
+    let beat = dir.path().join("own.beat");
+    let manifest = declaring(
+        dir.path(),
+        &[server_entry("own", &script, &beat)],
+        "tools = [\"own__check\", \"submit_output\"]\noutput = { validator_tool = { tool = \"own__check\" } }",
+        "\"own__check\" = \"ask\"",
+    );
+    let starter = quick_starter(runs.path());
+
+    let issues = starter
+        .spawn(task_request(&manifest, "t"), Caller::TopLevel)
+        .await
+        .expect_err("the validator would ask, with nobody there to answer");
+    assert!(issues.to_string().contains("set to ask"), "{issues}");
+    stopped(&beat).await;
+}
+
+/// A refused spawn lets go of the servers it declared, and a server a live
+/// run holds stays up: only the refused spawn's own one is stopped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_server_shared_with_a_live_run_outlives_a_refused_spawn() {
+    let dir = tempfile::tempdir().unwrap();
+    let runs = tempfile::tempdir().unwrap();
+    let script = beating_server(dir.path());
+    let (shared_beat, own_beat) = (dir.path().join("shared.beat"), dir.path().join("own.beat"));
+    let shared = server_entry("shared", &script, &shared_beat);
+    let live_dir = dir.path().join("live");
+    std::fs::create_dir_all(&live_dir).unwrap();
+    let live = declaring(
+        &live_dir,
+        std::slice::from_ref(&shared),
+        "tools = [\"shared__check\"]",
+        "",
+    );
+    let refused_dir = dir.path().join("refused");
+    std::fs::create_dir_all(&refused_dir).unwrap();
+    let refused = declaring(
+        &refused_dir,
+        &[shared.clone(), server_entry("own", &script, &own_beat)],
+        "tools = [\"own__check\", \"shared__check\", \"submit_output\"]\n\
+         output = { validator_tool = { tool = \"own__check\" } }",
+        "\"own__check\" = \"ask\"",
+    );
+    let starter = quick_starter(runs.path());
+
+    let running = starter
+        .spawn(task_request(&live, "t"), Caller::TopLevel)
+        .await
+        .expect("the live run starts");
+    let mut world = bevy_ecs::world::World::new();
+    let entity =
+        leviath_runtime::insert::insert(&mut world, running.spec, running.bindings, &running.state);
+    started(&shared_beat).await;
+
+    starter
+        .spawn(task_request(&refused, "t"), Caller::TopLevel)
+        .await
+        .expect_err("the validator would ask");
+    stopped(&own_beat).await;
+    // Many grace windows on, the live run's server is still up.
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    assert!(
+        beating(&shared_beat).await,
+        "the live run's server was stopped"
+    );
+
+    // The live run leaving the world lets go of it too.
+    world.despawn(entity);
+    stopped(&shared_beat).await;
+}

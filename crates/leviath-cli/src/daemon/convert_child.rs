@@ -352,6 +352,9 @@ async fn drive(
     let envs = |graph: &RunGraph| start.env(graph);
     let lookup = Lookup(&envs);
     let mut so_far = Tally::default();
+    // The MCP servers the child asked for, held while it converts; the runs
+    // that resume hold them again.
+    let mut held = Vec::new();
     loop {
         let line = match tokio::time::timeout(quiet, rx.recv()).await {
             Ok(Some(line)) => line,
@@ -381,9 +384,7 @@ async fn drive(
             }
             FromChild::Finished { so_far } => return Ok(so_far),
             FromChild::Connect { servers } => {
-                for server in &servers {
-                    start.pool.ensure(server).await;
-                }
+                held.push(start.pool.connect_held(&servers).await);
                 ToChild::Connected
             }
             FromChild::Model {

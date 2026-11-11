@@ -602,3 +602,47 @@ pub(super) fn reload_run(
     crate::daemon::block_on::block_on(bind_paged(starter, run_id, purpose))
         .map(|bound| place_paged(world, starter, bound))
 }
+
+/// A run paged back in after its own MCP server went idle and was torn down
+/// connects the server again before it is bound, rather than being held for
+/// a server "no longer configured or connected", and holds it while it is
+/// in the world.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_run_paged_in_after_its_mcp_server_went_idle_connects_it_again() {
+    let (_stub_dir, stub) = crate::daemon::starter::testing::stub_server_py();
+    let agent = tempfile::tempdir().unwrap();
+    let manifest = crate::daemon::starter::testing::blueprint_with_mcp(agent.path(), &stub);
+    let runs = tempfile::tempdir().unwrap();
+    let with_fake = || {
+        let mut registry = registry();
+        registry.register(
+            "fake".to_string(),
+            Arc::new(FakeProvider::new().context_window(100_000)),
+        );
+        registry
+    };
+    // Started as the daemon starts a run: its server connected first, so
+    // the run records the server's tools.
+    let first = starter(Config::default(), with_fake(), runs.path());
+    let started = first
+        .spawn(task_request(&manifest, "t"), Caller::TopLevel)
+        .await
+        .expect("the run starts");
+    let run_id = started.spec.run_id.to_string();
+    let server = crate::daemon::starter::mcp_configs(&started.spec.graph).remove(0);
+    drop(started);
+
+    // A pool with nothing connected: the run's server is gone.
+    let starter = starter(Config::default(), with_fake(), runs.path());
+    let bound = bind_paged(&starter, &run_id, PageIn::Resume)
+        .await
+        .expect("the run binds against its server, connected again");
+    assert_eq!(starter.mcp_pool.leased_holders(&server), 1);
+    let mut world = world_for(&starter);
+    place_paged(&mut world, &starter, bound);
+    assert_eq!(
+        starter.mcp_pool.leased_holders(&server),
+        1,
+        "the run holds it"
+    );
+}

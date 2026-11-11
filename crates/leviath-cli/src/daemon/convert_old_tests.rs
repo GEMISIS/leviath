@@ -91,7 +91,7 @@ async fn old_runs_convert_at_start_with_this_machines_models_and_tools() {
         .unwrap()
         .max_context_tokens("gpt-mock");
     let shared = Arc::new(tokio::sync::Mutex::new(leviath_mcp::ToolExecutor::new()));
-    let pool = McpPool::new(shared.clone(), HashSet::new());
+    let pool = Arc::new(McpPool::new(shared.clone(), HashSet::new()));
     let config = crate::test_support::config_preferring(&["openai"]);
     let agents = fixture("agents");
     let home_path = home.path().to_str().unwrap().to_string();
@@ -188,10 +188,10 @@ fn what_the_machine_cannot_answer_comes_back_as_why() {
     let old = runs.path().join("old");
     copy_dir(&fixture("mid-tool-batch"), &old);
     let graph = leviath_legacy_runs::graph(&old, &Default::default()).unwrap();
-    let pool = McpPool::new(
+    let pool = Arc::new(McpPool::new(
         Arc::new(tokio::sync::Mutex::new(leviath_mcp::ToolExecutor::new())),
         HashSet::new(),
-    );
+    ));
     let config = crate::test_support::config_preferring(&["openai"]);
     let start = AtStart {
         config: &config,
