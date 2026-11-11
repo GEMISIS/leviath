@@ -107,6 +107,46 @@ impl TokenUsage {
         self
     }
 
+    /// This running total with one more usage chunk of the same streamed call
+    /// added onto it: the rule [`crate::collect_stream`] folds a stream's
+    /// usage by, public so a caller folding chunks itself cannot drift from
+    /// it.
+    ///
+    /// Every count adds, and a reported cost replaces: the counts arrive split
+    /// across chunks and each names a different slice of the same call, while
+    /// the cost, when a provider states one at all, is the whole call's price
+    /// and comes once.
+    ///
+    /// The totals add too, reconciled against the sum of the merged parts. For
+    /// every built-in provider the two figures are identical, but a script
+    /// provider's chunk may carry a total its parts do not account for (an
+    /// endpoint that reports nothing finer), and rebuilding the running total
+    /// from the parts alone would silently drop it.
+    ///
+    /// Saturating, like [`Self::new`].
+    ///
+    /// ```
+    /// use leviath_providers::TokenUsage;
+    ///
+    /// let first = TokenUsage::new(100, 20, 5, 0);
+    /// let last = TokenUsage::new(0, 0, 0, 42).with_reported_cost(Some(0.25));
+    /// let call = first.merged(last);
+    /// assert_eq!(call.total_tokens, 167);
+    /// assert_eq!(call.reported_cost_usd, Some(0.25));
+    /// ```
+    pub fn merged(self, chunk: Self) -> Self {
+        Self::new(
+            self.prompt_tokens.saturating_add(chunk.prompt_tokens),
+            self.cached_tokens.saturating_add(chunk.cached_tokens),
+            self.cache_write_tokens
+                .saturating_add(chunk.cache_write_tokens),
+            self.completion_tokens
+                .saturating_add(chunk.completion_tokens),
+        )
+        .with_reported_total(self.total_tokens.saturating_add(chunk.total_tokens))
+        .with_reported_cost(chunk.reported_cost_usd.or(self.reported_cost_usd))
+    }
+
     /// All input tokens, however they were billed.
     pub fn input_tokens(&self) -> usize {
         self.prompt_tokens

@@ -224,7 +224,7 @@ pub async fn collect_stream(
             call.arguments.push_str(&delta.arguments_delta);
         }
         if let Some(usage) = chunk.tokens {
-            tokens = merge_usage(tokens, usage);
+            tokens = tokens.merged(usage);
         }
         if let Some(reason) = chunk.finish_reason {
             finish_reason = Some(reason);
@@ -285,31 +285,6 @@ impl PartialToolCall {
             thought_signature: self.thought_signature,
         })
     }
-}
-
-/// Add one usage chunk onto the running total for a streamed call.
-///
-/// Every count adds, and a reported cost replaces: the counts arrive split
-/// across chunks and each names a different slice of the same call, while the
-/// cost, when a provider states one at all, is the whole call's price and comes
-/// once.
-///
-/// The totals add too, reconciled against the sum of the merged parts. For
-/// every built-in provider the two figures are identical, but a script
-/// provider's chunk may carry a total its parts do not account for (an
-/// endpoint that reports nothing finer), and rebuilding the running total from
-/// the parts alone would silently drop it.
-fn merge_usage(into: TokenUsage, chunk: TokenUsage) -> TokenUsage {
-    TokenUsage::new(
-        into.prompt_tokens.saturating_add(chunk.prompt_tokens),
-        into.cached_tokens.saturating_add(chunk.cached_tokens),
-        into.cache_write_tokens
-            .saturating_add(chunk.cache_write_tokens),
-        into.completion_tokens
-            .saturating_add(chunk.completion_tokens),
-    )
-    .with_reported_total(into.total_tokens.saturating_add(chunk.total_tokens))
-    .with_reported_cost(chunk.reported_cost_usd.or(into.reported_cost_usd))
 }
 
 #[cfg(test)]
@@ -761,7 +736,7 @@ mod tests {
     fn merged_usage_saturates_instead_of_aborting() {
         let a = TokenUsage::new(usize::MAX, 0, 0, 0);
         let b = TokenUsage::new(1, 0, 0, 1);
-        let merged = merge_usage(a, b);
+        let merged = a.merged(b);
         assert_eq!(merged.prompt_tokens, usize::MAX);
         assert_eq!(merged.total_tokens, usize::MAX);
     }
