@@ -4,9 +4,18 @@
 //! cannot tell a spawn from a listing by its path, and leaves the deadline
 //! for that route to this extension. Once the operation is parsed it picks
 //! one: `[serve] spawn_timeout_secs` when the operation's root fields include
-//! `spawnRun` or `validateSpawn`, and `request_timeout_secs` otherwise. The
-//! clock starts when the request does. The in-flight cap is still the
-//! layer's.
+//! `spawnRun` or `validateSpawn`, and `request_timeout_secs` otherwise. For
+//! a query or a mutation the clock starts when the request does. The
+//! in-flight cap is still the layer's.
+//!
+//! A subscription is not a request with a deadline: it stays open for as
+//! long as its client wants, which is why `GET /ws/graphql` is outside the
+//! layer. What each of its events does is bounded all the same, the way every
+//! read this server makes is: async-graphql runs one execution per event, and
+//! each gets `request_timeout_secs` on a clock of its own that starts when
+//! that event's execution does. An event whose resolution is stuck past it is
+//! answered with a `REQUEST_TIMEOUT` error in its place, and the subscription
+//! goes on to the next one.
 //!
 //! A request past its deadline is answered the way every route answers one:
 //! 408 with `{"error": ...}` (see [`timed_out`]). A `spawnRun` is the
@@ -22,7 +31,9 @@ use async_graphql::extensions::{
     Extension, ExtensionContext, ExtensionFactory, NextExecute, NextParseQuery,
 };
 use async_graphql::parser::Positioned;
-use async_graphql::parser::types::{Directive, ExecutableDocument, Selection, SelectionSet};
+use async_graphql::parser::types::{
+    Directive, ExecutableDocument, OperationType, Selection, SelectionSet,
+};
 use async_graphql::{ErrorExtensionValues, Response, ServerError, ServerResult, Value, Variables};
 
 use super::super::request_limits::RequestLimits;
@@ -61,6 +72,7 @@ impl ExtensionFactory for Deadlines {
             seconds: *self,
             started: tokio::time::Instant::now(),
             parsed: Mutex::new(None),
+            chosen: Mutex::new(None),
         })
     }
 }
@@ -75,6 +87,19 @@ struct Deadline {
     /// The document the parser produced and the variables it came with,
     /// kept until the operation runs.
     parsed: Mutex<Option<(ExecutableDocument, Variables)>>,
+    /// How the operation was read when it first ran, kept for a
+    /// subscription's later events, which run again with the document gone.
+    chosen: Mutex<Option<Choice>>,
+}
+
+/// What an operation's deadline is chosen by.
+#[derive(Clone, Copy)]
+struct Choice {
+    /// What it asks for, which picks the number of seconds.
+    asks: Asks,
+    /// Whether it is a subscription, whose every event runs on a clock of
+    /// its own rather than on the request's.
+    per_event: bool,
 }
 
 /// What an operation asks for, as far as its deadline goes.
@@ -109,10 +134,15 @@ impl Extension for Deadline {
         operation_name: Option<&str>,
         next: NextExecute<'_>,
     ) -> Response {
-        let asks = leviath_core::sync::lock(&self.parsed)
-            .take()
-            .map_or(Asks::Other, |(document, variables)| {
-                asks(&document, operation_name, &variables)
+        let Choice { asks, per_event } = *leviath_core::sync::lock(&self.chosen)
+            .get_or_insert_with(|| {
+                leviath_core::sync::lock(&self.parsed).take().map_or(
+                    Choice {
+                        asks: Asks::Other,
+                        per_event: false,
+                    },
+                    |(document, variables)| choose(&document, operation_name, &variables),
+                )
             });
         let secs = match asks {
             Asks::Other => self.seconds.ordinary,
@@ -121,11 +151,24 @@ impl Extension for Deadline {
         if secs == 0 {
             return next.run(ctx, operation_name).await;
         }
-        let deadline = self.started + Duration::from_secs(secs);
+        let started = match per_event {
+            true => tokio::time::Instant::now(),
+            false => self.started,
+        };
+        let deadline = started + Duration::from_secs(secs);
         match tokio::time::timeout_at(deadline, next.run(ctx, operation_name)).await {
             Ok(response) => response,
             Err(_) => Response::from_errors(vec![late(asks, secs)]),
         }
+    }
+}
+
+/// How the operation `name` in `document` is timed under `variables`.
+fn choose(document: &ExecutableDocument, name: Option<&str>, variables: &Variables) -> Choice {
+    Choice {
+        asks: asks(document, name, variables),
+        per_event: operation_of(document, name)
+            .is_some_and(|operation| operation.node.ty == OperationType::Subscription),
     }
 }
 
