@@ -1495,6 +1495,59 @@ mod tests {
         assert_eq!(messages[1]["content"], "Hello");
     }
 
+    /// Live run 8, on the wire. A draw stage as the runtime assembles it
+    /// (its prompt regions in the system blocks, the bare "Begin." turn)
+    /// reached `flux.2-flex` over the chat endpoint as system messages and
+    /// "Begin.", and the model drew the word. Made one prompt first, as the
+    /// runtime does for a model that answers in no text, the body is that
+    /// prompt as the only message.
+    #[test]
+    fn an_image_model_is_sent_its_prompt_not_the_opening_turn() {
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "test-key".to_string(),
+        );
+        let region = |name: &str, text: &str| crate::provider::SystemBlock {
+            text: format!("## {name}\n{text}"),
+            cache_hint: leviath_core::CacheHint::Always,
+            volatility: leviath_core::Volatility::Stable,
+            region: name.to_string(),
+        };
+        let request = InferenceRequest {
+            system: vec![
+                region("brief", "2D pixel art, mossy greens"),
+                region("piece_1", "temple_brick"),
+            ],
+            messages: vec![crate::provider::Message {
+                role: "user".to_string(),
+                content: crate::provider::OPENING_TURN.into(),
+                cache_breakpoint: false,
+                reasoning: None,
+            }],
+            model: "black-forest-labs/flux.2-flex".to_string(),
+            max_tokens: 1024,
+            temperature: 0.7,
+            tools: vec![],
+            extra: serde_json::json!({ "prompt_regions": ["brief", "piece_1"] }),
+            request_timeout_secs: None,
+        };
+
+        let as_assembled = provider.build_request_body(&request);
+        let sent = as_assembled["messages"].as_array().unwrap();
+        assert_eq!(sent[0]["role"], "system");
+        assert_eq!(sent.last().unwrap()["content"], "Begin.");
+
+        let body = provider.build_request_body(&crate::prompt::prompt_only(request));
+        assert_eq!(
+            body["messages"],
+            serde_json::json!([{
+                "role": "user",
+                "content": "2D pixel art, mossy greens\ntemple_brick"
+            }])
+        );
+        assert!(body.get("prompt_regions").is_none(), "{body}");
+    }
+
     #[test]
     fn test_build_request_body_serializes_tool_history() {
         let provider = OpenRouterProvider::new(

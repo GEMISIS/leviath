@@ -51,6 +51,7 @@ pub mod openai;
 pub(crate) mod openai_compat;
 pub mod openrouter;
 pub mod pricing;
+pub mod prompt;
 pub mod provider;
 pub mod quota;
 pub mod rate_limit;

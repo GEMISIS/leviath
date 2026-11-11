@@ -511,18 +511,28 @@ pub(crate) fn build_request(
         });
     }
 
-    // A model that does not read a system prompt has the stage's instruction
-    // folded into the user turn instead, or it is lost. It lands in the system
-    // blocks with a bare "Begin." user nudge (the convention that makes a text
-    // model act); a model that ignores the system prompt generates from the
-    // nudge - an image model's "Begin." becomes generic "start of a journey"
-    // scenery, never the asked subject. The capability says whether the model
-    // reads the system prompt; `ignores_system_prompt` is the one-off for a
-    // model no catalogue distinguishes (`gemini-2.5-flash-image`).
+    // The stage's instruction lands in the system blocks with a bare "Begin."
+    // user nudge (the convention that makes a text model act). A model that
+    // generates from the user turn alone draws the nudge: an image model's
+    // "Begin." becomes generic scenery or the word itself, never the asked
+    // subject.
+    //
+    // A model that answers in no text is not a chat model, whatever any
+    // listing says about system prompts: it takes one prompt, which is the
+    // stage's named prompt regions or its region text, and that is the whole
+    // request it is sent, on every route (`prompt_only`). Decided from what
+    // the model makes, so a new image model needs no name added anywhere.
+    //
+    // A chat model that does not read a system prompt has the instruction
+    // folded into the user turn instead, or it is lost. The capability says
+    // whether it reads one; `ignores_system_prompt` is the one-off for a
+    // model that also answers in text and that no catalogue distinguishes
+    // from one that reads it (`gemini-2.5-flash-image`).
+    let prompt_only = !provider.mime(&stage.model).answers_in_text();
     let mut messages = messages;
     let reads_system = caps.supports_system_prompt
         && !leviath_providers::capabilities::ignores_system_prompt(&stage.model);
-    if !reads_system {
+    if !reads_system && !prompt_only {
         fold_system_into_user(&mut system, &mut messages);
     }
 
@@ -535,6 +545,10 @@ pub(crate) fn build_request(
         tools: filtered_tools,
         extra,
         request_timeout_secs: config.and_then(|c| c.request_timeout_secs),
+    };
+    let request = match prompt_only {
+        true => leviath_providers::prompt::prompt_only(request),
+        false => request,
     };
     (request, system_hash, block_hashes, frame)
 }

@@ -45,7 +45,18 @@ use std::time::Instant;
 ))]
 use serde_json::Value;
 
-use crate::provider::{ContentBlock, InferenceRequest, MessageContent};
+pub(crate) use crate::prompt::request_text;
+use crate::provider::InferenceRequest;
+#[cfg(any(
+    feature = "openai",
+    feature = "xai",
+    feature = "xai-subscription",
+    feature = "google",
+    feature = "bedrock",
+    feature = "meta",
+    feature = "meshy"
+))]
+use crate::provider::{ContentBlock, MessageContent};
 #[cfg(any(
     feature = "openai",
     feature = "xai",
@@ -207,127 +218,6 @@ pub(crate) fn first_part(request: &InferenceRequest, want: impl Fn(&str) -> bool
         ))]
         name: name.map(str::to_string),
     })
-}
-
-/// The plain text of a request, across its text blocks and plain messages.
-///
-/// The texture prompt an upstream stage wrote lands here, as the text of the
-/// region it wrote it to; it is the dynamic hint the operation textures with.
-pub(crate) fn request_text(request: &InferenceRequest) -> String {
-    if let Some(names) = prompt_regions(request) {
-        return regions_text(request, &names);
-    }
-    // Assembly emits a stored part as a pointer text block ("[region] [mime,
-    // size] name") beside its bytes block. That pointer is not the user's
-    // prompt, so exclude any text carrying a stored part's stand-in, or the
-    // texture prompt and the animation action would be the mesh's file line
-    // rather than "weathered bronze" or "walk".
-    let stand_ins: Vec<&str> = request
-        .messages
-        .iter()
-        .filter_map(|m| match &m.content {
-            MessageContent::Blocks(blocks) => Some(blocks),
-            MessageContent::Text(_) => None,
-        })
-        .flatten()
-        .filter_map(|b| match b {
-            ContentBlock::Mime { part, .. } => Some(part.stand_in.as_str()),
-            _ => None,
-        })
-        .filter(|s| !s.is_empty())
-        .collect();
-    // The runtime's placeholder turn is not a prompt either: a stage whose
-    // prompt lives in a pinned region has no user turn but this one, and
-    // reading it sent the model "Begin." while the task sat unread below.
-    let is_pointer = |text: &str| {
-        text.trim() == crate::provider::OPENING_TURN || stand_ins.iter().any(|s| text.contains(s))
-    };
-
-    let mut chunks = Vec::new();
-    for message in &request.messages {
-        match &message.content {
-            MessageContent::Text(text) => {
-                if !is_pointer(text) {
-                    chunks.push(text.clone());
-                }
-            }
-            MessageContent::Blocks(blocks) => {
-                for block in blocks {
-                    if let ContentBlock::Text { text } = block
-                        && !is_pointer(text)
-                    {
-                        chunks.push(text.clone());
-                    }
-                }
-            }
-        }
-    }
-    // A pinned region renders into the system prompt, not a message, so a
-    // task or prompt that lives in one never reached here and every such
-    // stage ran on the default action or refused for want of a prompt. With
-    // no message text, read the system blocks instead: only the ones a region
-    // produced (a hint carries no region), never the runtime's own
-    // instruction blocks, and never a region whose text is a stored part's
-    // stand-in. Message text still wins when there is any, so a prompt an
-    // upstream stage wrote into a conversation is not diluted by the task.
-    if chunks.is_empty() {
-        for block in &request.system {
-            if block.region.is_empty() || RUNTIME_REGIONS.contains(&block.region.as_str()) {
-                continue;
-            }
-            let body = unlabelled(&block.text, &block.region);
-            if !is_pointer(body) && !body.trim().is_empty() {
-                chunks.push(body.to_string());
-            }
-        }
-    }
-    chunks.join("\n").trim().to_string()
-}
-
-/// The regions the stage named as its prompt, in order. `None` when it named
-/// none, and the prompt is read as it always was.
-fn prompt_regions(request: &InferenceRequest) -> Option<Vec<String>> {
-    let names: Vec<String> = request
-        .extra
-        .get(crate::provider::PROMPT_REGIONS_KEY)?
-        .as_array()?
-        .iter()
-        .filter_map(|v| v.as_str().map(str::to_string))
-        .collect();
-    (!names.is_empty()).then_some(names)
-}
-
-/// The text of exactly the named regions, in the order named. Nothing else
-/// reaches the model: not the other regions, not the conversation. A region
-/// that is hidden or empty contributes nothing, so a prompt that was never
-/// written comes back empty rather than as some other region's text.
-fn regions_text(request: &InferenceRequest, names: &[String]) -> String {
-    let chunks: Vec<&str> = names
-        .iter()
-        .flat_map(|name| {
-            request
-                .system
-                .iter()
-                .filter(move |block| &block.region == name)
-                .map(|block| unlabelled(&block.text, &block.region).trim())
-        })
-        .filter(|body| !body.is_empty())
-        .collect();
-    chunks.join("\n")
-}
-
-/// Regions the runtime writes for its own purposes, whose text is never a
-/// prompt: the stage's standing instructions, and the mirrored final answer.
-const RUNTIME_REGIONS: &[&str] = &["stage_instructions", "final_output"];
-
-/// A region's system block without the `## <region>` heading assembly puts
-/// on it, so the prompt is the region's text and not its label. A block
-/// carrying no such heading is returned whole.
-fn unlabelled<'a>(text: &'a str, region: &str) -> &'a str {
-    text.strip_prefix("## ")
-        .and_then(|rest| rest.strip_prefix(region))
-        .and_then(|rest| rest.strip_prefix('\n'))
-        .unwrap_or(text)
 }
 
 /// A non-empty string hint from `request.extra`.
@@ -759,7 +649,7 @@ pub(crate) fn extension(mime: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::{Message, SystemBlock};
+    use crate::provider::{ContentBlock, Message, MessageContent, SystemBlock};
     use leviath_core::mime::{MimeRegistry, Part as CorePart};
 
     fn hydrated(mime: &str, name: &str, bytes: &[u8]) -> ContentBlock {

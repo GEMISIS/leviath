@@ -290,6 +290,11 @@ fn codex_rows() -> Vec<CatalogEntry> {
 /// Models that ignore the system prompt, so a request built for one folds its
 /// system blocks into the user turn instead of losing them.
 ///
+/// Only for a model that also answers in text. One that answers in no text
+/// (an image, audio or video model) is never sent a system prompt at all: it
+/// is sent its stage's prompt alone ([`crate::prompt::prompt_only`]), decided
+/// from [`ModelMime::answers_in_text`], so it needs no entry here.
+///
 /// No provider reports this - OpenRouter's catalogue does not distinguish a
 /// model that reads the system prompt from one that ignores it (measured:
 /// `gemini-2.5-flash-image` and `gemini-3-pro-image` carry identical
@@ -458,6 +463,20 @@ impl ModelMime {
                 .iter()
                 .any(|have| pattern_covers(have, w) || pattern_covers(w, have))
         }))
+    }
+
+    /// Whether the model can answer in text: a chat model, as opposed to one
+    /// that only makes images, audio, video or other files and so takes one
+    /// prompt rather than a conversation (see [`crate::prompt`]).
+    ///
+    /// An output list that names no type at all is read as text, the same as
+    /// a model nothing has described.
+    pub fn answers_in_text(&self) -> bool {
+        self.output.is_empty()
+            || self
+                .output
+                .iter()
+                .any(|p| pattern_covers(p, "text/*") || pattern_covers("text/*", p))
     }
 
     /// Whether the model takes anything beyond text: what the tables' tests

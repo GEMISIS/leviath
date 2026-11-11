@@ -1080,6 +1080,13 @@ fails for want of a prompt rather than running on some other region's text. Each
 region the layout declares (`lev validate` refuses one that is not). Unset, the stage reads its
 prompt as before. Named regions are read from the regions the stage shows, so do not `hide` them.
 
+This holds on every provider. A model whose outputs include no text is not sent a conversation even
+where its provider reaches it over a chat endpoint (OpenRouter's image models): its request is that
+prompt as the one user turn, with any image or file the stage handed it, and no system prompt. A
+request to such a model with no prompt and nothing attached, only the opening turn, is refused
+before it is sent. A model that also answers in text (one that both chats and draws) is sent the
+stage as any chat model is.
+
 ## Continuing a finished run
 
 A run that has finished can be sent a new message, and it goes back to work on it: "make the cape
