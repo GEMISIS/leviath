@@ -270,6 +270,166 @@ async fn a_validator_tool_that_would_not_simply_run_refuses_the_spawn() {
     }
 }
 
+/// A run of the test manifest whose first stage submits and is judged by
+/// `tool`, with the graph saying `graph_says` for it.
+fn judged_spec(dir: &Path, tool: &str, graph_says: Option<ToolPolicy>) -> RunSpec {
+    let mut s = spec(dir);
+    s.launch.allow.clear();
+    s.graph.tool_permissions = graph_says
+        .map(|policy| (ToolName::new(tool).unwrap(), policy))
+        .into_iter()
+        .collect();
+    let given = |name: &str| ToolDef {
+        name: ToolName::new(name).unwrap(),
+        description: String::new(),
+        schema: JsonDoc::default(),
+        source: ToolSource::Builtin,
+    };
+    s.stages[0].tools.push(given(tool));
+    s.stages[0]
+        .tools
+        .push(given(leviath_tools::SUBMIT_OUTPUT_TOOL));
+    s.stages[0].output = Some(leviath_runtime::spec::graph::OutputDef {
+        validator_tool: Some(leviath_runtime::spec::graph::ValidatorToolDef {
+            tool: ToolName::new(tool).unwrap(),
+            content_arg: "content".into(),
+            args: JsonDoc::new(serde_json::json!({})),
+        }),
+        ..Default::default()
+    });
+    s
+}
+
+/// The hint the spawn is refused with, or `None` when it binds.
+async fn refusal_hint(config: Config, spec: &RunSpec) -> Option<String> {
+    let (env, _agents) = crate::daemon::resolve_env::tests::env_with(config);
+    let issues = env.bind(spec, &CodeFiles::new()).await.err()?;
+    assert_eq!(issues.0.len(), 1, "{issues:?}");
+    assert!(issues.0[0].message.contains("set to ask"), "{issues:?}");
+    issues.0[0].hint.clone()
+}
+
+fn quiet() -> Config {
+    let mut config = Config::default();
+    config.title.enabled = false;
+    config
+}
+
+const MCP: &str = "polywright__check_design";
+
+/// A graph's `allow` for an MCP tool is clamped back to ask, so the hint must
+/// not send the caller to write the line the graph already has. The spawn's
+/// own `allow` is what lets the validator run.
+#[tokio::test]
+async fn a_clamped_allow_on_an_mcp_validator_names_what_can_allow_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = judged_spec(dir.path(), MCP, Some(ToolPolicy::Allow));
+    let hint = refusal_hint(quiet(), &s)
+        .await
+        .expect("the allow is clamped");
+    assert_eq!(
+        hint,
+        format!(
+            "`{MCP} = \"allow\"` in tool_permissions has no effect, because a graph cannot \
+             allow this tool by itself; name it in this spawn's `launch.allow` (`--allow` on \
+             the command line), or set `{MCP} = \"allow\"` under \
+             `[agent_tool_permissions.helper]` in the user's config, or turn on `[security] \
+             allow_blueprint_permissions` in the user's config, or name a tool the stage may \
+             call unprompted"
+        )
+    );
+    s.launch.allow.push(ToolName::new(MCP).unwrap());
+    assert!(refusal_hint(quiet(), &s).await.is_none());
+}
+
+/// The user's opt-ins the hint names each make the validator run.
+#[tokio::test]
+async fn the_opt_ins_a_clamped_hint_names_let_the_validator_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = judged_spec(dir.path(), MCP, Some(ToolPolicy::Allow));
+    let mut loose = quiet();
+    loose.security.allow_blueprint_permissions = true;
+    assert!(refusal_hint(loose, &s).await.is_none());
+    let mut per_agent = quiet();
+    per_agent.agent_tool_permissions.insert(
+        "helper".into(),
+        [(MCP.to_string(), ToolPolicy::Allow)].into(),
+    );
+    assert!(refusal_hint(per_agent, &s).await.is_none());
+}
+
+/// A graph its caller wrote has no blueprint name, so the per-agent table
+/// cannot apply to it and is not named.
+#[tokio::test]
+async fn a_raw_graph_is_not_told_about_the_per_agent_table() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = judged_spec(dir.path(), MCP, Some(ToolPolicy::Allow));
+    s.origin = SpecOrigin::Raw;
+    let hint = refusal_hint(quiet(), &s).await.unwrap();
+    assert!(hint.contains("launch.allow"), "{hint}");
+    assert!(!hint.contains("agent_tool_permissions"), "{hint}");
+    assert!(!hint.contains("allow_blueprint_permissions"), "{hint}");
+}
+
+/// Where nothing says `allow`, a graph's `allow` is not the way out for an
+/// MCP tool either; `allow_blueprint_permissions` only lets a graph's own
+/// `allow` count, so it is not named without one.
+#[tokio::test]
+async fn an_mcp_validator_nothing_allows_is_not_told_to_write_a_dead_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = judged_spec(dir.path(), MCP, None);
+    let hint = refusal_hint(quiet(), &s).await.unwrap();
+    assert!(
+        hint.starts_with("a graph cannot allow this tool by itself; name it in this spawn's"),
+        "{hint}"
+    );
+    assert!(hint.contains("[agent_tool_permissions.helper]"), "{hint}");
+    assert!(!hint.contains("allow_blueprint_permissions"), "{hint}");
+}
+
+/// A tool a graph may loosen, with nothing set, keeps the hint to write the
+/// line, and writing it works. With the user's own `ask` as a ceiling it
+/// does not work, and the hint stops saying so.
+#[tokio::test]
+async fn a_tool_a_graph_may_loosen_is_told_to_allow_it_unless_the_user_set_ask() {
+    let dir = tempfile::tempdir().unwrap();
+    let asking = judged_spec(dir.path(), "web_fetch", Some(ToolPolicy::Ask));
+    let hint = refusal_hint(quiet(), &asking).await.unwrap();
+    assert_eq!(
+        hint,
+        "set `web_fetch = \"allow\"` in tool_permissions, or name a tool the stage may call \
+         unprompted"
+    );
+    let allowed = judged_spec(dir.path(), "web_fetch", Some(ToolPolicy::Allow));
+    assert!(refusal_hint(quiet(), &allowed).await.is_none());
+
+    let mut ceiling = quiet();
+    ceiling
+        .tool_permissions
+        .insert("web_fetch".into(), ToolPolicy::Ask);
+    let hint = refusal_hint(ceiling, &allowed).await.unwrap();
+    assert!(
+        hint.starts_with("`web_fetch = \"allow\"` in tool_permissions has no effect"),
+        "{hint}"
+    );
+    assert!(!hint.contains("allow_blueprint_permissions"), "{hint}");
+}
+
+/// With the user's opt-in on, even an MCP tool is a graph's to allow, and
+/// the hint to write the line is right again.
+#[tokio::test]
+async fn with_the_opt_in_on_an_mcp_validator_is_told_to_allow_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = quiet();
+    config.security.allow_blueprint_permissions = true;
+    let s = judged_spec(dir.path(), MCP, None);
+    let hint = refusal_hint(config, &s).await.unwrap();
+    assert!(
+        hint.starts_with(&format!("set `{MCP} = \"allow\"` in tool_permissions")),
+        "{hint}"
+    );
+}
+
 /// Each stage's write paths are what the run inherited, then its graph's,
 /// then its own; the script host starts on the entry stage's.
 #[tokio::test]

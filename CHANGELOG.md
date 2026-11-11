@@ -87,6 +87,12 @@ same list.
 
 ### Fixed
 
+- A spawn refused for a validator tool set to `ask` now says what would let it run. For an MCP
+  tool the hint said to write `<tool> = "allow"` in `tool_permissions`, which a graph cannot do
+  (it may loosen only `web_search` and `web_fetch`, unless the user opted in), so a graph that
+  already said it was sent in a circle. The hint now names the spawn's `launch.allow` and, for an
+  installed blueprint, the user's `[agent_tool_permissions.<name>]` and `[security]
+  allow_blueprint_permissions`, and keeps the old advice only where it works.
 - Media models are routed by what they make, after a sweep of every model Google, OpenRouter,
   OpenAI and Meta list:
   - Google's `gemini-nano-banana-2.1` was run as a chat model and failed on its token budget. A

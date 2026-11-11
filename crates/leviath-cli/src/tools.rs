@@ -967,6 +967,36 @@ fn by_any_spelling<'a, V>(map: &'a HashMap<String, V>, tool_name: &str) -> Optio
     leviath_tools::tool_name_spellings(tool_name).find_map(|name| map.get(name))
 }
 
+/// Whether the graph itself says `allow` for this tool, the way
+/// [`resolve_policy`] reads it: the stage's entry over the graph's own.
+pub(crate) fn graph_says_allow(
+    stage_permissions: &HashMap<String, String>,
+    graph_permissions: &HashMap<String, String>,
+    tool_name: &str,
+) -> bool {
+    by_any_spelling(stage_permissions, tool_name)
+        .or_else(|| by_any_spelling(graph_permissions, tool_name))
+        .is_some_and(|s| parse_policy_str(s) == ToolPolicy::Allow)
+}
+
+/// Whether a graph's `allow` can take effect for this tool: the user has set
+/// no ceiling of their own for it, and either `[security]
+/// allow_blueprint_permissions` is on or [`BLUEPRINT_LOOSENABLE`] names it.
+pub(crate) fn graph_may_allow(
+    global_permissions: &HashMap<String, ToolPolicy>,
+    tool_name: &str,
+    blueprint_may_loosen: bool,
+) -> bool {
+    !user_sets(global_permissions, tool_name)
+        && (blueprint_may_loosen || blueprint_loosenable(tool_name))
+}
+
+/// Whether the user's own permissions (global, with the agent's on top) set
+/// this tool, which makes their value a ceiling a graph cannot go above.
+pub(crate) fn user_sets(global_permissions: &HashMap<String, ToolPolicy>, tool_name: &str) -> bool {
+    by_any_spelling(global_permissions, tool_name).is_some()
+}
+
 /// A blueprint's policy string as a [`ToolPolicy`].
 ///
 /// The fallback is defensive rather than load-bearing: the blueprint reader
