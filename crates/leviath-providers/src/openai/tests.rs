@@ -349,6 +349,23 @@ async fn a_refused_temperature_is_retried_without_one_and_remembered() {
     assert_eq!(carried, vec![true, false, false]);
 }
 
+/// The request sent again without the refused temperature never connects.
+/// The refusal was an answer, so a request of this call went out.
+#[tokio::test]
+async fn a_resend_that_never_connects_follows_a_request_that_was_sent() {
+    // One answer in the sequence: the listener is gone for the resend.
+    let (url, bodies) =
+        spawn_mock_sequence(vec![(400, "Bad Request", TEMPERATURE_REFUSED.to_vec())]).await;
+    let request = InferenceRequest {
+        temperature: 0.7,
+        ..simple_request()
+    };
+    let err = provider_with_url(url).infer(&request).await.unwrap_err();
+    assert_eq!(bodies.lock().unwrap().len(), 1);
+    assert!(err.failure_kind().is_some(), "{err:?}");
+    assert_eq!(err.request_sent(), Some(true));
+}
+
 #[tokio::test]
 async fn a_refusal_of_anything_else_is_the_error() {
     let other = br#"{"error":{"message":"Unsupported value: 'reasoning.effort' does not support 'none' with this model.","type":"invalid_request_error"}}"#;

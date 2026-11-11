@@ -364,6 +364,8 @@ async fn veo_refusals_failures_and_bad_answers_are_errors() {
         .await
         .unwrap_err();
     assert!(err.to_string().contains("needs a prompt"), "{err}");
+    assert!(matches!(err, ProviderError::Other(_)), "{err:?}");
+    assert_eq!(err.request_sent(), Some(false));
 }
 
 #[tokio::test]
@@ -707,6 +709,7 @@ async fn omni_failures_and_bad_answers_are_errors() {
         .await
         .unwrap_err();
     assert!(err.to_string().contains("needs a prompt"), "{err}");
+    assert_eq!(err.request_sent(), Some(false));
     let err = nothing_listens
         .infer(&request(
             OMNI,

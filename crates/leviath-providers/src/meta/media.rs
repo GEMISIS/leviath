@@ -134,17 +134,15 @@ async fn transcribe(
     unit: Option<UnitPrice>,
 ) -> Result<InferenceResponse> {
     let audio = media::first_part(request, |m| m.starts_with("audio/")).ok_or_else(|| {
-        ProviderError::InvalidResponse(
-            "muse-voice-transcribe needs an audio part: the stage handed it none".into(),
-        )
+        ProviderError::unsent("muse-voice-transcribe needs an audio part: the stage handed it none")
     })?;
     if audio.bytes.len() > MAX_AUDIO_BYTES {
-        return Err(ProviderError::InvalidResponse(format!(
+        return Err(ProviderError::unsent(format!(
             "the audio is {} bytes; Muse Voice Transcribe takes at most {MAX_AUDIO_BYTES}",
             audio.bytes.len()
         )));
     }
-    let header = wav(&audio.bytes).map_err(ProviderError::InvalidResponse)?;
+    let header = wav(&audio.bytes).map_err(ProviderError::unsent)?;
 
     let mut settings = serde_json::Map::new();
     settings.insert("model".into(), json!(request.model));
@@ -366,6 +364,7 @@ mod tests {
         .await
         .unwrap_err();
         assert!(none.to_string().contains("needs an audio part"));
+        assert_eq!(none.request_sent(), Some(false));
         let mp3 = run(
             &ep,
             Kind::Transcribe,

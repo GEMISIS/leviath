@@ -197,6 +197,7 @@ async fn a_job_with_no_prompt_or_an_unreadable_length_is_refused_unsent() {
         .await
         .unwrap_err();
     assert!(err.to_string().contains("needs a prompt"), "{err}");
+    assert_eq!(err.request_sent(), Some(false));
     let mut extra = video_stage();
     extra["duration"] = json!("four");
     let err = nothing_listens

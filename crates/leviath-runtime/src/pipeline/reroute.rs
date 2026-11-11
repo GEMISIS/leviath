@@ -198,6 +198,7 @@ mod tests {
                 used: 10,
                 reply_budget: 1,
                 max: 5,
+                sent: false,
             },
             ProviderError::Other("refused by the content policy".into()),
         ] {

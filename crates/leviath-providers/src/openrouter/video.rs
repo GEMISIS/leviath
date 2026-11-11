@@ -80,7 +80,7 @@ impl OpenRouterProvider {
         let model = self.listed_id(gateway_id(&request.model));
         let body = job_body(&model, request)?;
         if body["prompt"] == "" {
-            return Err(ProviderError::InvalidResponse(format!(
+            return Err(ProviderError::unsent(format!(
                 "openrouter/{model} needs a prompt: the stage handed it no text"
             )));
         }
@@ -156,7 +156,7 @@ impl OpenRouterProvider {
         .timeout(Duration::from_secs(300))
         .send()
         .await
-        .map_err(|e| ProviderError::transport("downloading a generated video", &e))?;
+        .map_err(|e| ProviderError::transport("downloading a generated video", &e).after_send())?;
         let bytes = match crate::provider::check_http_response(content, None).await {
             Ok(content) => media::body_bytes(content).await,
             Err(refused) => Err(refused),

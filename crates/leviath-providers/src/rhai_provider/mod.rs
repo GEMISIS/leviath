@@ -360,6 +360,17 @@ impl RhaiProvider {
     /// `call` is boxed (not a generic) so this method has a single instantiation:
     /// every caller's regions merge into one, keeping coverage exact.
     async fn dispatch(&self, timeout_secs: Option<u64>, call: ScriptCall) -> Result<Dynamic> {
+        self.dispatch_noting(timeout_secs, call).await.0
+    }
+
+    /// [`Self::dispatch`], also handing back what the call's requests say
+    /// about whether anything went out, for an error raised over its result.
+    async fn dispatch_noting(
+        &self,
+        timeout_secs: Option<u64>,
+        call: ScriptCall,
+    ) -> (Result<Dynamic>, Sends) {
+        let mut sends = Sends::default();
         let (job_tx, mut job_rx) = mpsc::unbounded_channel::<BrokerJob>();
         let env_allowlist = self.env_allowlist.clone();
         let mut join: JoinHandle<Result<Dynamic>> = tokio::task::spawn_blocking(move || {
@@ -379,11 +390,15 @@ impl RhaiProvider {
                 // yields `None`: the pattern stops matching, disabling this
                 // branch so `select!` settles on the `join` branch. No spin.
                 Some(job) = job_rx.recv() => {
-                    serve_job(&self.executor, &self.rate_limiter, job).await
+                    serve_job(&self.executor, &self.rate_limiter, job, &mut sends).await
                 }
             }
         };
-        script_result.map_err(task_failed)?
+        let result = script_result
+            .map_err(task_failed)
+            .and_then(|ran| ran)
+            .map_err(|e| sends.say_on(e));
+        (result, sends)
     }
 
     /// Call the script's optional `count_tokens(state, text, model)`.
@@ -425,19 +440,72 @@ fn task_failed(e: tokio::task::JoinError) -> ProviderError {
 }
 
 /// Finalize a streaming script task: on a script or task error, push it as the
-/// stream's terminal item. A free function so all three arms are unit-testable.
+/// stream's terminal item, saying what `sends` knows of the call's requests.
+/// A free function so all three arms are unit-testable.
 #[cfg(feature = "rhai")]
 fn finalize_stream(
     outcome: std::result::Result<Result<()>, tokio::task::JoinError>,
+    sends: Sends,
     err_tx: &mpsc::UnboundedSender<Result<StreamChunk>>,
 ) {
     match outcome {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
-            let _ = err_tx.send(Err(e));
+            let _ = err_tx.send(Err(sends.say_on(e)));
         }
         Err(join_err) => {
-            let _ = err_tx.send(Err(task_failed(join_err)));
+            let _ = err_tx.send(Err(sends.say_on(task_failed(join_err))));
+        }
+    }
+}
+
+/// What the requests one script call made say about whether anything went
+/// out (see [`ProviderError::request_sent`]).
+///
+/// A script reaches the network only through the host's HTTP functions, and
+/// every one of those is a job served here, so the jobs are the whole story:
+/// a call that made none sent nothing, whatever its error claims, and one
+/// with an answered job sent something, whatever failed afterwards.
+#[cfg(feature = "rhai")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Sends {
+    /// Whether any request so far went out; not sent while there are none.
+    sent: Option<bool>,
+    /// Whether a streaming request was made. Its outcome reaches the script
+    /// as events this side never sees.
+    streamed: bool,
+}
+
+#[cfg(feature = "rhai")]
+impl Default for Sends {
+    fn default() -> Self {
+        Self {
+            sent: Some(false),
+            streamed: false,
+        }
+    }
+}
+
+#[cfg(feature = "rhai")]
+impl Sends {
+    /// Count a request that ended `result`: an answer of any status went
+    /// out, and a transport failure says for itself.
+    fn note<T>(&mut self, result: &std::result::Result<T, HostHttpError>) {
+        let sent = match result {
+            Err(HostHttpError::Transport(message)) => crate::failure::said(message).flatten(),
+            _ => Some(true),
+        };
+        self.sent = crate::failure::either(self.sent, sent);
+    }
+
+    /// `error`, saying what this call's requests say. After a streaming
+    /// request only a known send is added: the stream's own failure carries
+    /// its answer in its message.
+    fn say_on(self, error: ProviderError) -> ProviderError {
+        match (self.streamed, self.sent) {
+            (false, sent) => error.with_request_sent(sent),
+            (true, Some(true)) => error.after_send(),
+            (true, _) => error,
         }
     }
 }
@@ -449,19 +517,23 @@ async fn serve_job(
     executor: &Arc<dyn HttpExecutor>,
     rate_limiter: &Option<RateLimiter>,
     job: BrokerJob,
+    sends: &mut Sends,
 ) {
     match job {
         BrokerJob::Unary(j) => {
             let result = executor.execute(j.request).await;
             account(rate_limiter, &result).await;
+            sends.note(&result);
             let _ = j.reply.send(result);
         }
         BrokerJob::Bytes(j) => {
             let result = executor.execute_bytes(j.request).await;
             account(rate_limiter, &result).await;
+            sends.note(&result);
             let _ = j.reply.send(result);
         }
         BrokerJob::Stream(j) => {
+            sends.streamed = true;
             executor.execute_stream(j.request, j.events).await;
         }
     }
@@ -533,8 +605,8 @@ impl Provider for RhaiProvider {
         let state_dyn = (*self.state).clone();
         let ast = self.ast.clone();
 
-        let dynamic = self
-            .dispatch(
+        let (dynamic, sends) = self
+            .dispatch_noting(
                 timeout,
                 Box::new(move |engine| {
                     let mut scope = Scope::new();
@@ -543,9 +615,11 @@ impl Provider for RhaiProvider {
                         .map_err(map_rhai_err)
                 }),
             )
-            .await?;
+            .await;
 
-        let response = parse_inference_dynamic(dynamic)?;
+        // A reply the script built wrong is the script's doing, so the
+        // requests it made say whether anything went out.
+        let response = parse_inference_dynamic(dynamic?).map_err(|e| sends.say_on(e))?;
         if let Some(rl) = &self.rate_limiter {
             rl.record_tokens(response.tokens_used.total_tokens);
         }
@@ -601,16 +675,17 @@ impl Provider for RhaiProvider {
         let executor = self.executor.clone();
         let rate_limiter = self.rate_limiter.clone();
         tokio::spawn(async move {
+            let mut sends = Sends::default();
             let outcome = loop {
                 tokio::select! {
                     biased;
                     res = &mut join => break res,
                     Some(job) = job_rx.recv() => {
-                        serve_job(&executor, &rate_limiter, job).await
+                        serve_job(&executor, &rate_limiter, job, &mut sends).await
                     }
                 }
             };
-            finalize_stream(outcome, &err_tx);
+            finalize_stream(outcome, sends, &err_tx);
             // err_tx dropped here → chunk stream ends.
         });
 

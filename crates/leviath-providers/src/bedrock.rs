@@ -197,7 +197,7 @@ impl BedrockProvider {
             return Ok(0);
         };
         let headers = [("x-api-key", self.api_key.clone())];
-        let mut result = Err(ProviderError::Other("no mantle host".to_string()));
+        let mut result = Err(ProviderError::unsent("no mantle host"));
         for host in &hosts {
             result = self
                 .get_json_with(&format!("{host}/v1/models"), &headers)
@@ -281,14 +281,16 @@ impl BedrockProvider {
             return Err(ProviderError::ApiError(format!(
                 "'{mode}' is not a Bedrock data retention mode: {}",
                 RETENTION_MODES.join(", ")
-            )));
+            ))
+            .before_send());
         }
         let Some(control) = self.control_base() else {
             return Err(ProviderError::ApiError(
                 "a gateway fronts Bedrock's control plane, so the account's data retention \
                  mode cannot be set from here"
                     .to_string(),
-            ));
+            )
+            .before_send());
         };
         let url = format!("{control}/data-retention");
         let builder = crate::provider::apply_request_timeout(
@@ -595,7 +597,7 @@ impl BedrockProvider {
     /// The rate cards in the region's price file, by display name.
     async fn fetch_prices(&self) -> Result<HashMap<String, crate::pricing::ModelPricing>> {
         let url = self.price_url().ok_or_else(|| {
-            ProviderError::Other("a gateway is configured; the price file is not read".to_string())
+            ProviderError::unsent("a gateway is configured; the price file is not read")
         })?;
         let file = self.get_json(&url, false).await?;
         Ok(pricing::parse_price_file(&file))

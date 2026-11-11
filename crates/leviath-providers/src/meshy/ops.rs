@@ -148,8 +148,8 @@ impl MeshyOp {
         match self {
             Self::ImageTo3d => {
                 let image = input_images(request).into_iter().next().ok_or_else(|| {
-                    ProviderError::InvalidResponse(
-                        "image-to-3d needs an image in a visible region, and found none".into(),
+                    ProviderError::unsent(
+                        "image-to-3d needs an image in a visible region, and found none",
                     )
                 })?;
                 let mut body = Map::new();
@@ -165,10 +165,9 @@ impl MeshyOp {
                     .take(MAX_MULTI_IMAGES)
                     .collect();
                 if images.is_empty() {
-                    return Err(ProviderError::InvalidResponse(
+                    return Err(ProviderError::unsent(
                         "multi-image-to-3d needs at least one image in a visible region, and \
-                         found none"
-                            .into(),
+                         found none",
                     ));
                 }
                 let mut body = Map::new();
@@ -194,10 +193,9 @@ impl MeshyOp {
             }
             Self::Retexture => {
                 let mesh = input_model(request).ok_or_else(|| {
-                    ProviderError::InvalidResponse(
+                    ProviderError::unsent(
                         "retexture needs a model/gltf-binary mesh in a visible region, and found \
-                         none"
-                            .into(),
+                         none",
                     )
                 })?;
                 let style = required_prompt(request, "retexture")?;
@@ -213,7 +211,7 @@ impl MeshyOp {
             // Rig, and animate's first phase which is a rig: a mesh in.
             Self::Rig | Self::Animate => {
                 let mesh = input_model(request).ok_or_else(|| {
-                    ProviderError::InvalidResponse(format!(
+                    ProviderError::unsent(format!(
                         "{} needs a model/gltf-binary mesh in a visible region, and found none",
                         self.id()
                     ))
@@ -287,7 +285,7 @@ fn required_prompt(request: &InferenceRequest, op: &str) -> Result<String> {
         .take(MAX_TEXTURE_PROMPT)
         .collect();
     if prompt.trim().is_empty() {
-        return Err(ProviderError::InvalidResponse(format!(
+        return Err(ProviderError::unsent(format!(
             "{op} needs a text prompt in a visible region, and found none"
         )));
     }

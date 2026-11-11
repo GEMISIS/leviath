@@ -142,6 +142,11 @@ pub struct Ran<T> {
 /// past its deadline, is forgotten, so the call made again submits afresh;
 /// one whose polling failed on the way (a dropped connection, a busy
 /// provider) is kept, so the call made again picks it back up.
+///
+/// Whatever fails once there is a job says its request was sent (see
+/// [`ProviderError::request_sent`]): the provider has the job, whether this
+/// call submitted it or an earlier one did, even when the poll that failed
+/// never connected. Only a first submit that fails answers for itself.
 pub async fn submit_or_resume<T, S, SF, W, WF>(step: &str, submit: S, mut wait: W) -> Result<Ran<T>>
 where
     S: FnOnce() -> SF,
@@ -151,7 +156,9 @@ where
 {
     let log = current();
     let mut note = None;
-    if let Some(id) = log.as_ref().and_then(|l| l.get(step)) {
+    let resumed = log.as_ref().and_then(|l| l.get(step));
+    let polled = resumed.is_some();
+    if let Some(id) = resumed {
         match wait(id.clone()).await {
             Err(e) if e.failure_kind() == Some(FailureKind::NotFound) => {
                 tracing::warn!(step, job = %id, "a job this call submitted before is gone; submitting it again");
@@ -165,7 +172,7 @@ where
             }
         }
     }
-    let id = submit().await?;
+    let id = submit().await.map_err(|e| submit_failed(polled, e))?;
     if let Some(log) = &log {
         log.put(step, &id);
     }
@@ -173,13 +180,24 @@ where
     Ok(Ran { id, value, note })
 }
 
+/// A failed submit's error. One made after the old job's poll was answered
+/// follows a request that went out; a first submit says for itself whether
+/// it did.
+fn submit_failed(after_poll: bool, error: ProviderError) -> ProviderError {
+    match after_poll {
+        true => error.after_send(),
+        false => error,
+    }
+}
+
 /// `waited`, forgetting the job when it ended without a result: a failed job
-/// or one past its deadline is never picked back up.
+/// or one past its deadline is never picked back up. Its error says a
+/// request was sent, since the job it waited on was.
 fn settle<T>(log: Option<&JobLog>, step: &str, waited: Result<T>) -> Result<T> {
     if let (Some(log), Err(ProviderError::Other(_))) = (log, &waited) {
         log.forget(step);
     }
-    waited
+    waited.map_err(ProviderError::after_send)
 }
 
 /// `summary`, followed by each note.

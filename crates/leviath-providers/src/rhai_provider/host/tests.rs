@@ -93,7 +93,7 @@ async fn forward_sse_reports_read_error() {
     assert_eq!(rx.recv().await.unwrap().unwrap(), "x");
     assert!(matches!(
         rx.recv().await.unwrap(),
-        Err(HostHttpError::Transport(msg)) if msg == "boom"
+        Err(HostHttpError::Transport(msg)) if msg == "[sent] boom"
     ));
     assert!(rx.recv().await.is_none());
 }
@@ -845,4 +845,105 @@ fn a_blank_content_type_declares_octet_stream() {
     );
     assert_eq!(declared_type(None), "application/octet-stream");
     assert_eq!(declared_type(Some("image/PNG")), "image/png");
+}
+
+/// A transport failure is tagged with what the host knows, and left bare
+/// when it knows nothing.
+#[test]
+fn a_transport_error_says_whether_its_request_went_out() {
+    for (sent, text) in [
+        (Some(true), "[sent] reset"),
+        (Some(false), "[not-sent] reset"),
+        (None, "reset"),
+    ] {
+        assert!(
+            matches!(transport_error(sent, "reset"), HostHttpError::Transport(m) if m == text),
+            "{sent:?}"
+        );
+    }
+}
+
+/// A resolver that fails every lookup: a connect failure that needs no
+/// network and reads the same on every platform.
+struct NeverResolves;
+
+impl reqwest::dns::Resolve for NeverResolves {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        Box::pin(async move {
+            let message = format!("failed to lookup address information: {}", name.as_str());
+            Err(std::io::Error::other(message).into())
+        })
+    }
+}
+
+/// A request that never connected says so to the script, on the unary path
+/// and the streaming one.
+#[tokio::test]
+async fn a_request_that_never_connected_is_marked_not_sent() {
+    let unresolvable = || {
+        ReqwestExecutor::new(
+            reqwest::Client::builder()
+                .dns_resolver(NeverResolves)
+                .build()
+                .expect("a client builds"),
+        )
+    };
+    let url = "https://no-such-host-anywhere-12345.invalid/v1".to_string();
+    let err = unresolvable()
+        .execute(req(HttpMethod::Get, url.clone(), None))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, HostHttpError::Transport(m) if m.starts_with("[not-sent] ")),
+        "{err:?}"
+    );
+    let (tx, mut rx) = mpsc::channel(4);
+    unresolvable()
+        .execute_stream(req(HttpMethod::Post, url, Some("{}")), tx)
+        .await;
+    let err = rx.recv().await.expect("one event").unwrap_err();
+    assert!(
+        matches!(&err, HostHttpError::Transport(m) if m.starts_with("[not-sent] ")),
+        "{err:?}"
+    );
+}
+
+/// The first attempt is read and dropped, which is retried; the retry finds
+/// nothing listening. The last attempt never connected, and the request
+/// still went out once.
+#[tokio::test]
+async fn a_retry_that_never_connects_follows_an_attempt_that_was_sent() {
+    let listener = leviath_testkit::bind_local_std();
+    let addr = listener.local_addr().expect("has an address");
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let (mut stream, _) = listener.accept().expect("the first attempt connects");
+        let mut buf = [0u8; 4096];
+        let _ = stream.read(&mut buf);
+        // Both dropped here: the request is cut off unanswered, and nothing
+        // listens for the attempts after it.
+    });
+    let err = executor()
+        .execute(req(HttpMethod::Get, format!("http://{addr}/v1"), None))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, HostHttpError::Transport(m) if m.starts_with("[sent] ")),
+        "{err:?}"
+    );
+}
+
+/// A body that stops short had a response in hand, so the script is told the
+/// request went out.
+#[tokio::test]
+async fn a_body_cut_short_is_marked_sent() {
+    let url = leviath_testkit::spawn_mock_server_truncated_body(200, "OK").await;
+    let err = executor()
+        .execute(req(HttpMethod::Get, url, None))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, HostHttpError::Transport(m) if m.starts_with("[sent] ")),
+        "{err:?}"
+    );
 }

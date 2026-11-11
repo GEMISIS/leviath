@@ -325,6 +325,7 @@ async fn a_transcription_uploads_the_audio_and_keeps_the_word_timings() {
     .await
     .unwrap_err();
     assert!(nothing.to_string().contains("needs an audio part"));
+    assert_eq!(nothing.request_sent(), Some(false));
 }
 
 #[tokio::test]
@@ -546,6 +547,7 @@ async fn a_video_past_its_deadline_and_audio_that_does_not_decode_are_errors() {
     .await
     .unwrap_err();
     assert!(err.to_string().contains("needs an audio part"), "{err}");
+    assert_eq!(err.request_sent(), Some(false));
 }
 
 /// A call made again after a restart polls the task it submitted before and

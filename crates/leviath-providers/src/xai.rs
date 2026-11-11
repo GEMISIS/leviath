@@ -245,7 +245,11 @@ impl XaiProvider {
             self.effort_refused.insert(&model);
             tracing::info!(model = %model, "xAI refused a reasoning effort for this model; asking without one");
             body = self.body(request, None);
-            response = self.endpoint.post_json("/responses", &body).await?;
+            response = self
+                .endpoint
+                .post_json("/responses", &body)
+                .await
+                .map_err(crate::provider::ProviderError::after_send)?;
         }
         // A subscription over its limit answers 429 with no `Retry-After`; the
         // billing period's end is the real answer, and backing off blind

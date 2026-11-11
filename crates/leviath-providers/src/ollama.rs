@@ -338,6 +338,7 @@ impl OllamaProvider {
             used: estimated_request_tokens(request),
             reply_budget: request.max_tokens,
             max: self.max_context_tokens(&request.model),
+            sent: true,
         }
     }
 
@@ -2579,11 +2580,11 @@ mod tests {
             url,
         );
 
-        let shown = provider
-            .infer(&mock_request())
-            .await
-            .unwrap_err()
-            .to_string();
+        let err = provider.infer(&mock_request()).await.unwrap_err();
+        // The server answered the overflow, so this one went out, where the
+        // window guard's refusal of the same size never does.
+        assert_eq!(err.request_sent(), Some(true));
+        let shown = err.to_string();
 
         assert!(
             shown.starts_with("Token limit exceeded:"),
@@ -2603,7 +2604,8 @@ mod tests {
             !ProviderError::TokenLimitExceeded {
                 used: 33_000,
                 reply_budget: 0,
-                max: 32_768
+                max: 32_768,
+                sent: false,
             }
             .is_transient(),
             "no backoff makes an oversized request fit"

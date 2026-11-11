@@ -200,7 +200,7 @@ pub(crate) async fn chat_audio(
     use base64::Engine as _;
     let speak = wants_audio(request);
     if !speak && media::first_part(request, |m| m.starts_with("audio/")).is_none() {
-        return Err(ProviderError::Other(format!(
+        return Err(ProviderError::unsent(format!(
             "{} needs audio in its input or its output, and this stage has neither. Declare \
              audio output on the stage (an `output_routing` key such as `audio/mpeg`), hand \
              it an audio part, or name a text model.",
@@ -209,7 +209,7 @@ pub(crate) async fn chat_audio(
     }
     let format = media::extra_str(request, "audio_format").unwrap_or_else(|| "mp3".to_string());
     let mime = chat_audio_type(&format).ok_or_else(|| {
-        ProviderError::InvalidResponse(format!(
+        ProviderError::unsent(format!(
             "audio_format '{format}' is not one {} returns: use mp3, wav, flac, opus or pcm16",
             request.model
         ))
@@ -369,7 +369,10 @@ async fn video(
     } = crate::jobs::submit_or_resume(&step, submit, wait).await?;
 
     let content_url = endpoint.url(&format!("/videos/{id}/content"));
-    let response = endpoint.send(|client| client.get(&content_url)).await?;
+    let response = endpoint
+        .send(|client| client.get(&content_url))
+        .await
+        .map_err(ProviderError::after_send)?;
     let response =
         crate::provider::check_http_response(response, endpoint.rate_limiter.as_ref()).await?;
     let bytes = media::body_bytes(response).await;
@@ -413,7 +416,7 @@ fn video_size(request: &InferenceRequest) -> Result<Option<String>> {
         })
     });
     size.map(|s| Some(s.to_string())).ok_or_else(|| {
-        ProviderError::Other(format!(
+        ProviderError::unsent(format!(
             "`size` must be WIDTHxHEIGHT, such as \"1280x720\", not {value}"
         ))
     })
@@ -428,7 +431,7 @@ async fn speech(
 ) -> Result<InferenceResponse> {
     let text = media::request_text(request);
     if text.is_empty() {
-        return Err(ProviderError::InvalidResponse(format!(
+        return Err(ProviderError::unsent(format!(
             "{} needs text to speak: the stage handed it none",
             request.model
         )));
@@ -481,7 +484,7 @@ async fn transcribe(
     billing: &Billing,
 ) -> Result<InferenceResponse> {
     let audio = media::first_part(request, |m| m.starts_with("audio/")).ok_or_else(|| {
-        ProviderError::InvalidResponse(format!(
+        ProviderError::unsent(format!(
             "{} needs an audio part to transcribe: the stage handed it none",
             request.model
         ))

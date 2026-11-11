@@ -111,7 +111,8 @@ impl GeminiProvider {
             .body(body)
             .send()
             .await
-            .map_err(|e| ProviderError::transport("uploading a file", &e))?;
+            // The start was answered, so this follows a request that went out.
+            .map_err(|e| ProviderError::transport("uploading a file", &e).after_send())?;
         let mut file = unwrapped(read_answer(finished).await?);
         let remote = remote_of(&file)?;
         let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
@@ -121,7 +122,8 @@ impl GeminiProvider {
                     "{} was still processing after {}s",
                     remote.id,
                     READY_TIMEOUT.as_secs()
-                )));
+                ))
+                .after_send());
             }
             tokio::time::sleep(poll).await;
             // The file's own uri is its resource; the name under the base is
@@ -134,7 +136,7 @@ impl GeminiProvider {
                 .files_request(reqwest::Method::GET, &resource)
                 .send()
                 .await
-                .map_err(|e| ProviderError::transport("checking an upload", &e))?;
+                .map_err(|e| ProviderError::transport("checking an upload", &e).after_send())?;
             file = unwrapped(read_answer(response).await?);
         }
         match state_of(&file) {

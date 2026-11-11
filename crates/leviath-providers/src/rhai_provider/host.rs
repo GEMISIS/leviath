@@ -83,8 +83,20 @@ pub enum HostHttpError {
     },
     /// A non-2xx, non-429 response: `HTTP <status>: <body>`.
     Api(String),
-    /// A transport failure (connection/timeout/read error).
+    /// A transport failure (connection/timeout/read error). The message opens
+    /// with `[sent]` or `[not-sent]` when the host knows whether the request
+    /// went out (see [`crate::ProviderError::request_sent`]).
     Transport(String),
+}
+
+/// A transport failure saying whether its request went out, when that is
+/// known. One that cannot be placed carries no tag: an untagged transport
+/// error already reads as unknown.
+fn transport_error(sent: Option<bool>, text: &str) -> HostHttpError {
+    HostHttpError::Transport(match sent {
+        Some(_) => crate::failure::tagged(sent, text),
+        None => text.to_string(),
+    })
 }
 
 /// The item type of a streaming job's event channel: one SSE `data:` payload,
@@ -240,14 +252,18 @@ impl ReqwestExecutor {
         // and the next attempt would go straight back to the protocol already
         // known to be broken here.
         let mut use_h1 = false;
+        // Whether any attempt so far went out. The last one may never
+        // connect, and the provider still has the earlier ones.
+        let mut sent = Some(false);
         loop {
             let client = retry_client(&self.client, self.h1_client.as_ref(), use_h1);
             match self.build_with(client, req).send().await {
                 Ok(resp) => return Ok(resp),
                 Err(e) => {
                     let chain = error_chain(&e);
+                    sent = crate::failure::either(sent, crate::failure::reqwest_request_sent(&e));
                     if attempt >= TRANSPORT_RETRIES || !is_retryable_transport(&chain) {
-                        return Err(HostHttpError::Transport(chain));
+                        return Err(transport_error(sent, &chain));
                     }
                     use_h1 = use_h1 || is_h2_protocol_error(&chain);
                     attempt += 1;
@@ -378,10 +394,11 @@ pub fn is_h2_protocol_error(chain: &str) -> bool {
 }
 
 /// A body read that stopped short, as the error the script sees: a dropped
-/// connection is transport, a body over the cap is the API's doing.
+/// connection is transport, a body over the cap is the API's doing. Either
+/// way the response had arrived, so the request was sent.
 fn body_error(e: BodyReadError) -> HostHttpError {
     match e {
-        BodyReadError::Transport(e) => HostHttpError::Transport(e.to_string()),
+        BodyReadError::Transport(e) => transport_error(Some(true), &e.to_string()),
         too_large @ BodyReadError::TooLarge { .. } => HostHttpError::Api(too_large.to_string()),
     }
 }
@@ -494,8 +511,9 @@ impl HttpExecutor for ReqwestExecutor {
         let resp = match self.build(&req).send().await {
             Ok(r) => r,
             Err(e) => {
+                let sent = crate::failure::reqwest_request_sent(&e);
                 let _ = events
-                    .send(Err(HostHttpError::Transport(e.to_string())))
+                    .send(Err(transport_error(sent, &e.to_string())))
                     .await;
                 return;
             }
@@ -553,9 +571,10 @@ pub(crate) async fn forward_sse<S, E>(
                     }
                 }
             }
+            // The stream was open, so the request had been sent.
             Err(e) => {
                 let _ = events
-                    .send(Err(HostHttpError::Transport(e.to_string())))
+                    .send(Err(transport_error(Some(true), &e.to_string())))
                     .await;
                 return;
             }

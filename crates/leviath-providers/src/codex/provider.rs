@@ -169,12 +169,16 @@ impl CodexProvider {
         let response = match response.status().as_u16() {
             401 => {
                 tracing::debug!("the ChatGPT token was rejected; refreshing and retrying once");
+                // The rejected request went out, so what fails from here on
+                // follows one that did.
                 let refreshed = self
                     .tokens
                     .refresh_stale(&creds.access_token)
                     .await
-                    .map_err(unavailable)?;
-                self.post(body, &refreshed).await?
+                    .map_err(|e| unavailable(e).after_send())?;
+                self.post(body, &refreshed)
+                    .await
+                    .map_err(ProviderError::after_send)?
             }
             _ => response,
         };
@@ -431,11 +435,13 @@ fn plan_gated(body: &str, model: &str) -> bool {
 }
 
 /// Turn a refresh failure into the provider-level error that says what to do.
+/// No request was made with the token it could not get.
 fn unavailable(error: RefreshError) -> ProviderError {
     ProviderError::Unavailable {
         reason: UnavailableReason::AuthFailed,
         detail: error.to_string(),
     }
+    .before_send()
 }
 
 #[async_trait]

@@ -319,6 +319,37 @@ A name this build does not know is ignored rather than refused. A script written
 version still runs here. Omitting `failure_kind` entirely is fine. It is extra detail, not a
 requirement.
 
+### Whether the request was sent
+
+A caller that keeps its own account of spend asks one thing of a failed call: could the provider
+have charged for it. A request that never left the machine cost nothing. One that left may have,
+whatever came back. Every provider error answers that through `ProviderError::request_sent()`, and
+a script does not have to say anything for its errors to answer it too.
+
+A script reaches the network only through the host's HTTP functions, so the host knows what each
+call did:
+
+| What the script's call made | What its error says |
+|---|---|
+| no HTTP request at all | not sent, whatever `kind` the script threw |
+| a request that got an answer of any status, or whose body stopped arriving | sent, even when the script then throws its own complaint about the reply |
+| a request that never connected (name not resolved, refused, handshake failed, connect timed out) | not sent |
+| a request that timed out with nothing to show whether the connection was up | unknown |
+
+With several requests in one call the answer is "sent" once any of them went out. A retry that
+never connects after an attempt that did still counts as sent, and so does a second request made
+after a first one was answered.
+
+The answer rides at the head of the message, the way a `failure_kind` does: `[sent]`, `[not-sent]`
+or `[sent-unknown]`, after the kind's label when there is one. A transport error the host hands a
+script already opens with `[sent]` or `[not-sent]` when the host knows, so a script that catches
+one and throws its text on keeps the answer. A `rate_limited` error has no message to carry a tag
+and always reads as sent: a rate limit is a provider's answer.
+
+After a streaming request the host only adds a known "sent". What happened to the stream reaches
+the script as events, and the stream's own failure already says in its message whether it went
+out.
+
 ## A complete provider
 
 This is a full OpenAI-compatible provider. Save it as `~/.leviath/providers/groq.rhai`, set

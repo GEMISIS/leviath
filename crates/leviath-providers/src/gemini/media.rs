@@ -284,7 +284,7 @@ impl super::GeminiProvider {
     /// refusal says why there), for the stage to judge.
     pub(super) async fn omni(&self, request: &InferenceRequest) -> Result<InferenceResponse> {
         if media::request_text(request).is_empty() {
-            return Err(ProviderError::InvalidResponse(format!(
+            return Err(ProviderError::unsent(format!(
                 "google/{} needs a prompt: the stage handed it no text",
                 request.model
             )));
@@ -406,7 +406,7 @@ impl super::GeminiProvider {
         let deadline = media::deadline(request);
         let prompt = media::request_text(request);
         if prompt.is_empty() {
-            return Err(ProviderError::InvalidResponse(format!(
+            return Err(ProviderError::unsent(format!(
                 "google/{} needs a prompt: the stage handed it no text",
                 request.model
             )));
@@ -506,7 +506,10 @@ impl super::GeminiProvider {
                 ProviderError::InvalidResponse(format!("the Veo operation finished, but {why}"))
             })?;
         // Veo makes MP4, whatever type the download is served as.
-        let bytes = self.download_media(uri).await?;
+        let bytes = self
+            .download_media(uri)
+            .await
+            .map_err(ProviderError::after_send)?;
         let parts = vec![media::typed_blob("video/mp4", bytes, "video.mp4")];
         // Veo 3.1 makes eight seconds unless asked otherwise.
         let length = seconds.unwrap_or(8) as f64;

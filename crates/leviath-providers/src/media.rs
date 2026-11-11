@@ -409,7 +409,7 @@ pub(crate) fn extra_seconds(request: &InferenceRequest, keys: &[&str]) -> Result
     };
     match seconds {
         Some(seconds) if seconds > 0 => Ok(Some(seconds)),
-        _ => Err(ProviderError::Other(format!(
+        _ => Err(ProviderError::unsent(format!(
             "`{key}` must be a whole number of seconds, such as 4, \"4\" or \"4s\", not {value}"
         ))),
     }
@@ -434,7 +434,7 @@ pub(crate) fn extra_choice(
         .and_then(|text| allowed.iter().find(|a| a.eq_ignore_ascii_case(text)))
         .map(|choice| Some(*choice))
         .ok_or_else(|| {
-            ProviderError::Other(format!(
+            ProviderError::unsent(format!(
                 "`{key}` must be one of {}, not {value}",
                 allowed.join(", ")
             ))
@@ -498,8 +498,9 @@ where
     loop {
         match check().await? {
             Poll::Done(task) => return Ok(task),
+            // The check that reported it was answered, so a request went out.
             Poll::Failed(reason) => {
-                return Err(ProviderError::Other(format!("{what} failed: {reason}")));
+                return Err(ProviderError::Other(format!("{what} failed: {reason}")).after_send());
             }
             Poll::Running => {}
         }
@@ -507,7 +508,8 @@ where
             return Err(ProviderError::Other(format!(
                 "{what} did not finish within its deadline; raise the stage's \
                  request_timeout_secs if it needs longer"
-            )));
+            ))
+            .after_send());
         }
         tokio::time::sleep(interval).await;
     }
@@ -997,12 +999,15 @@ mod tests {
         .await
         .unwrap_err();
         assert!(failed.to_string().contains("moderated"));
+        // The check that reported the failure was answered.
+        assert_eq!(failed.request_sent(), Some(true));
         let late = poll_until("task", Instant::now(), Duration::ZERO, || async {
             Ok(Poll::Running)
         })
         .await
         .unwrap_err();
         assert!(late.to_string().contains("request_timeout_secs"));
+        assert_eq!(late.request_sent(), Some(true));
         let errored = poll_until("task", Instant::now(), Duration::ZERO, || async {
             Err(ProviderError::Other("boom".into()))
         })

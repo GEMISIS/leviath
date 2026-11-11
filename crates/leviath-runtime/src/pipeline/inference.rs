@@ -356,6 +356,7 @@ pub(crate) fn window_overflow(
         used: spent,
         reply_budget: MIN_OUTPUT_TOKENS,
         max: window.max_tokens,
+        sent: false,
     })
 }
 

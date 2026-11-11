@@ -974,6 +974,30 @@ mod tests {
         assert!(!provider.capabilities("strict").supports_temperature);
     }
 
+    /// The request sent again without the refused temperature never
+    /// connects. The refusal was an answer, so a request of this call went
+    /// out, which the failure's kind alone would deny.
+    #[tokio::test]
+    async fn a_resend_that_never_connects_follows_a_request_that_was_sent() {
+        let _guard = always_on_tracing_guard();
+        let refusal = br#"{"error":{"message":"Unsupported value: 'temperature' does not support 0.2 with this model.","type":"invalid_request_error","param":"temperature","code":"unsupported_value"}}"#;
+        // One answer in the sequence: the listener is gone for the resend.
+        let (url, bodies) = spawn_mock_sequence(vec![(400, "Bad Request", refusal.to_vec())]).await;
+        let err = provider_at(&url)
+            .infer(&request("strict"))
+            .await
+            .expect_err("the resend fails");
+        assert_eq!(bodies.lock().unwrap().len(), 1);
+        assert!(err.to_string().starts_with("Request failed: "), "{err}");
+        assert_eq!(err.request_sent(), Some(true));
+        // A first send that never connects says for itself that nothing went.
+        let first = provider_at(&url)
+            .infer(&request("other"))
+            .await
+            .expect_err("nothing is listening");
+        assert_ne!(first.request_sent(), Some(true), "{first}");
+    }
+
     /// Every current OpenAI reasoning model refuses `max_tokens` and names
     /// the field it takes instead. The body is resent with the cap under that
     /// name, and the model is remembered so the next request starts there.

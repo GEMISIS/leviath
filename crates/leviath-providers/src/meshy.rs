@@ -281,15 +281,19 @@ impl MeshyProvider {
             let task = self.get_json(status_url).await?;
             match task_state(&task) {
                 TaskState::Succeeded => return Ok(task),
+                // The poll that reported it was answered, so a request went out.
                 TaskState::Failed(reason) => {
-                    return Err(ProviderError::Other(format!("Meshy task failed: {reason}")));
+                    return Err(
+                        ProviderError::Other(format!("Meshy task failed: {reason}")).after_send()
+                    );
                 }
                 TaskState::Running(_) => {}
             }
             if Instant::now() >= deadline {
                 return Err(ProviderError::Other(
                     "Meshy task did not finish within its deadline".to_string(),
-                ));
+                )
+                .after_send());
             }
             sleep(self.poll_interval).await;
         }
@@ -364,7 +368,9 @@ impl MeshyProvider {
             )
             .await?;
         let parts = self.download_parts(op, &task.value).await;
-        parts.map(|parts| (parts, vec![task.note]))
+        parts
+            .map(|parts| (parts, vec![task.note]))
+            .map_err(ProviderError::after_send)
     }
 
     /// Text to a textured mesh: a preview task builds the geometry, then a
@@ -382,12 +388,17 @@ impl MeshyProvider {
             )
             .await?;
 
+        // The preview is made and paid for: whatever fails from here on
+        // follows a request that went out.
         let refine_body = MeshyOp::text_refine_body(&preview.id, request);
         let refine = self
             .run_task(request, "refine", op.path(), &refine_body, deadline)
-            .await?;
+            .await
+            .map_err(ProviderError::after_send)?;
         let parts = self.download_parts(op, &refine.value).await;
-        parts.map(|parts| (parts, vec![preview.note, refine.note]))
+        parts
+            .map(|parts| (parts, vec![preview.note, refine.note]))
+            .map_err(ProviderError::after_send)
     }
 
     /// A mesh to an animated mesh: rig it, look the requested action up in the
@@ -408,9 +419,14 @@ impl MeshyProvider {
             )
             .await?;
 
-        // Phase 2: resolve the requested action to a library action id.
+        // Phase 2: resolve the requested action to a library action id. The
+        // rig is made and paid for: whatever fails from here on follows a
+        // request that went out.
         let action = animate_action(request);
-        let library = self.get_library(&action).await?;
+        let library = self
+            .get_library(&action)
+            .await
+            .map_err(ProviderError::after_send)?;
         let action_id = library_action_id(&library).ok_or_else(|| {
             ProviderError::InvalidResponse(format!("Meshy has no animation matching '{action}'"))
         })?;
@@ -419,9 +435,12 @@ impl MeshyProvider {
         let anim_body = MeshyOp::animate_body(&rig.id, action_id);
         let anim = self
             .run_task(request, "animate", ANIMATIONS_PATH, &anim_body, deadline)
-            .await?;
+            .await
+            .map_err(ProviderError::after_send)?;
         let parts = self.download_parts(op, &anim.value).await;
-        parts.map(|parts| (parts, vec![rig.note, anim.note]))
+        parts
+            .map(|parts| (parts, vec![rig.note, anim.note]))
+            .map_err(ProviderError::after_send)
     }
 
     /// The animation library, filtered by a search term.
@@ -463,7 +482,7 @@ fn query_encode(value: &str) -> String {
 impl Provider for MeshyProvider {
     async fn infer(&self, request: &InferenceRequest) -> Result<InferenceResponse> {
         let op = MeshyOp::parse(&request.model).ok_or_else(|| {
-            ProviderError::InvalidResponse(format!(
+            ProviderError::unsent(format!(
                 "the meshy provider has no operation named '{}'; it serves {}",
                 request.model,
                 CATALOG
@@ -1067,6 +1086,17 @@ mod tests {
             err.to_string().contains("image-to-3d needs an image"),
             "{err}"
         );
+        // Refused here, so not an answer of the provider's and not sent.
+        let kind = format!("{err:?}");
+        assert!(kind.starts_with("Other("), "{kind}");
+        assert_eq!(err.failure_kind(), None);
+        assert_eq!(err.request_sent(), Some(false));
+        let unknown = provider_at("http://127.0.0.1:1")
+            .infer(&request_with("sculpt", vec![]))
+            .await
+            .unwrap_err();
+        assert!(unknown.to_string().contains("no operation named"));
+        assert_eq!(unknown.request_sent(), Some(false));
     }
 
     #[tokio::test]
@@ -1215,6 +1245,8 @@ mod tests {
         // Bytes that never arrived are a transport failure, which is retried.
         let kind = format!("{err:?}");
         assert!(kind.starts_with("RequestFailed("), "{kind}");
+        // The task behind the download was made and paid for.
+        assert_eq!(err.request_sent(), Some(true));
     }
 
     fn text_block(text: &str) -> ContentBlock {
@@ -1393,6 +1425,9 @@ mod tests {
             err.to_string().contains("listing Meshy animations"),
             "{err}"
         );
+        // The library read never connected, and the rig before it was made
+        // and paid for: the kind alone would say nothing left this machine.
+        assert_eq!(err.request_sent(), Some(true));
     }
 
     #[test]
@@ -1421,6 +1456,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("creating a Meshy task"), "{err}");
+        assert_ne!(err.request_sent(), Some(true), "nothing went out: {err}");
 
         // The preview task fails.
         let (api, _b) = spawn_mock_sequence(vec![
@@ -1434,6 +1470,7 @@ mod tests {
         .await;
         let err = provider_at(&api).infer(&prompt()).await.unwrap_err();
         assert!(err.to_string().contains("bad prompt"), "{err}");
+        assert_eq!(err.request_sent(), Some(true));
 
         // The refine create errors (the server has nothing more to give).
         let (api, _b) = spawn_mock_sequence(vec![
@@ -1443,6 +1480,8 @@ mod tests {
         .await;
         let err = provider_at(&api).infer(&prompt()).await.unwrap_err();
         assert!(err.to_string().contains("creating a Meshy task"), "{err}");
+        // The refine never connected; the preview before it was made.
+        assert_eq!(err.request_sent(), Some(true));
 
         // The refine task fails.
         let (api, _b) = spawn_mock_sequence(vec![

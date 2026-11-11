@@ -180,6 +180,71 @@ async fn a_submit_that_fails_records_nothing() {
     assert_eq!(log.version(), 0);
 }
 
+/// A transport failure of the kind that, alone, says nothing left this
+/// machine.
+fn refused() -> ProviderError {
+    ProviderError::labelled(
+        FailureKind::ConnectionRefused,
+        "polling",
+        "nothing listening",
+    )
+}
+
+/// Once there is a job, whatever fails says its request was sent: the
+/// provider has the job even when the poll that failed never connected. A
+/// first submit that fails answers for itself.
+#[tokio::test]
+async fn what_fails_behind_a_job_says_its_request_was_sent() {
+    assert_eq!(refused().request_sent(), Some(false));
+    let remote = Remote::new();
+
+    // The submit itself never connects: nothing went out.
+    let unsent = submit_or_resume(
+        "step",
+        || async { Err(refused()) },
+        |id| async move { Ok(id) },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(unsent.request_sent(), Some(false));
+
+    // Submitted in this call, then the poll never connects.
+    let polled = submit_or_resume(
+        "step",
+        || remote.submit(),
+        |_| async { Err::<(), _>(refused()) },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(polled.request_sent(), Some(true));
+    assert_eq!(polled.failure_kind(), Some(FailureKind::ConnectionRefused));
+
+    // Submitted by an earlier call and only waited on in this one.
+    let log = JobLog::new([("step".to_string(), "job-old".to_string())].into());
+    let resumed = log
+        .scope(submit_or_resume(
+            "step",
+            || remote.submit(),
+            |_| async { Err::<(), _>(refused()) },
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(resumed.request_sent(), Some(true));
+    assert_eq!(remote.submitted(), 1, "the job it had was waited on");
+
+    // The old job is gone, which its poll was answered to say, and the
+    // submit made in its place never connects.
+    let resubmitted = log
+        .scope(submit_or_resume(
+            "step",
+            || async { Err(refused()) },
+            |_| async { Err::<(), _>(gone()) },
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(resubmitted.request_sent(), Some(true));
+}
+
 /// Clearing a log forgets its jobs and counts as a change only when it held
 /// some.
 #[test]

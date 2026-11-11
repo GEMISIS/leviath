@@ -55,7 +55,7 @@ pub(crate) async fn run(
 ) -> Result<InferenceResponse> {
     let prompt = super::request_text(request);
     if prompt.is_empty() {
-        return Err(ProviderError::InvalidResponse(format!(
+        return Err(ProviderError::unsent(format!(
             "{}/{} needs a prompt: the stage handed it no text",
             route.provider, request.model
         )));
@@ -134,7 +134,12 @@ pub(crate) async fn run(
                 .map_err(|e| {
                     ProviderError::InvalidResponse(format!("an image was not base64: {e}"))
                 })?,
-            (None, Some(url)) => super::download(&endpoint.client, url).await?.0,
+            (None, Some(url)) => {
+                super::download(&endpoint.client, url)
+                    .await
+                    .map_err(ProviderError::after_send)?
+                    .0
+            }
             (None, None) => continue,
         };
         let mime = registry
@@ -365,6 +370,7 @@ mod tests {
         .await
         .unwrap_err();
         assert!(empty.to_string().contains("needs a prompt"));
+        assert_eq!(empty.request_sent(), Some(false));
         let (url, _) = spawn_mock_sequence(vec![
             (200, "OK", b"{\"data\":[]}".to_vec()),
             (200, "OK", b"{\"data\":[{\"b64_json\":\"@@@\"}]}".to_vec()),
@@ -403,7 +409,10 @@ mod tests {
         let unreachable = json!({ "data": [ { "url": "http://127.0.0.1:9/i.png" } ] });
         let (url, _) =
             spawn_mock_sequence(vec![(200, "OK", unreachable.to_string().into_bytes())]).await;
-        assert!(run(&endpoint(&url), &route, &req).await.is_err());
+        let err = run(&endpoint(&url), &route, &req).await.unwrap_err();
+        // The download never connects, and the generation before it was
+        // answered: a request went out.
+        assert_eq!(err.request_sent(), Some(true), "{err}");
         // An image whose type is no type.
         let untyped = json!({ "data": [ { "b64_json": "SlBFRw==", "mime_type": "not a type" } ] });
         let (url, _) =
