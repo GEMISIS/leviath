@@ -361,3 +361,6 @@ mod tests;
 
 #[cfg(test)]
 mod effort_tests;
+
+#[cfg(test)]
+mod cache_prefix_tests;

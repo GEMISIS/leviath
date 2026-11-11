@@ -42,9 +42,10 @@ pub mod cache;
 pub mod conversation;
 
 pub use cache::{
-    CACHE_CHUNK_TOKENS, MAX_SYSTEM_CACHE_RUNS, append_only_chunks, block_hash, block_sort_priority,
-    cache_hint_sort_priority, lifecycle_cache_hint, mark_recently_changed_run, message_breakpoint,
-    push_bracketed, push_chunked, system_prefix_hash,
+    CACHE_CHUNK_TOKENS, MAX_MESSAGE_CACHE_BREAKPOINTS, MAX_SYSTEM_CACHE_RUNS, append_only_chunks,
+    block_hash, block_sort_priority, cache_hint_sort_priority, continuation, is_note,
+    lifecycle_cache_hint, mark_recently_changed_run, message_breakpoints, push_bracketed,
+    push_chunked, system_prefix_hash,
 };
 
 /// A system prompt block, separated from conversation messages.
@@ -274,7 +275,7 @@ pub struct SystemAssembly<'a> {
     /// compares against to tell which blocks held still.
     pub block_hashes: Vec<u64>,
     /// [`system_prefix_hash`] of the blocks: when it differs from the
-    /// previous request's, the prefix moved and [`message_breakpoint`] places
+    /// previous request's, the prefix moved and [`message_breakpoints`] places
     /// nothing.
     pub system_hash: u64,
 }

@@ -593,6 +593,41 @@ mod tests {
         }
     }
 
+    /// What a region gained during a stage follows the tool results as a user
+    /// turn. Converse wants the roles to alternate, so the two user turns go as
+    /// one, the tool result first as a reply to the call before it.
+    #[test]
+    fn a_turn_after_tool_results_joins_them_after_the_results() {
+        let mut call = request(vec![
+            user("go"),
+            assistant(vec![ContentBlock::ToolUse {
+                id: "c1".to_string(),
+                name: "read".to_string(),
+                input: json!({ "path": "a.rs" }),
+                thought_signature: None,
+            }]),
+            Message {
+                role: "user".to_string(),
+                content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                    tool_use_id: "c1".to_string(),
+                    content: "[output is in your context under 'codebase']".to_string(),
+                    is_error: false,
+                }]),
+                cache_breakpoint: false,
+                reasoning: None,
+            },
+            user("## codebase (continued)\nfn a() {}"),
+        ]);
+        call.tools = vec![tool()];
+        let body = converse_body(&call, &caps(), Vendor::Anthropic);
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 3);
+        let last = messages[2]["content"].as_array().unwrap();
+        assert_eq!(messages[2]["role"], "user");
+        assert!(last[0].get("toolResult").is_some(), "{last:?}");
+        assert_eq!(last[1]["text"], "## codebase (continued)\nfn a() {}");
+    }
+
     #[test]
     fn a_text_request_is_the_smallest_body() {
         let body = converse_body(&request(vec![user("hi")]), &caps(), Vendor::Anthropic);

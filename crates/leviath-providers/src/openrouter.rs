@@ -339,6 +339,10 @@ impl OpenRouterProvider {
             }
         }
 
+        // A Mistral upstream refuses a user turn after a tool result, which is
+        // where a region's gain during a stage is sent.
+        let messages = crate::openai_compat::fold_user_after_tool(messages, &request.model);
+
         let caps = self.capabilities(&request.model);
         let mut body = if caps.supports_temperature {
             serde_json::json!({
@@ -2283,6 +2287,102 @@ mod tests {
         let msgs = body["messages"].as_array().unwrap();
         // Non-anthropic model should not get cache_control blocks
         assert!(msgs[0]["content"].is_string());
+    }
+
+    /// A region's gain during a stage follows the tool results as a user turn.
+    /// Through OpenRouter that order reaches every upstream as sent, except a
+    /// Mistral one, which refuses a user turn after a tool result: there the
+    /// text joins the result.
+    #[test]
+    fn a_user_turn_after_a_tool_result_is_folded_for_mistral_only() {
+        let provider = OpenRouterProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
+        let say = |role: &str, content: crate::provider::MessageContent| crate::provider::Message {
+            role: role.to_string(),
+            content,
+            cache_breakpoint: false,
+            reasoning: None,
+        };
+        let request = |model: &str| InferenceRequest {
+            system: vec![],
+            messages: vec![
+                say("user", "go".into()),
+                say(
+                    "assistant",
+                    crate::provider::MessageContent::Blocks(vec![
+                        crate::provider::ContentBlock::ToolUse {
+                            id: "c1".to_string(),
+                            name: "read_file".to_string(),
+                            input: serde_json::json!({}),
+                            thought_signature: None,
+                        },
+                    ]),
+                ),
+                say(
+                    "user",
+                    crate::provider::MessageContent::Blocks(vec![
+                        crate::provider::ContentBlock::ToolResult {
+                            tool_use_id: "c1".to_string(),
+                            content: "[in codebase]".to_string(),
+                            is_error: false,
+                        },
+                    ]),
+                ),
+                say("user", "## codebase (continued)\nfn a() {}".into()),
+            ],
+            model: model.to_string(),
+            max_tokens: 1024,
+            temperature: 0.7,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+            request_timeout_secs: None,
+        };
+        let roles = |model: &str| -> Vec<String> {
+            provider.build_request_body(&request(model))["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| m["role"].as_str().unwrap().to_string())
+                .collect()
+        };
+        assert_eq!(
+            roles("anthropic/claude-opus-5.5"),
+            ["user", "assistant", "tool", "user"]
+        );
+        assert_eq!(
+            roles("openai/gpt-5.4-mini"),
+            ["user", "assistant", "tool", "user"]
+        );
+        assert_eq!(roles("mistralai/devstral-2"), ["user", "assistant", "tool"]);
+
+        // A Mistral model the listing says takes cache markers: the result and
+        // the turn after it are both marked, as the runtime marks the end of
+        // the previous request and the newest message. The turn still folds,
+        // the result keeps its text, and the newest marker ends the result.
+        provider.learned.replace(std::collections::HashMap::from([(
+            "mistralai/devstral-2".to_string(),
+            crate::learned::LearnedModel {
+                explicit_cache_control: Some(true),
+                ..Default::default()
+            },
+        )]));
+        let mut marked = request("mistralai/devstral-2");
+        marked.messages[2].cache_breakpoint = true;
+        marked.messages[3].cache_breakpoint = true;
+        let body = provider.build_request_body(&marked);
+        let messages = body["messages"].as_array().unwrap();
+        let roles: Vec<&str> = messages
+            .iter()
+            .map(|m| m["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(roles, ["user", "assistant", "tool"]);
+        let parts = messages[2]["content"].as_array().unwrap();
+        assert_eq!(parts[0]["text"], "[in codebase]");
+        assert_eq!(parts[0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(parts[1]["text"], "\n\n## codebase (continued)\nfn a() {}");
+        assert_eq!(parts[1]["cache_control"]["type"], "ephemeral");
     }
 
     /// Gemini reads the same markers through OpenRouter (measured: 0 cached

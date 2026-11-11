@@ -607,6 +607,46 @@ region is split, so the part already read caches and only the newest excerpt is 
 If a region declares `stable` and then keeps changing, Leviath says so in the log rather than
 silently paying for it: the declaration is a hint it checks, not a promise it trusts.
 
+### Within a stage, the prefix holds still
+
+The regions are the system prompt, and the system prompt comes before the conversation. Every
+`sliding_window` region other than `conversation` (a `decisions` log, a `changelog`) is sent as
+turns ahead of the dialogue. A region that changes during a stage would therefore rewrite the
+conversation behind it on every call, and with [tool routing](#routing-tool-output) one changes on
+almost every call. So a stage keeps everything its first request sent ahead of the dialogue. What a
+region gains after that reaches the model as a user turn, placed after the turns that were there
+when it was gained, never moved after, and headed the way the region's own continuation chunks are:
+
+```text
+[codebase continued]:
+<the file read_file just returned>
+```
+
+That is the spelling for the bracketed kinds (`compacting`, `temporary`, `clearable`, `keyed`); a
+`pinned` or `compact_history` region continues as `## name (continued)`. A sliding window's
+new notes are not headed at all: they are sent as the very turns they would have been in place (a
+`User: ` prefix dropped, as it is there), so the model reads a note the same whenever it arrived. A
+text spelled as the assistant's reply (`Assistant: ...`) is a turn of the dialogue, not a note, and
+shows the window afresh.
+
+Each request then repeats the previous one and only appends. The model sees each result once, and
+the region's budget still bounds it. How much of that the cache reads back depends on the route:
+
+- **OpenRouter** (Anthropic and Gemini models) marks the newest message and the end of what the
+  previous request sent, so the conversation is written once and read back on every call after.
+- **Anthropic direct** places its own message markers on a fixed stride of content blocks. The
+  prefix up to the newest stride point is read back; the turns since then are sent uncached until
+  the next stride point passes them.
+- **Bedrock** (Claude and Nova) keeps one cache point, on the newest message.
+
+That holds while every change is an append. Anything else shows the regions afresh at the next
+request, which costs one write of everything behind the first region that changed: a re-read that
+replaces a file's earlier copy, a `context_write` over a region, a compaction, a region cleared,
+evicted or hidden, a sliding window that dropped its oldest entry or was given a turn of the
+dialogue, a `checklist` or `custom` region that renders differently, and a conversation that lost a
+turn. Every stage starts afresh too. A region a stage rewrites on every call (`context_write` of a
+status line) still costs a rewrite each time it is written; append to it instead where you can.
+
 ### A region that stops growing caches itself
 
 Declare a region by what it does across the whole run, not per stage. A `grows` region is split
@@ -918,7 +958,9 @@ valid targets: `conversation`, `tool_results`, `final_output` and `stage_instruc
 A routed result cannot sit in the message stream, because a `tool_result` has to follow its
 `tool_use` immediately. The full output goes to the region instead, and a short pointer stays in the
 conversation in its place. The pointer names the region, and says the contents are already in the prompt under that
-heading, because they are: a region the stage carries is rendered into the system prompt every turn.
+heading, because they are: a region the stage carries is in every request, in the system prompt as
+the stage's first request showed it and, for what it gained since, in a turn headed with its name
+(see [within a stage, the prefix holds still](#within-a-stage-the-prefix-holds-still)).
 
 That wording matters more than it looks. The pointer used to end "read that region for the full
 result", which is an instruction with no tool behind it. The model, holding `read_file` and no

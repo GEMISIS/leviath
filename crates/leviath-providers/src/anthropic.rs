@@ -70,14 +70,18 @@ const MIN_CACHEABLE_TOKENS: usize = 1024;
 #[cfg(feature = "anthropic")]
 const CACHE_LOOKBACK_BLOCKS: usize = 16;
 
-/// How many of the four markers the system blocks may claim.
+/// How many of the four markers the system blocks may claim:
+/// [`leviath_core::context::MAX_SYSTEM_CACHE_RUNS`], the same number assembly
+/// holds itself to.
 ///
-/// One is held back for the messages. When the system prefix has not moved, a
+/// The other two are for the messages. When the system prefix has not moved, a
 /// marker in the messages covers everything - every system block *and* the
-/// conversation ahead of it - so it is the single most valuable position in the
-/// request. A fourth system marker can only ever cover less than that.
+/// conversation ahead of it - so it is the most valuable position in the
+/// request, and the runtime asks for one on the newest message and one where
+/// the previous request ended (`leviath_core::context::message_breakpoints`).
+/// A third system marker could only ever cover less than either.
 #[cfg(any(feature = "anthropic", feature = "bedrock", feature = "openrouter"))]
-pub(crate) const MAX_SYSTEM_BREAKPOINTS: usize = 2;
+pub(crate) const MAX_SYSTEM_BREAKPOINTS: usize = leviath_core::context::MAX_SYSTEM_CACHE_RUNS;
 
 /// Choose which messages carry a `cache_control` breakpoint.
 ///
@@ -1298,6 +1302,20 @@ mod tests {
         assert!(
             !names.contains(&"conversation"),
             "a block cleared every iteration is never a marker: {names:?}"
+        );
+
+        // Assembly's split of the changing tier is a hint this choice does
+        // not read: retagging the newest block moves no marker. That is why
+        // holding assembly to two system runs costs nothing here.
+        let mut split = blocks.clone();
+        split[3].cache_hint = CacheHint::RecentlyChanged;
+        assert_eq!(
+            system_cache_breakpoints(&split, MAX_SYSTEM_BREAKPOINTS),
+            picked
+        );
+        assert_eq!(
+            MAX_SYSTEM_BREAKPOINTS,
+            leviath_core::context::MAX_SYSTEM_CACHE_RUNS
         );
     }
 

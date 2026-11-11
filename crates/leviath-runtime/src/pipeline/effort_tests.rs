@@ -81,7 +81,7 @@ fn low() -> InferenceConfig {
 
 fn extra_for(si: &StageInference, provider: Spells, cfg: &InferenceConfig) -> serde_json::Value {
     let provider: Arc<dyn Provider> = Arc::new(provider);
-    let (request, _, _) = build_request(
+    let (request, _, _, _) = build_request(
         &window(),
         Some(cfg),
         si,
@@ -174,7 +174,7 @@ fn a_routing_call_carries_the_stages_effort_unchanged() {
     let provider: Arc<dyn Provider> = Arc::new(Spells {
         spelling: Some(claude),
     });
-    let (stage_request, _, _) = build_request(
+    let (stage_request, _, _, _) = build_request(
         &window(),
         Some(&cfg),
         &si,

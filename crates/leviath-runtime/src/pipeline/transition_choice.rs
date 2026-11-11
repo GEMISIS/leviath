@@ -229,6 +229,7 @@ type TransitionChoiceQuery = (
         Option<&'static crate::pipeline::inference::SystemPrefixHash>,
         Option<&'static crate::pipeline::inference::SystemBlockHashes>,
         Option<&'static crate::pipeline::PromptCalibration>,
+        Option<&'static crate::components::PromptFrame>,
     ),
 );
 
@@ -406,7 +407,7 @@ pub(crate) fn routing_request(
     stage_iterations: usize,
     prior: crate::pipeline::inference::PriorCalls,
 ) -> InferenceRequest {
-    let (mut request, _, _) = crate::pipeline::inference::build_request(
+    let (mut request, _, _, _) = crate::pipeline::inference::build_request(
         window,
         config,
         si,
@@ -472,7 +473,7 @@ pub(crate) fn dispatch_transition_choice(
         built_from,
     ) in agents.iter_mut()
     {
-        let (config, progress, prefix, block_prefix, calibration) = built_from;
+        let (config, progress, prefix, block_prefix, calibration, shown) = built_from;
         crate::tick_scope::enter(entity);
         if state.status != AgentStatus::Active {
             continue; // paused / waiting / cancelled - don't start new work
@@ -521,6 +522,9 @@ pub(crate) fn dispatch_transition_choice(
                 block_hashes: block_prefix.map(|b| b.0.clone()).unwrap_or_default(),
                 calibration: calibration.copied(),
                 raise_output_cap: false,
+                // The stage's own frame, so the question goes out behind the
+                // same system prompt and turns the stage's requests sent.
+                frame: shown.cloned(),
             },
         );
 

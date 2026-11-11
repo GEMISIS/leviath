@@ -291,6 +291,7 @@ pub(crate) fn chat_messages(
     } else {
         messages
     };
+    let messages = fold_user_after_tool(messages, &request.model);
     ensure_user_turn(satisfy_call_turn_order(messages))
 }
 
@@ -1178,6 +1179,9 @@ pub(crate) fn parse_sse_event_keeping(
 }
 
 pub(crate) mod details;
+/// A user turn after a tool result, for the models whose API refuses one.
+mod user_after_tool;
+pub(crate) use user_after_tool::fold_user_after_tool;
 
 #[cfg(test)]
 mod mime_tests;
@@ -3670,6 +3674,82 @@ mod tests {
         };
         let messages = openai_messages_with(&req, ToolArgsFormat::Object);
         assert_eq!(messages[0]["content"], "real\n\nalso real");
+    }
+
+    /// A history whose newest tool result is followed by a user turn, as a
+    /// region's gain during a stage is sent.
+    fn result_then_note(model: &str) -> InferenceRequest {
+        use crate::provider::{ContentBlock, MessageContent};
+        let blocks = |b: Vec<ContentBlock>| MessageContent::Blocks(b);
+        let say = |role: &str, content: MessageContent| Message {
+            role: role.into(),
+            content,
+            cache_breakpoint: false,
+            reasoning: None,
+        };
+        InferenceRequest {
+            system: vec![],
+            messages: vec![
+                say("user", "go".into()),
+                say(
+                    "assistant",
+                    blocks(vec![ContentBlock::ToolUse {
+                        id: "c1".into(),
+                        name: "read_file".into(),
+                        input: serde_json::json!({}),
+                        thought_signature: None,
+                    }]),
+                ),
+                say(
+                    "user",
+                    blocks(vec![ContentBlock::ToolResult {
+                        tool_use_id: "c1".into(),
+                        content: "[in codebase]".into(),
+                        is_error: false,
+                    }]),
+                ),
+                say("user", "## codebase (continued)\nfn a() {}".into()),
+            ],
+            model: model.into(),
+            max_tokens: 100,
+            temperature: 0.0,
+            tools: vec![],
+            extra: serde_json::json!({}),
+            request_timeout_secs: None,
+        }
+    }
+
+    /// Chat Completions takes a user turn after a tool result, so it is sent
+    /// as one; a Mistral model refuses that order, so there the text joins the
+    /// tool result instead.
+    #[test]
+    fn a_user_turn_after_a_tool_result_is_folded_only_where_it_is_refused() {
+        let roles = |m: &[serde_json::Value]| -> Vec<String> {
+            m.iter()
+                .map(|m| m["role"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let open = openai_messages(&result_then_note("gpt-5.5"));
+        assert_eq!(roles(&open), ["user", "assistant", "tool", "user"]);
+        for model in [
+            "mistral-large-3",
+            "mistralai/devstral-2",
+            "Codestral-latest",
+        ] {
+            let folded = openai_messages(&result_then_note(model));
+            assert_eq!(roles(&folded), ["user", "assistant", "tool"], "{model}");
+            assert_eq!(
+                folded[2]["content"],
+                "[in codebase]\n\n## codebase (continued)\nfn a() {}"
+            );
+        }
+        // Not plain text, or not after a tool result: left where it is.
+        let parts = vec![
+            serde_json::json!({ "role": "tool", "content": "r" }),
+            serde_json::json!({ "role": "user", "content": [{ "type": "image_url", "image_url": { "url": "data:," } }] }),
+            serde_json::json!({ "role": "user", "content": "after a user turn" }),
+        ];
+        assert_eq!(fold_user_after_tool(parts.clone(), "mistral-small"), parts);
     }
 
     /// A request with no system content at all sends no system message, rather

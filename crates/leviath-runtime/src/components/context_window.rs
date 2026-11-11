@@ -9,6 +9,8 @@ use super::block_cache::warn_on_unstable_declaration;
 use super::*;
 
 mod eviction;
+/// One system prompt per stage, with what regions gain sent as turns.
+mod frame;
 /// The journal side of a write: the handle a window records through, what one
 /// change moved, and the record it becomes.
 mod journal;
@@ -20,6 +22,7 @@ mod state;
 /// Every path that puts something into a region, and the cause it states.
 mod writes;
 
+pub use frame::PromptFrame;
 pub(crate) use journal::{ContextJournal, ContextTxn, Pushed};
 pub(crate) use state::part as part_from_state;
 pub(crate) use writes::TypedWrite;
@@ -93,24 +96,30 @@ pub(crate) struct ToolResultRoutingComponent {
 /// (SlidingWindow) becomes typed `messages`.
 #[derive(Debug, Clone)]
 pub struct AssembledContext {
-    /// System prompt blocks (from Pinned, CompactHistory, etc. regions).
+    /// System prompt blocks (from Pinned, CompactHistory, etc. regions), as
+    /// the stage's frame sends them: see [`PromptFrame`].
     pub system_blocks: Vec<leviath_providers::SystemBlock>,
-    /// Conversation messages with proper role typing.
+    /// Conversation messages with proper role typing, with what regions gained
+    /// during the stage in their places.
     pub messages: Vec<leviath_providers::Message>,
-    /// Per-block digests of the system prefix this assembly produced.
+    /// Per-block digests of the system blocks the window rendered into this
+    /// time, which during a stage are not the ones sent.
     ///
     /// Handed back so the caller can pass them as
     /// [`crate::custom_region::AssembleMeta::previous_block_hashes`] next time,
-    /// which is what lets the breakpoint decision name only blocks that held
-    /// still.
+    /// which is what lets assembly tell a region declared `stable` that keeps
+    /// changing.
     pub block_hashes: Vec<u64>,
-    /// Hash of the system prefix this assembly produced.
+    /// Hash of the system prefix this assembly sent.
     ///
     /// Handed back so the caller can pass it as
     /// [`crate::custom_region::AssembleMeta::previous_system_hash`] next time
     /// and let the breakpoint decision below be made on evidence rather than
     /// hope.
     pub system_hash: u64,
+    /// The frame for the stage's next request, to pass as
+    /// [`crate::custom_region::AssembleMeta::frame`].
+    pub frame: PromptFrame,
 }
 
 /// Whose write a region write is.
@@ -290,42 +299,39 @@ impl ContextWindow {
             .regions
             .iter()
             .filter(|r| !self.hidden.contains(&r.name));
-        let assembled =
-            leviath_core::context::assemble_context(visible, |custom, system_blocks| {
-                // Custom (script-backed) regions render through their Rhai hook;
-                // a missing script or any hook failure falls back to the
-                // Temporary-style block inside `render_custom_region`, so a
-                // custom region is never silently dropped.
-                crate::custom_region::render_custom_region(
-                    crate::custom_region::RegionRender {
-                        region: custom.region,
-                        script: self.region_scripts.get(custom.script),
-                        pinned: custom.pinned,
-                        meta,
-                        window_current: self.current_tokens,
-                        window_max: self.max_tokens,
-                    },
-                    crate::custom_region::RenderSink {
-                        system_blocks,
-                        // Not into the conversation directly: wherever this
-                        // region sits in the manifest, what it renders comes
-                        // before the dialogue. See the splice below.
-                        messages: &mut preamble,
-                    },
-                );
-            });
-        let mut messages: Vec<leviath_providers::Message> = assembled
-            .conversation
-            .into_iter()
-            .map(leviath_providers::Message::from)
-            .collect();
-        let system = assembled.system;
+        // The regions sent as turns come back here too, and are left to the
+        // frame below, which lays them out after the reference material.
+        let system = leviath_core::context::assemble_system(visible, |region, system_blocks| {
+            let leviath_core::RegionKind::Custom { script, pinned } = &region.kind else {
+                return;
+            };
+            // Custom (script-backed) regions render through their Rhai hook;
+            // a missing script or any hook failure falls back to the
+            // Temporary-style block inside `render_custom_region`, so a
+            // custom region is never silently dropped.
+            crate::custom_region::render_custom_region(
+                crate::custom_region::RegionRender {
+                    region,
+                    script: self.region_scripts.get(script),
+                    pinned: *pinned,
+                    meta,
+                    window_current: self.current_tokens,
+                    window_max: self.max_tokens,
+                },
+                crate::custom_region::RenderSink {
+                    system_blocks,
+                    // Not into the conversation directly: wherever this
+                    // region sits in the manifest, what it renders comes
+                    // before the dialogue. See the splice below.
+                    messages: &mut preamble,
+                },
+            );
+        });
         // The stored parts of every region that renders into the system
         // prompt, which is text. They travel in one user message ahead of the
         // conversation instead.
         let lifted = mime::provider_blocks(system.lifted);
-        let (system_blocks, block_hashes, system_hash) =
-            (system.blocks, system.block_hashes, system.system_hash);
+        let (system_blocks, block_hashes) = (system.blocks, system.block_hashes);
 
         // ── The conversation ends the request ────────────────────────────
         //
@@ -338,30 +344,22 @@ impl ContextWindow {
         // declared after the conversation *behind* the last user turn. On a
         // small region that is untidy; on one holding a document corpus it
         // replaces the dialogue in the position the model weighs most heavily,
-        // and the agent stops behaving like it is in a conversation.
+        // and the agent stops behaving like it is in a conversation. So what a
+        // script renders as messages leads, ahead of every region's turns.
         //
-        // Splicing rather than sorting: a region declared before the
-        // conversation already rendered in front of it and stays exactly where
-        // it was, so this changes nothing for a blueprint that was already
-        // ordered sensibly.
-        if !preamble.is_empty() {
-            let conversation = std::mem::replace(&mut messages, preamble);
-            messages.extend(conversation);
-        }
         // The stored parts of the system regions come first of all: they
         // belong to the reference material, and a leading message that holds
         // still is one a provider can cache.
+        let mut head = Vec::with_capacity(preamble.len() + 1);
         if !lifted.is_empty() {
-            messages.insert(
-                0,
-                leviath_providers::Message {
-                    role: "user".to_string(),
-                    content: leviath_providers::MessageContent::Blocks(lifted),
-                    cache_breakpoint: false,
-                    reasoning: None,
-                },
-            );
+            head.push(leviath_providers::Message {
+                role: "user".to_string(),
+                content: leviath_providers::MessageContent::Blocks(lifted),
+                cache_breakpoint: false,
+                reasoning: None,
+            });
         }
+        head.extend(preamble);
 
         // A declaration is a hint we can falsify, not a promise: `stable` sorts a
         // region to the front, so one that is really churning does the most
@@ -372,110 +370,46 @@ impl ContextWindow {
             &mut leviath_core::sync::lock(&self.unstable_declarations),
         );
 
-        // ── Sanitize orphaned tool_use / tool_result blocks ──────────────
+        // ── One system prompt per stage ─────────────────────────────────
         //
-        // Collect all tool_use IDs from assistant messages and all tool_result
-        // IDs from user messages. Strip any that don't have a matching pair.
-        let mut tool_use_ids = std::collections::HashSet::new();
-        let mut tool_result_ids = std::collections::HashSet::new();
+        // The stage's first request fixes the system prompt and the turns of
+        // every region sent as turns; what any region gains after that goes
+        // out as a turn after the history, so each request repeats the
+        // previous one and only appends. See `frame`.
+        let framed = frame::frame(
+            meta.frame.as_ref(),
+            frame::Live {
+                stage: &meta.stage_name,
+                iteration: meta.stage_iterations,
+                regions: self
+                    .regions
+                    .iter()
+                    .filter(|r| !self.hidden.contains(&r.name))
+                    .collect(),
+                blocks: system_blocks,
+                head,
+            },
+        );
+        let (system_blocks, system_hash, mut messages) =
+            (framed.system_blocks, framed.system_hash, framed.messages);
+        let repeated = framed.repeated;
 
-        for msg in &messages {
-            if let leviath_providers::MessageContent::Blocks(blocks) = &msg.content {
-                for block in blocks {
-                    match block {
-                        leviath_providers::ContentBlock::ToolUse { id, .. } => {
-                            tool_use_ids.insert(id.clone());
-                        }
-                        leviath_providers::ContentBlock::ToolResult { tool_use_id, .. } => {
-                            tool_result_ids.insert(tool_use_id.clone());
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-
-        let orphaned_tool_uses: std::collections::HashSet<_> =
-            tool_use_ids.difference(&tool_result_ids).cloned().collect();
-        let orphaned_tool_results: std::collections::HashSet<_> =
-            tool_result_ids.difference(&tool_use_ids).cloned().collect();
-
-        if !orphaned_tool_uses.is_empty() || !orphaned_tool_results.is_empty() {
-            tracing::warn!(
-                orphaned_tool_uses = orphaned_tool_uses.len(),
-                orphaned_tool_results = orphaned_tool_results.len(),
-                "Stripping orphaned tool_use/tool_result blocks from assembled context"
-            );
-
-            messages = messages
-                .into_iter()
-                .filter_map(|msg| {
-                    if let leviath_providers::MessageContent::Blocks(blocks) = &msg.content {
-                        let filtered: Vec<_> = blocks
-                            .iter()
-                            .filter(|block| match block {
-                                leviath_providers::ContentBlock::ToolUse { id, .. } => {
-                                    !orphaned_tool_uses.contains(id)
-                                }
-                                leviath_providers::ContentBlock::ToolResult {
-                                    tool_use_id, ..
-                                } => !orphaned_tool_results.contains(tool_use_id),
-                                _ => true,
-                            })
-                            .cloned()
-                            .collect();
-
-                        if filtered.is_empty() {
-                            // No content left - drop this message entirely
-                            None
-                        } else {
-                            Some(leviath_providers::Message {
-                                role: msg.role.clone(),
-                                content: leviath_providers::MessageContent::Blocks(filtered),
-                                cache_breakpoint: msg.cache_breakpoint,
-                                // Carried, not dropped. Stripping an orphaned
-                                // tool block does not make the turn's opaque
-                                // reasoning token any less the turn's.
-                                reasoning: msg.reasoning.clone(),
-                            })
-                        }
-                    } else {
-                        Some(msg)
-                    }
-                })
-                .collect();
-        }
-
-        // ── Set cache breakpoints on stable message prefix ──────────────
+        // ── Cache breakpoints on the conversation ───────────────────────
         //
-        // In an iterative inference loop, only the last few messages change
-        // each iteration (new assistant turn + tool results). Everything
-        // before is stable across iterations and benefits from Anthropic's
-        // prompt caching. We place a cache breakpoint near the end of the
-        // stable prefix to maximize cache hits.
+        // On the newest message, so the conversation is written once and read
+        // back on every call after, and on where the previous request ended,
+        // which reads its entry back however much this request added. See
+        // `message_breakpoints`.
         //
-        // Anthropic allows up to 4 breakpoints. Exactly 1 lands on the
-        // messages; the system blocks get theirs from their cache hints, and
-        // `leviath_core::context::MAX_SYSTEM_CACHE_RUNS` caps those at 3 so this
-        // one always fits.
-        // Place it on the 4th-from-last message to give a buffer for the
-        // new messages added each iteration (typically 2-3).
-        //
-        // Skipped entirely when the system prefix moved since the last request.
-        // Anthropic caches by prefix, so this breakpoint's entry covers every
-        // system block as well as the messages before it - and a prefix that
-        // changed has already invalidated that entry before it could be read.
-        // The 1.25x write is still charged. Measured on a run whose bulk region
-        // grew every turn: 3.3M cache-write tokens against 267k reads, a 0.074
-        // hit rate, for a prefix that was never going to match. Sending the
-        // churn at the base rate instead is the same request for less money.
-        //
-        // Re-armed the moment the prefix settles, so a steady-state run keeps
-        // the caching it was always getting.
-        let prefix_moved = meta
-            .previous_system_hash
-            .is_some_and(|previous| previous != system_hash);
-        if let Some(index) = leviath_core::context::message_breakpoint(messages.len(), prefix_moved)
+        // None unless the previous request sent this same system prefix: every
+        // message marker's entry covers the system blocks too, so after a
+        // prefix that moved, or with no request before this one, nothing has
+        // shown the next request will read the entry back. Within a stage the
+        // frame holds the prefix still, so this skips only the first request
+        // after the window was shown afresh.
+        let prefix_held = meta.previous_system_hash == Some(system_hash);
+        for index in
+            leviath_core::context::message_breakpoints(messages.len(), repeated, prefix_held)
         {
             messages[index].cache_breakpoint = true;
         }
@@ -526,6 +460,7 @@ impl ContextWindow {
             system_blocks,
             messages,
             system_hash,
+            frame: framed.frame,
         }
     }
 
@@ -558,6 +493,92 @@ impl ContextWindow {
             .filter_map(|r| r.taint_level().map(|t| (r.name.clone(), t)))
             .collect()
     }
+}
+
+/// `messages` without tool calls that have no result and results that have no
+/// call, and without a message that held nothing else.
+///
+/// Run on the messages the frame builds a request from, before it counts or
+/// places anything: what it strips is gone from the request the frame records,
+/// so a turn it adds is never placed between a call and a result that pair up
+/// only later.
+fn strip_orphaned_tool_blocks(
+    mut messages: Vec<leviath_providers::Message>,
+) -> Vec<leviath_providers::Message> {
+    // ── Sanitize orphaned tool_use / tool_result blocks ──────────────
+    //
+    // Collect all tool_use IDs from assistant messages and all tool_result
+    // IDs from user messages. Strip any that don't have a matching pair.
+    let mut tool_use_ids = std::collections::HashSet::new();
+    let mut tool_result_ids = std::collections::HashSet::new();
+
+    for msg in &messages {
+        if let leviath_providers::MessageContent::Blocks(blocks) = &msg.content {
+            for block in blocks {
+                match block {
+                    leviath_providers::ContentBlock::ToolUse { id, .. } => {
+                        tool_use_ids.insert(id.clone());
+                    }
+                    leviath_providers::ContentBlock::ToolResult { tool_use_id, .. } => {
+                        tool_result_ids.insert(tool_use_id.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    let orphaned_tool_uses: std::collections::HashSet<_> =
+        tool_use_ids.difference(&tool_result_ids).cloned().collect();
+    let orphaned_tool_results: std::collections::HashSet<_> =
+        tool_result_ids.difference(&tool_use_ids).cloned().collect();
+
+    if !orphaned_tool_uses.is_empty() || !orphaned_tool_results.is_empty() {
+        tracing::warn!(
+            orphaned_tool_uses = orphaned_tool_uses.len(),
+            orphaned_tool_results = orphaned_tool_results.len(),
+            "Stripping orphaned tool_use/tool_result blocks from assembled context"
+        );
+
+        messages = messages
+            .into_iter()
+            .filter_map(|msg| {
+                if let leviath_providers::MessageContent::Blocks(blocks) = &msg.content {
+                    let filtered: Vec<_> = blocks
+                        .iter()
+                        .filter(|block| match block {
+                            leviath_providers::ContentBlock::ToolUse { id, .. } => {
+                                !orphaned_tool_uses.contains(id)
+                            }
+                            leviath_providers::ContentBlock::ToolResult { tool_use_id, .. } => {
+                                !orphaned_tool_results.contains(tool_use_id)
+                            }
+                            _ => true,
+                        })
+                        .cloned()
+                        .collect();
+
+                    if filtered.is_empty() {
+                        // No content left - drop this message entirely
+                        None
+                    } else {
+                        Some(leviath_providers::Message {
+                            role: msg.role.clone(),
+                            content: leviath_providers::MessageContent::Blocks(filtered),
+                            cache_breakpoint: msg.cache_breakpoint,
+                            // Carried, not dropped. Stripping an orphaned
+                            // tool block does not make the turn's opaque
+                            // reasoning token any less the turn's.
+                            reasoning: msg.reasoning.clone(),
+                        })
+                    }
+                } else {
+                    Some(msg)
+                }
+            })
+            .collect();
+    }
+    messages
 }
 
 #[cfg(test)]
@@ -602,8 +623,9 @@ mod tests {
 
     #[test]
     fn assemble_marks_the_volatile_tail_without_moving_any_block() {
+        // No `Always` tier ahead of it, so splitting the volatile tier stays
+        // within the system blocks' two breakpoints.
         let mut window = ContextWindow::new(100_000);
-        window.add_region(stamped_region("brief", RegionKind::Pinned, 1));
         window.add_region(hashmap_region("spec", 100));
         window.add_region(hashmap_region("data_preview", 200));
         window.add_region(hashmap_region("results", 300));
@@ -618,11 +640,10 @@ mod tests {
             .iter()
             .map(|b| b.text.as_str())
             .collect();
-        assert!(texts[0].contains("brief contents"));
-        assert!(texts[1].starts_with("[spec]:"));
-        assert!(texts[2].starts_with("[data_preview]:"));
-        assert!(texts[3].starts_with("[results]:"));
-        assert!(texts[4].starts_with("[scratch]:"));
+        assert!(texts[0].starts_with("[spec]:"));
+        assert!(texts[1].starts_with("[data_preview]:"));
+        assert!(texts[2].starts_with("[results]:"));
+        assert!(texts[3].starts_with("[scratch]:"));
 
         let hints: Vec<CacheHint> = assembled
             .system_blocks
@@ -632,7 +653,6 @@ mod tests {
         assert_eq!(
             hints,
             vec![
-                CacheHint::Always,
                 CacheHint::UntilChanged,
                 CacheHint::UntilChanged,
                 CacheHint::RecentlyChanged,
@@ -797,7 +817,32 @@ mod tests {
         }
         window.add_region(conversation);
 
-        let assembled = window.assemble();
+        // Two requests in one stage, the second repeating the first and
+        // going on, so the messages get both their markers: the end of what
+        // the first sent, and the newest.
+        let meta = |frame: Option<PromptFrame>, previous: Option<u64>| {
+            crate::custom_region::AssembleMeta {
+                stage_name: "work".to_string(),
+                stage_iterations: usize::from(previous.is_some()),
+                previous_system_hash: previous,
+                frame,
+                ..Default::default()
+            }
+        };
+        let first = window.assemble_with_meta(&meta(None, None));
+        window
+            .add_typed_entry(
+                "conversation",
+                leviath_core::EntryKind::UserMessage,
+                "turn 8".to_string(),
+                10,
+            )
+            .unwrap();
+        window
+            .add_to_region("results", "a new row".to_string(), 5)
+            .unwrap();
+        let assembled =
+            window.assemble_with_meta(&meta(Some(first.frame), Some(first.system_hash)));
         let system = provider_system_breakpoints(&assembled.system_blocks);
         let message = assembled
             .messages
@@ -809,7 +854,10 @@ mod tests {
             system <= leviath_core::context::MAX_SYSTEM_CACHE_RUNS,
             "system runs: {system}"
         );
-        assert_eq!(message, 1);
+        assert_eq!(
+            message,
+            leviath_core::context::MAX_MESSAGE_CACHE_BREAKPOINTS
+        );
         let total = system + message;
         assert!(total <= 4, "total breakpoints: {total}");
     }
@@ -885,6 +933,7 @@ mod tests {
             model: "m".to_string(),
             previous_system_hash: Some(first.system_hash),
             previous_block_hashes: first.block_hashes.clone(),
+            frame: None,
         });
         // The property that matters to a prefix cache: the stable content is
         // still first and still byte-identical, so everything a provider stores
