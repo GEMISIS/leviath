@@ -239,6 +239,8 @@ pub(crate) struct PriorCalls {
     /// A reply in this stage was cut off at the output cap, so the cap goes
     /// out at the model's maximum instead of the stage's setting.
     pub(crate) raise_output_cap: bool,
+    /// What the stage's requests have shown so far, `None` before the first.
+    pub(crate) frame: Option<crate::components::PromptFrame>,
 }
 
 /// This run writes the exact request it sends the model into its journal, once
@@ -261,7 +263,11 @@ pub struct CaptureModelInput;
 /// Bumped by hand when what a request *means* changes: a system block that moves
 /// tier, a message shape that is built differently, guidance that is prepended
 /// where it was not. Adding a field a provider ignores does not move it.
-pub const MODEL_INPUT_ASSEMBLY_VERSION: &str = "1";
+///
+/// `2`: within a stage the system blocks are the stage's first request's, and
+/// what a region gained since is a user turn (see
+/// [`crate::components::PromptFrame`]).
+pub const MODEL_INPUT_ASSEMBLY_VERSION: &str = "2";
 
 /// An opaque identifier for the tool set one request offered the model.
 ///
@@ -368,12 +374,18 @@ pub(crate) fn build_request(
     stage_name: &str,
     stage_iterations: usize,
     prior: PriorCalls,
-) -> (InferenceRequest, u64, Vec<u64>) {
+) -> (
+    InferenceRequest,
+    u64,
+    Vec<u64>,
+    crate::components::PromptFrame,
+) {
     let PriorCalls {
         system_hash: previous_system_hash,
         block_hashes: previous_block_hashes,
         calibration,
         raise_output_cap,
+        frame,
     } = prior;
     let assembled = window.assemble_with_meta(&crate::custom_region::AssembleMeta {
         stage_name: stage_name.to_string(),
@@ -381,9 +393,11 @@ pub(crate) fn build_request(
         model: stage.model.clone(),
         previous_system_hash,
         previous_block_hashes,
+        frame,
     });
     let system_hash = assembled.system_hash;
     let block_hashes = assembled.block_hashes.clone();
+    let frame = assembled.frame;
     // What the input really costs, not what the byte estimate said it would.
     // On a provider whose window is a hard ceiling the two share it, so an
     // output cap sized against an optimistic input is how a request that fit
@@ -516,7 +530,7 @@ pub(crate) fn build_request(
         extra,
         request_timeout_secs: config.and_then(|c| c.request_timeout_secs),
     };
-    (request, system_hash, block_hashes)
+    (request, system_hash, block_hashes, frame)
 }
 
 /// A stage's request extras with its `effort` added, as the provider serving
@@ -671,6 +685,7 @@ type InferenceQuery = (
     Option<&'static crate::pipeline::PromptCalibration>,
     Option<&'static CaptureModelInput>,
     Option<&'static crate::inference_call::RemoteJobs>,
+    Option<&'static crate::components::PromptFrame>,
 );
 
 /// The system prefix the last request sent, as a digest.
@@ -761,6 +776,7 @@ pub(crate) fn dispatch_inference(
             calibration,
             capture,
             remote_jobs,
+            shown,
         )| {
             crate::tick_scope::run_agent_parallel(entity, &par_commands, &mut || {
                 if state.status != AgentStatus::Active {
@@ -827,7 +843,7 @@ pub(crate) fn dispatch_inference(
                     stall(StallReason::PoolFull);
                     return;
                 };
-                let (request, system_hash, block_hashes) = build_request(
+                let (request, system_hash, block_hashes, frame) = build_request(
                     window,
                     config,
                     si,
@@ -839,6 +855,7 @@ pub(crate) fn dispatch_inference(
                         block_hashes: block_prefix.map(|b| b.0.clone()).unwrap_or_default(),
                         calibration: calibration.copied(),
                         raise_output_cap: progress.is_some_and(|p| p.raise_output_cap),
+                        frame: shown.cloned(),
                     },
                 );
                 // Zero retention asked for: the providers that take it per
@@ -857,6 +874,7 @@ pub(crate) fn dispatch_inference(
                     commands
                         .entity(entity)
                         .insert(SystemBlockHashes(block_hashes.clone()));
+                    commands.entity(entity).insert(frame);
                     // What the window believes this call will cost, and what
                     // its stored parts will be billed over that. The response
                     // says what it really cost, and the three together are

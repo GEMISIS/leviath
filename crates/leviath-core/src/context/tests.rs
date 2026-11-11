@@ -239,10 +239,9 @@ fn recently_changed_sorts_with_until_changed() {
 
 #[test]
 fn mark_recently_changed_run_splits_at_the_newest_block() {
-    // Always, three volatile blocks, and a trailing uncacheable block. The
-    // third volatile block is the one that just changed.
+    // Three volatile blocks and a trailing uncacheable block. The third
+    // volatile block is the one that just changed.
     let mut blocks = vec![
-        block(CacheHint::Always),
         block(CacheHint::UntilChanged),
         block(CacheHint::UntilChanged),
         block(CacheHint::UntilChanged),
@@ -254,16 +253,15 @@ fn mark_recently_changed_run_splits_at_the_newest_block() {
     assert_eq!(
         hints,
         vec![
-            CacheHint::Always,
             CacheHint::UntilChanged,
             CacheHint::UntilChanged,
             CacheHint::RecentlyChanged,
             CacheHint::Never,
         ]
     );
-    // Always run, stable volatile head, changed volatile tail. The
-    // uncacheable trailing block claims nothing.
-    assert_eq!(provider_system_breakpoints(&blocks), 3);
+    // Stable volatile head, changed volatile tail. The uncacheable trailing
+    // block claims nothing.
+    assert_eq!(provider_system_breakpoints(&blocks), MAX_SYSTEM_CACHE_RUNS);
 }
 
 #[test]
@@ -329,21 +327,20 @@ fn mark_recently_changed_run_leaves_a_tierless_prompt_alone() {
 
 #[test]
 fn mark_recently_changed_run_refuses_when_the_run_budget_is_full() {
-    // Always, SlidingPrefix and UntilChanged already claim three
-    // breakpoints. Splitting further would take the messages' one.
+    // Always and UntilChanged already claim the system blocks' two
+    // breakpoints. Splitting further would take one the messages need.
     let mut blocks = vec![
         block(CacheHint::Always),
-        block(CacheHint::SlidingPrefix),
         block(CacheHint::UntilChanged),
         block(CacheHint::UntilChanged),
     ];
-    assert_eq!(provider_system_breakpoints(&blocks), 3);
+    assert_eq!(provider_system_breakpoints(&blocks), MAX_SYSTEM_CACHE_RUNS);
 
     mark_recently_changed_run(&mut blocks, &[1, 99]);
 
+    assert_eq!(blocks[1].cache_hint, CacheHint::UntilChanged);
     assert_eq!(blocks[2].cache_hint, CacheHint::UntilChanged);
-    assert_eq!(blocks[3].cache_hint, CacheHint::UntilChanged);
-    assert_eq!(provider_system_breakpoints(&blocks), 3);
+    assert_eq!(provider_system_breakpoints(&blocks), MAX_SYSTEM_CACHE_RUNS);
 }
 
 #[test]
@@ -755,17 +752,134 @@ fn volatility_outranks_the_cache_hint() {
     );
 }
 
-/// Fourth from last on a long conversation, the first message on a short
-/// one, nothing on a single message or when the prefix moved.
+/// The newest message, and where the previous request ended when this one
+/// repeats it and goes on; nothing when the prefix moved or there is nothing
+/// to mark.
 #[test]
-fn the_message_breakpoint_sits_where_it_can_be_read_back() {
-    assert_eq!(message_breakpoint(9, false), Some(5));
-    assert_eq!(message_breakpoint(5, false), Some(1));
-    assert_eq!(message_breakpoint(4, false), Some(0));
-    assert_eq!(message_breakpoint(2, false), Some(0));
-    assert_eq!(message_breakpoint(1, false), None);
-    assert_eq!(message_breakpoint(0, false), None);
-    assert_eq!(message_breakpoint(9, true), None);
+fn the_message_breakpoints_sit_where_they_can_be_read_back() {
+    assert_eq!(message_breakpoints(9, 7, true), [6, 8]);
+    assert_eq!(message_breakpoints(9, 0, true), [8]);
+    // A retry repeats the whole of the previous request: one marker covers it.
+    assert_eq!(message_breakpoints(9, 9, true), [8]);
+    assert_eq!(message_breakpoints(2, 0, true), [1]);
+    // Nothing shows a later request will read these back.
+    assert!(message_breakpoints(1, 0, true).is_empty());
+    assert!(message_breakpoints(0, 0, true).is_empty());
+    assert!(message_breakpoints(9, 7, false).is_empty());
+    assert!(message_breakpoints(9, 7, true).len() <= MAX_MESSAGE_CACHE_BREAKPOINTS);
+    assert_eq!(MAX_SYSTEM_CACHE_RUNS + MAX_MESSAGE_CACHE_BREAKPOINTS, 4);
+}
+
+fn holding(kind: RegionKind, entries: &[(&str, Option<&str>)]) -> Region {
+    let mut region = Region::new("r".into(), kind, 10_000);
+    for (text, key) in entries {
+        region.add_entry(*text, 2).unwrap();
+        region.content.last_mut().unwrap().key = key.map(str::to_string);
+    }
+    region
+}
+
+/// A region's gain reads as that region, under its own heading when nothing
+/// of it was shown and as its continuation otherwise.
+#[test]
+fn a_gain_reads_as_its_region_continuing() {
+    let pinned = holding(RegionKind::Pinned, &[("a", None), ("b", None), ("c", None)]);
+    assert_eq!(continuation(&pinned, 0).unwrap(), "## r\na\n\nb\n\nc");
+    assert_eq!(
+        continuation(&pinned, 1).unwrap(),
+        "## r (continued)\nb\n\nc"
+    );
+    let history = holding(
+        RegionKind::CompactHistory {
+            source_region: "s".into(),
+        },
+        &[("a", None)],
+    );
+    assert_eq!(continuation(&history, 0).unwrap(), "## r\na");
+    for kind in [
+        RegionKind::Compacting {
+            threshold_tokens: 10,
+        },
+        RegionKind::Temporary,
+        RegionKind::Clearable,
+    ] {
+        let region = holding(kind, &[("a", None), ("b", None)]);
+        assert_eq!(continuation(&region, 0).unwrap(), "[r]:\na\n\nb");
+        assert_eq!(continuation(&region, 1).unwrap(), "[r continued]:\nb");
+    }
+    let keyed = holding(
+        RegionKind::HashMap { max_entries: None },
+        &[("a", Some("k")), ("b", None)],
+    );
+    assert_eq!(continuation(&keyed, 0).unwrap(), "[r]:\n### [k]\na\n\nb");
+}
+
+fn window_kind() -> RegionKind {
+    RegionKind::SlidingWindow {
+        max_items: 5,
+        eviction_strategy: crate::EvictionStrategy::PerItem,
+    }
+}
+
+/// A user's or a writer's text is a note; a turn of the dialogue, or text
+/// spelled as one, is not.
+#[test]
+fn only_a_users_or_writers_text_is_a_note() {
+    let mut window = Region::new(
+        "r".into(),
+        RegionKind::SlidingWindow {
+            max_items: 10,
+            eviction_strategy: crate::EvictionStrategy::PerItem,
+        },
+        10_000,
+    );
+    for (text, kind) in [
+        ("a", crate::EntryKind::Text),
+        ("User: b", crate::EntryKind::Text),
+        ("c", crate::EntryKind::UserMessage),
+        ("Assistant: d", crate::EntryKind::Text),
+        ("e", crate::EntryKind::AssistantTurn { tool_calls: vec![] }),
+        (
+            "f",
+            crate::EntryKind::ToolResult {
+                tool_call_id: "c".into(),
+                tool_name: "t".into(),
+                is_error: false,
+            },
+        ),
+    ] {
+        window.add_typed_entry(text, 2, kind).unwrap();
+    }
+    let notes: Vec<bool> = window.content.iter().map(is_note).collect();
+    assert_eq!(notes, [true, true, true, false, false, false]);
+}
+
+/// What is not its entries in order, or not text, has no continuation, and
+/// nor does a region that gained nothing.
+#[test]
+fn a_gain_that_cannot_be_said_as_text_has_no_continuation() {
+    for kind in [
+        RegionKind::Checklist,
+        RegionKind::Custom {
+            script: "r.rhai".into(),
+            pinned: false,
+        },
+    ] {
+        assert_eq!(continuation(&holding(kind, &[("a", None)]), 0), None);
+    }
+    // A sliding window is sent as turns, never as a block.
+    assert_eq!(
+        continuation(&holding(window_kind(), &[("a", None)]), 0),
+        None
+    );
+    let pinned = holding(RegionKind::Pinned, &[("a", None)]);
+    assert_eq!(continuation(&pinned, 1), None);
+    assert_eq!(continuation(&pinned, 5), None);
+    let mut picture = holding(RegionKind::Pinned, &[]);
+    picture
+        .add_entry(EntryContent::from_parts(vec![stored("a.png")]), 2)
+        .unwrap();
+    assert_eq!(continuation(&picture, 0), None);
 }
 
 /// A block serialized before `region` and `volatility` existed still reads.

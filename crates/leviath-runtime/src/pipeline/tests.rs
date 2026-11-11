@@ -22258,15 +22258,18 @@ fn assembled_with_prev(
         model: "m".to_string(),
         previous_system_hash: previous,
         previous_block_hashes: Vec::new(),
+        frame: None,
     })
 }
 
-/// The first request has nothing to invalidate, so it caches as it always did.
+/// The first request writes no message entry: nothing yet shows that a later
+/// request will repeat its prefix, and an entry nothing reads still pays the
+/// write premium. The second request, behind the same prefix, marks.
 #[test]
-fn the_message_breakpoint_is_placed_when_nothing_came_before() {
+fn the_message_breakpoint_waits_for_a_request_to_repeat_the_prefix() {
     let w = breakpoint_window("stable facts");
     let out = assembled_with_prev(&w, None);
-    assert!(out.messages.iter().any(|m| m.cache_breakpoint));
+    assert!(!out.messages.iter().any(|m| m.cache_breakpoint));
 }
 
 /// The reported waste: the prefix moved, so the entry this breakpoint would
@@ -23160,7 +23163,7 @@ fn routing_request_shares_the_stage_prefix_and_forbids_tool_use() {
     si.provider_name = "openrouter".to_string();
     let p = provider(true, 4_000);
 
-    let (stage_req, _, _) =
+    let (stage_req, _, _, _) =
         build_request(&w, Some(&cfg), &si, &p, "analyze", 3, PriorCalls::default());
     let routing = routing_request(&w, Some(&cfg), &si, &p, "analyze", 3, PriorCalls::default());
 
@@ -23232,7 +23235,7 @@ fn routing_request_turns_reasoning_down_where_every_model_reasons() {
     si.provider_name = "meta".to_string();
     let p = provider(true, 4_000);
 
-    let (stage_req, _, _) =
+    let (stage_req, _, _, _) =
         build_request(&w, Some(&cfg), &si, &p, "verify", 1, PriorCalls::default());
     let routing = routing_request(&w, Some(&cfg), &si, &p, "verify", 1, PriorCalls::default());
     assert_eq!(

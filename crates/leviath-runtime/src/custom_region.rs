@@ -35,10 +35,15 @@ pub struct AssembleMeta {
     /// first request, or a caller with no state to keep), and the breakpoint is
     /// placed as it always was.
     pub previous_system_hash: Option<u64>,
-    /// Per-block digests of the previous request's system prefix, so assembly
-    /// can tell which blocks held still and place cache breakpoints only where
-    /// the entry could actually be read back. Empty on the first request.
+    /// Per-block digests of the system blocks the window rendered into for the
+    /// previous request, so assembly can tell a region declared `stable` that
+    /// keeps changing. Empty on the first request.
     pub previous_block_hashes: Vec<u64>,
+    /// What the stage's requests have shown so far, so this one sends the
+    /// same system prompt and adds what regions gained as turns. `None` shows
+    /// the window afresh, which is what a caller with no stage to keep gets.
+    /// See [`crate::components::PromptFrame`].
+    pub frame: Option<crate::components::PromptFrame>,
 }
 
 /// What `on_write` decided about an incoming entry.
@@ -745,6 +750,7 @@ mod tests {
                         model: "m1".to_string(),
                         previous_system_hash: None,
                         previous_block_hashes: Vec::new(),
+                        frame: None,
                     },
                     window_current: 50,
                     window_max: 2000,
