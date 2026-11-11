@@ -177,6 +177,11 @@ same list.
 
 ### Added
 
+- `leviath-providers`: `TokenUsage::merged(self, chunk)` adds one usage chunk of a streamed call
+  onto the running total, by the rule `collect_stream` folds a stream's usage with (counts add
+  and saturate, the reported total is reconciled against the parts, a reported cost replaces).
+  It was private, so a caller pricing a stream it reads itself had to copy it. No behaviour
+  change.
 - Streams now carry the model's thinking text (`StreamChunk::reasoning_delta`) beyond the
   Responses protocol: OpenRouter and other chat-completions routes (`reasoning`,
   `reasoning_content`, and the text and summary blocks of `reasoning_details`; encrypted blocks are
