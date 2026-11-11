@@ -36,6 +36,7 @@ use leviath_runtime::spec::summary::SpawnSummary;
 use leviath_runtime::state::RunState;
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::daemon::mcp_pool::McpLease;
 use crate::daemon::resolve_env::DaemonEnv;
 use crate::daemon::tool_service::CliToolService;
 
@@ -194,25 +195,38 @@ impl DaemonStarter {
             .collect()
     }
 
+    /// The per-agent MCP servers a run of `graph` holds while it is in the
+    /// world: its own, and those of the blueprints its fan-outs start, which
+    /// its start connects so its first worker has their tools.
+    fn held_servers(&self, graph: &RunGraph) -> Vec<MCPServerConfig> {
+        let mut servers = mcp_configs(graph);
+        servers.extend(self.worker_servers(graph));
+        servers
+    }
+
     /// Bring this machine up to date for `request`: the global MCP set and
     /// the providers as the config names them now, then the run's own MCP
     /// servers and its fan-out workers', then its models.
-    async fn warm(&self, request: &SpawnRequest, config: &crate::config::Config) {
+    ///
+    /// The MCP servers are held by what comes back, which the caller keeps
+    /// until the run holds them itself; a spawn that goes no further lets
+    /// go of them by dropping it.
+    async fn warm(&self, request: &SpawnRequest, config: &crate::config::Config) -> McpLease {
         self.mcp_global.refresh(config).await;
         self.providers.refresh_and_prime(config).await;
         // A gateway list that could not be read when the daemon started is
         // asked for again, so this spawn resolves against it if it is back.
         self.providers.prime_unread(config).await;
         self.providers.refresh_retention(config).await;
-        let Some(graph) = self.graph_of(request) else {
-            return;
+        let graph = self.graph_of(request);
+        let servers = graph
+            .as_ref()
+            .map(|graph| self.held_servers(graph))
+            .unwrap_or_default();
+        let held = self.mcp_pool.connect_held(&servers).await;
+        let Some(graph) = graph else {
+            return held;
         };
-        for server in mcp_configs(&graph)
-            .into_iter()
-            .chain(self.worker_servers(&graph))
-        {
-            self.mcp_pool.ensure(&server).await;
-        }
         self.providers
             .registry()
             .warm_models(
@@ -221,6 +235,7 @@ impl DaemonStarter {
                 &config.provider_order(),
             )
             .await;
+        held
     }
 
     /// What this machine answers for `request`, as it stands now: the
@@ -352,38 +367,43 @@ impl DaemonStarter {
                 return Err(issues);
             }
         };
-        let servers = mcp_configs(&resolved.spec.graph);
         let lease = self
             .mcp_pool
-            .lease_servers(&servers, resolved.spec.run_id.as_str());
+            .lease_servers(&self.held_servers(&resolved.spec.graph));
         Ok(PreparedRun {
             spec: Arc::new(resolved.spec),
-            // The servers it holds go on the run, for the reap to hand back.
+            // The servers it holds go on the run: the run leaving the world
+            // lets go of them, and so does a prepared run never placed.
             bindings: bindings.with(lease),
             state,
         })
     }
 
     /// Start a run: warm what it needs, then resolve, record and bind it.
+    ///
+    /// The MCP servers the warm connected stay held until this returns: by
+    /// then the run holds them itself, or the start was refused and they go
+    /// to the idle timer, which tears down any no live run holds.
     pub(crate) async fn spawn(
         &self,
         request: SpawnRequest,
         caller: Caller,
     ) -> Result<PreparedRun, SpawnIssues> {
         let config = self.checked_config().await;
-        self.warm(&request, &config).await;
+        let _warmed = self.warm(&request, &config).await;
         let env = self.env_for(&request, config);
         self.start_with(env, request, caller).await
     }
 
-    /// Resolve a run without starting it.
+    /// Resolve a run without starting it. Nothing holds the MCP servers the
+    /// warm connected once the check is answered.
     pub(crate) async fn validate(
         &self,
         request: SpawnRequest,
         caller: Caller,
     ) -> Result<SpawnSummary, SpawnIssues> {
         let config = self.checked_config().await;
-        self.warm(&request, &config).await;
+        let _warmed = self.warm(&request, &config).await;
         let env = self.env_for(&request, config);
         let resolved = resolve(&request, &caller, &env, ResolveMode::Check).await?;
         Ok(SpawnSummary::of(&resolved.spec))

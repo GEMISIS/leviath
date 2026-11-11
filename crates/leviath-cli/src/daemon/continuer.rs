@@ -59,6 +59,13 @@ pub(crate) async fn prepare(
                 format!("no run '{run_id}' is here; `lev ps --all` lists the runs"),
             )
         })?;
+    // A run that finished longer ago than the idle window finds its own MCP
+    // servers torn down: they are connected again, and held until the run
+    // holds them itself or is not placed.
+    let _held = starter
+        .mcp_pool
+        .connect_held(&crate::daemon::starter::mcp_configs(&run.spec.graph))
+        .await;
     let env = starter.env_for_graph(&run.spec.graph, config.clone());
     starter.providers.refresh(&config);
     continuation::check_compaction(&run.spec.graph, &starter.providers.registry())?;
@@ -89,10 +96,11 @@ pub(crate) async fn prepare(
             issues
         })?;
     let continued = prepared.run.spec.run_id.to_string();
-    let lease = starter.mcp_pool.lease_servers(
-        &crate::daemon::starter::mcp_configs(&prepared.run.spec.graph),
-        &continued,
-    );
+    let lease = starter
+        .mcp_pool
+        .lease_servers(&crate::daemon::starter::mcp_configs(
+            &prepared.run.spec.graph,
+        ));
     let bindings = bindings.with(lease);
     Ok(Box::new(move |world: &mut PipelineWorld| {
         starter.refresh_world(world);

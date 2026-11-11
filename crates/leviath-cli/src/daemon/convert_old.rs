@@ -507,7 +507,7 @@ pub(crate) struct AtStart<'a> {
     pub(crate) mcp_defs: &'a [leviath_providers::Tool],
     pub(crate) mcp_owners: &'a leviath_runtime::pipeline::ToolOwners,
     pub(crate) shared_mcp: std::sync::Arc<tokio::sync::Mutex<leviath_mcp::ToolExecutor>>,
-    pub(crate) pool: &'a crate::daemon::mcp_pool::McpPool,
+    pub(crate) pool: &'a std::sync::Arc<crate::daemon::mcp_pool::McpPool>,
     /// The child that converts the runs, so the memory converting takes
     /// leaves with it; `None` converts them in the daemon.
     pub(crate) child: Option<ChildCmd>,
@@ -627,9 +627,8 @@ async fn in_daemon(runs_dir: &Path, start: &AtStart<'_>, board: &StartupBoard) -
     if !servers.is_empty() {
         board.begin("connecting the MCP servers of unfinished old runs", 0);
     }
-    for server in servers {
-        start.pool.ensure(&server).await;
-    }
+    // Held while the runs convert; the runs that resume hold them again.
+    let _held = start.pool.connect_held(&servers).await;
     let envs = |graph: &RunGraph| start.env(graph);
     convert_all(runs_dir, start.agents_dir, Some(&envs), board)
 }
