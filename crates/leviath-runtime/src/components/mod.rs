@@ -2614,6 +2614,7 @@ mod tests {
             model: "m".to_string(),
             previous_system_hash: None,
             previous_block_hashes: Vec::new(),
+            frame: None,
         });
         assert_eq!(assembled.system_blocks[0].text, "<brain iter=7>");
     }
@@ -3431,15 +3432,22 @@ mod tests {
                 .unwrap();
         }
 
-        let assembled = window.assemble();
+        let first = window.assemble();
+        // A second request behind the same prefix: the markers are only for an
+        // entry a later request can read.
+        let assembled = window.assemble_with_meta(&crate::custom_region::AssembleMeta {
+            previous_system_hash: Some(first.system_hash),
+            ..Default::default()
+        });
         // 10 alternating messages end on an assistant turn, so assemble appends a
         // trailing "Continue." user nudge → 11 messages.
         assert_eq!(assembled.messages.len(), 11);
         assert_eq!(assembled.messages.last().unwrap().role, "user");
 
-        // The breakpoint is placed at the 4th-from-last of the pre-nudge run
-        // (index 6 of the original 10); the nudge is appended after.
-        let bp_idx = 6;
+        // The breakpoint is on the newest message of the conversation (index 9
+        // of the original 10); the nudge is appended after and is not marked,
+        // since the next request will not carry it.
+        let bp_idx = 9;
         for (i, msg) in assembled.messages.iter().enumerate() {
             if i == bp_idx {
                 assert!(
@@ -3494,20 +3502,24 @@ mod tests {
             )
             .unwrap();
 
-        let assembled = window.assemble();
+        let first = window.assemble();
+        // A second request behind the same prefix: the markers are only for an
+        // entry a later request can read.
+        let assembled = window.assemble_with_meta(&crate::custom_region::AssembleMeta {
+            previous_system_hash: Some(first.system_hash),
+            ..Default::default()
+        });
         assert_eq!(assembled.messages.len(), 3);
 
-        // With < 5 messages but >= 2, first message gets the breakpoint
-        assert!(
-            assembled.messages[0].cache_breakpoint,
-            "First message should have cache_breakpoint in small conversation"
-        );
+        // The newest message carries the breakpoint however short the
+        // conversation: the next request repeats it and appends after it.
+        assert!(!assembled.messages[0].cache_breakpoint);
         assert!(!assembled.messages[1].cache_breakpoint);
-        assert!(!assembled.messages[2].cache_breakpoint);
+        assert!(assembled.messages[2].cache_breakpoint);
     }
 
     #[test]
-    fn test_assemble_cache_breakpoint_too_few_messages() {
+    fn test_assemble_cache_breakpoint_single_message() {
         let mut window = ContextWindow::new(100_000);
         let region = Region::new(
             "conv".to_string(),
@@ -3529,14 +3541,18 @@ mod tests {
             )
             .unwrap();
 
-        let assembled = window.assemble();
+        let first = window.assemble();
+        // A second request behind the same prefix: the markers are only for an
+        // entry a later request can read.
+        let assembled = window.assemble_with_meta(&crate::custom_region::AssembleMeta {
+            previous_system_hash: Some(first.system_hash),
+            ..Default::default()
+        });
         assert_eq!(assembled.messages.len(), 1);
 
-        // With only 1 message, no breakpoints should be set
-        assert!(
-            !assembled.messages[0].cache_breakpoint,
-            "Single message should not get a cache breakpoint"
-        );
+        // A request that short is an opening: nothing marks it, and the next
+        // request's markers cover it if the prefix holds.
+        assert!(!assembled.messages[0].cache_breakpoint);
     }
 
     #[test]

@@ -65,6 +65,16 @@ same list.
   as a slice.
 - The seven bundled agents that summarise on a bare model name each move up a patch version,
   for a comment that named the old setting.
+- **Breaking.** For embedders: `leviath_core::context::message_breakpoint` is replaced by
+  `message_breakpoints(messages, repeated, prefix_held)`, which marks the newest message and the
+  end of what the previous request sent, and only when the previous request sent the same system
+  prefix and there are at least two messages. `MAX_SYSTEM_CACHE_RUNS` is now 2, beside the new
+  `MAX_MESSAGE_CACHE_BREAKPOINTS` (2), so the two add up to Anthropic's four; the Anthropic and
+  OpenRouter providers place at most that many system markers. `context::continuation` renders
+  what a block region gained as a turn, and `context::is_note` says which sliding-window entries
+  can be sent after the history. `leviath_runtime`'s `AssembleMeta` takes a `frame` (pass `None`
+  to assemble the window afresh) and `AssembledContext` hands back the `PromptFrame` for the
+  stage's next request.
 
 ### Fixed
 
@@ -80,6 +90,31 @@ same list.
   OpenRouter lists as making video now runs as a job on OpenRouter's Videos API: started, polled,
   downloaded, and priced at the cost the job reports. A job interrupted by a restart is picked up
   again, not started twice (#1100).
+- A stage's conversation caches again on Anthropic models through OpenRouter, and its prefix
+  holds still on every route. Tool routing writes results into regions (`read_file` into
+  `codebase`, the shell into `test_results`), each region is a system block, every
+  `sliding_window` region other than `conversation` (`decisions`, `changelog`) is sent as turns
+  ahead of the dialogue, and all of that comes before the conversation. So almost every call
+  changed the prefix and rewrote the rest of the system prompt and the whole conversation to the
+  cache at the write premium, never to be read back: a coder run read about 15k tokens from cache
+  per call and wrote 20k to 30k. A stage now keeps everything its first request sent ahead of the
+  dialogue, and what any region gains after that reaches the model after the turns that were there
+  when it was gained: a block region's gain as a user turn headed the way its continuation chunks
+  are (`[codebase continued]:` for a compacting region, `## plan (continued)` for a pinned one), a
+  sliding window's notes as the turns they would have been in place. Each request repeats the
+  previous one and only appends, and a call and its result are never split by an added turn, since
+  orphaned tool calls are stripped before any of this is counted. The model sees every
+  result once and the region budgets bound what is sent as before. A change that is not an append
+  (a re-read that replaces an entry, `context_write`, compaction, a cleared, evicted or hidden
+  region, a checklist or script region that re-renders, a conversation that lost a turn) shows the
+  window afresh once, as every call did before. Through OpenRouter the message cache markers move
+  to the newest message and to where the previous request ended, so the conversation is written
+  once and read on every call after; they used to sit four messages from the end, and the first
+  request and a one-message request now mark nothing. The Anthropic provider still places its own
+  message markers on a stride of content blocks, and Bedrock keeps one cache point, so there the
+  turns since the newest marker still go out uncached. For a Mistral model, which refuses a user
+  turn after a tool result, the turn's text joins the tool result, marked or not. Captured requests record
+  assembly version `2`.
 - Approving a compound shell command "for this run" covers the whole command for the rest of the
   run. When part of the line already held a stage approval (say `node` in
   `node --check app.js && npm test`), the run approval recorded only the rest, so the same line

@@ -56,6 +56,48 @@ fn mime_block(mime: &str, data: &str, remote: Option<RemoteFile>) -> ContentBloc
     }
 }
 
+/// A region's gain during a stage follows the tool results as a user turn,
+/// which the Interactions steps carry in that order: the function result, then
+/// the user input.
+#[test]
+fn a_user_turn_after_a_tool_result_follows_the_function_result() {
+    let body = build(
+        &request(vec![
+            message("user", MessageContent::Text("go".into())),
+            message(
+                "assistant",
+                MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                    id: "c1".into(),
+                    name: "read_file".into(),
+                    input: json!({}),
+                    thought_signature: Some("sig".into()),
+                }]),
+            ),
+            message(
+                "user",
+                MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                    tool_use_id: "c1".into(),
+                    content: "[in codebase]".into(),
+                    is_error: false,
+                }]),
+            ),
+            message(
+                "user",
+                MessageContent::Text("## codebase (continued)\nfn a() {}".into()),
+            ),
+        ]),
+        true,
+    );
+    let kinds: Vec<&str> = body["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds.last(), Some(&"user_input"));
+    assert_eq!(kinds[kinds.len() - 2], "function_result");
+}
+
 #[test]
 fn a_tool_loop_becomes_steps_with_the_signature_opening_the_model_turn() {
     let body = build(

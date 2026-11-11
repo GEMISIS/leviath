@@ -10,7 +10,7 @@
 //! the next request, and that a breakpoint is only ever placed at one of them.
 
 use super::{SystemBlock, labelled};
-use crate::{CacheHint, Region, Volatility};
+use crate::{CacheHint, Region, RegionKind, Volatility};
 
 /// How much text one cache chunk of an append-only region holds, in tokens.
 ///
@@ -213,12 +213,18 @@ pub fn cache_hint_sort_priority(hint: CacheHint) -> u8 {
     }
 }
 
-/// The most cache breakpoints assembly will let the system blocks claim.
+/// The most cache breakpoints the system blocks may claim.
 ///
-/// Anthropic allows four `cache_control` blocks across the whole request and
-/// the provider hands the system blocks first claim on that budget, so leaving
-/// one run unclaimed is what keeps a breakpoint available for the messages.
-pub const MAX_SYSTEM_CACHE_RUNS: usize = 3;
+/// Anthropic allows four `cache_control` blocks across the whole request, and
+/// [`message_breakpoints`] asks for at most two on the messages (the newest
+/// message and where the previous request ended), so the system blocks get
+/// the other two. Assembly will not split the system blocks into more runs than
+/// this, and the Anthropic and OpenRouter providers place at most this many
+/// system markers, so a request never asks for a fifth.
+pub const MAX_SYSTEM_CACHE_RUNS: usize = 2;
+
+/// The most cache breakpoints [`message_breakpoints`] places.
+pub const MAX_MESSAGE_CACHE_BREAKPOINTS: usize = 2;
 
 /// Split the volatile tier of the system prompt at its most recently changed
 /// block, by retagging that block and every block after it as
@@ -240,6 +246,22 @@ pub const MAX_SYSTEM_CACHE_RUNS: usize = 3;
 ///
 /// Nothing is retagged when the newest block is already the first one (there is
 /// no stable head to protect), or when the blocks already fill the run budget.
+///
+/// With [`MAX_SYSTEM_CACHE_RUNS`] at two, a prompt with both a stable run and a
+/// changing one already fills the budget, so the split is not made there. That
+/// costs nothing on the wire today: the Anthropic and OpenRouter providers do
+/// not read this hint at all. They place their two system markers at the end
+/// of the stable prefix and on the deepest block that is not uncacheable
+/// (`system_cache_breakpoints` in `leviath-providers`), whatever the hints say,
+/// and a test there pins that retagging a block `RecentlyChanged` moves no
+/// marker. The provider has capped itself at two system markers all along, so
+/// the budget moving from three to two changed no marker either: in the
+/// runtime's `cache_prefix_tests`, run on the commit before and after, every
+/// body carries exactly two system markers. And within a stage the system
+/// prompt is held still, so a marker on the deepest block is read back from the
+/// next call on, which is more than a marker ahead of the newest change could
+/// give. The split stays for an embedder that places one marker per run of
+/// hints, which then stays inside Anthropic's four.
 pub fn mark_recently_changed_run(blocks: &mut [SystemBlock], recency: &[i64]) {
     let mut volatile: Vec<usize> = Vec::new();
     for (index, block) in blocks.iter().enumerate() {
@@ -283,27 +305,138 @@ pub fn mark_recently_changed_run(blocks: &mut [SystemBlock], recency: &[i64]) {
     }
 }
 
-/// Which message, if any, carries the request's one message cache breakpoint.
+/// Whether a `sliding_window` entry is sent as a user's note rather than as a
+/// turn of the dialogue: a user message or a writer's text, and not text
+/// spelled as an assistant reply, which the turn rendering sends as the
+/// assistant's (see [`super::conversation::conversation_messages`]).
 ///
-/// In an iterative inference loop only the last few messages change each
-/// iteration (a new assistant turn and its tool results), so everything before
-/// them is a stable prefix worth caching. Anthropic allows four breakpoints;
-/// the system blocks take at most [`MAX_SYSTEM_CACHE_RUNS`] of them, so this
-/// one always fits. It lands on the 4th-from-last message, leaving a buffer for
-/// the two or three added each iteration, or on the first message of a short
-/// conversation.
+/// A note can be sent later than the turns around it without changing what it
+/// says, so a caller holding a window's earlier turns still can send what it
+/// gained after the history, rendered exactly as it would have been in place.
 ///
-/// `None` when the system prefix moved since the last request: a provider
-/// caches by prefix, so this breakpoint's entry covers every system block as
-/// well as the messages before it, and a prefix that changed has already
-/// invalidated it. The write premium would still be charged for an entry that
-/// could never be read. Measured on a run whose bulk region grew every turn:
-/// 3.3M cache-write tokens against 267k reads.
-pub fn message_breakpoint(messages: usize, prefix_moved: bool) -> Option<usize> {
-    match messages {
-        _ if prefix_moved => None,
-        n if n >= 5 => Some(n - 4),
-        n if n >= 2 => Some(0),
-        _ => None,
+/// ```
+/// use leviath_core::{EntryKind, Region, RegionKind, EvictionStrategy};
+/// use leviath_core::context::is_note;
+///
+/// let mut log = Region::new(
+///     "decisions".into(),
+///     RegionKind::SlidingWindow { max_items: 5, eviction_strategy: EvictionStrategy::PerItem },
+///     1_000,
+/// );
+/// log.add_typed_entry("Keep the API.", 3, EntryKind::Text).unwrap();
+/// log.add_typed_entry("Assistant: done", 3, EntryKind::Text).unwrap();
+/// assert!(is_note(&log.content[0]));
+/// assert!(!is_note(&log.content[1]));
+/// ```
+pub fn is_note(entry: &crate::RegionEntry) -> bool {
+    match entry.kind {
+        crate::EntryKind::UserMessage => true,
+        crate::EntryKind::Text => !entry.content.trim().starts_with("Assistant: "),
+        crate::EntryKind::AssistantTurn { .. } | crate::EntryKind::ToolResult { .. } => false,
+    }
+}
+
+/// Which messages carry the request's message cache breakpoints: the last
+/// one, and the last of the leading `repeated` messages this request sends
+/// exactly as the previous request did.
+///
+/// A provider caches by prefix and reads back the longest stored prefix that
+/// still matches, so in an agent loop the marker that pays is on the newest
+/// turn: the next request repeats every byte up to it and appends after it.
+/// A marker some way back from the end, which is where this put it before,
+/// left the turns behind it to go out uncached on every call until it caught
+/// up.
+///
+/// The second marker sits where the previous request put its own, at the end
+/// of what the two share. That entry already exists, so a marker exactly on it
+/// reads it back however far the newest turn has moved on. Without it the read
+/// depends on the provider's lookup reaching back from the newest marker, which
+/// Anthropic bounds at about twenty content blocks, and one turn of a dozen
+/// parallel tool calls outruns that.
+///
+/// At most [`MAX_MESSAGE_CACHE_BREAKPOINTS`], which with the system blocks'
+/// [`MAX_SYSTEM_CACHE_RUNS`] is Anthropic's four. How a provider spends them is
+/// its own: OpenRouter marks these messages, the Anthropic provider reads the
+/// flags as "may cache" and places its own stride, and Bedrock keeps one.
+///
+/// Nothing unless `prefix_held`, that is unless the previous request sent the
+/// same system prefix: these markers' entries cover every system block as well
+/// as the messages, so after a prefix that moved, or on the first request,
+/// nothing says the next request will repeat the prefix, and an entry no later
+/// request reads still pays the write premium. Measured on a run whose bulk
+/// region grew every turn: 3.3M cache-write tokens against 267k reads. Nothing
+/// on a single message either: a request that short is an opening, and the one
+/// after it repeats it only if the prefix holds, which the next call's markers
+/// cover.
+pub fn message_breakpoints(messages: usize, repeated: usize, prefix_held: bool) -> Vec<usize> {
+    let mut marks = Vec::new();
+    if !prefix_held || messages < 2 {
+        return marks;
+    }
+    if (1..messages).contains(&repeated) {
+        marks.push(repeated - 1);
+    }
+    marks.push(messages - 1);
+    marks
+}
+
+/// What a region gained since a request showed its first `shown` entries, as
+/// text that reads as that region continuing.
+///
+/// For a request that keeps the system prompt and the earlier turns it started
+/// a stage with and sends what a region gained since as a later turn, so that
+/// one request repeats the previous one byte for byte. The heading is the
+/// region's own when the request showed none of it, and a continuation of it
+/// otherwise, spelled the way the region's own chunks are: `## name
+/// (continued)` for the kinds labelled `## name`, `[name continued]:` for the
+/// bracketed ones.
+///
+/// `None` when nothing was gained, or the gain cannot be said as one block of
+/// text: a region whose rendering is not its entries in order (`checklist`,
+/// `custom`), an entry carrying a stored part, and a `sliding_window`, whose
+/// entries are sent as turns rather than as a block (send its gained notes as
+/// those turns; see [`is_note`]). A caller then shows the region afresh.
+///
+/// ```
+/// use leviath_core::{Region, RegionKind};
+/// use leviath_core::context::continuation;
+///
+/// let mut codebase = Region::new("codebase".into(), RegionKind::Pinned, 1_000);
+/// codebase.add_entry("fn a() {}", 3).unwrap();
+/// codebase.add_entry("fn b() {}", 3).unwrap();
+/// assert_eq!(continuation(&codebase, 1).as_deref(), Some("## codebase (continued)\nfn b() {}"));
+/// assert_eq!(continuation(&codebase, 2), None);
+/// ```
+pub fn continuation(region: &Region, shown: usize) -> Option<String> {
+    let gained = region.content.get(shown..).filter(|g| !g.is_empty())?;
+    if gained.iter().any(|e| e.content.stored().next().is_some()) {
+        return None;
+    }
+    let bodies = |keyed: bool| {
+        gained
+            .iter()
+            .map(|e| match (&e.key, keyed) {
+                (Some(key), true) => format!("### [{}]\n{}", key, e.content),
+                _ => e.content.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    };
+    let bracketed = |body: String| match shown {
+        0 => format!("{}{body}", super::bracketed_heading(region)),
+        _ => format!("[{} continued]:\n{body}", region.name),
+    };
+    match &region.kind {
+        RegionKind::Pinned | RegionKind::CompactHistory { .. } => Some(match shown {
+            0 => labelled(region, &bodies(false)),
+            _ => format!("## {} (continued)\n{}", region.name, bodies(false)),
+        }),
+        RegionKind::Compacting { .. } | RegionKind::Temporary | RegionKind::Clearable => {
+            Some(bracketed(bodies(false)))
+        }
+        RegionKind::HashMap { .. } => Some(bracketed(bodies(true))),
+        RegionKind::Checklist | RegionKind::Custom { .. } | RegionKind::SlidingWindow { .. } => {
+            None
+        }
     }
 }
