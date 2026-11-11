@@ -1,6 +1,8 @@
 //! Image generation and editing over the OpenAI-shaped images routes xAI and
 //! Meta both serve: `POST /images/generations`, and `POST /images/edits` when
-//! the stage handed the model an image to start from.
+//! the stage handed the model an image to start from. OpenRouter's Images API
+//! is the same call on one path, `POST /images`, with the reference images in
+//! `input_references`.
 //!
 //! Every result is asked for as `b64_json`, so the bytes arrive in the reply
 //! rather than behind a short-lived URL on another host; a reply that sends a
@@ -23,7 +25,86 @@ pub(crate) enum EditShape {
     /// Meta: `images: [{image_url}]`.
     #[cfg(any(feature = "openai", feature = "meta"))]
     Meta,
+    /// OpenRouter: `input_references: [{type: "image_url", image_url: {url}}]`,
+    /// on the same `/images` path a generation takes.
+    #[cfg(feature = "openrouter")]
+    OpenRouter,
 }
+
+/// The OpenAI-shaped path for a generation from a prompt alone.
+#[cfg(any(
+    feature = "openai",
+    feature = "xai",
+    feature = "xai-subscription",
+    feature = "meta"
+))]
+const GENERATIONS: &str = "/images/generations";
+
+/// The OpenAI-shaped path for an edit of the images handed over.
+#[cfg(any(
+    feature = "openai",
+    feature = "xai",
+    feature = "xai-subscription",
+    feature = "meta"
+))]
+const EDITS: &str = "/images/edits";
+
+impl EditShape {
+    /// Put `references` in `body` the way this vendor takes them, and say
+    /// which path the call goes to.
+    fn carry(
+        self,
+        body: &mut serde_json::Map<String, Value>,
+        references: &[String],
+    ) -> &'static str {
+        match self {
+            #[cfg(any(feature = "xai", feature = "xai-subscription"))]
+            Self::Xai => match references {
+                [] => GENERATIONS,
+                [one] => {
+                    body.insert("image".into(), json!({ "url": one }));
+                    EDITS
+                }
+                many => {
+                    let images: Vec<Value> = many.iter().map(|u| json!({ "url": u })).collect();
+                    body.insert("images".into(), json!(images));
+                    EDITS
+                }
+            },
+            #[cfg(any(feature = "openai", feature = "meta"))]
+            Self::Meta => match references {
+                [] => GENERATIONS,
+                many => {
+                    let images: Vec<Value> =
+                        many.iter().map(|u| json!({ "image_url": u })).collect();
+                    body.insert("images".into(), json!(images));
+                    EDITS
+                }
+            },
+            #[cfg(feature = "openrouter")]
+            Self::OpenRouter => {
+                if !references.is_empty() {
+                    let images: Vec<Value> = references
+                        .iter()
+                        .map(|u| json!({ "type": "image_url", "image_url": { "url": u } }))
+                        .collect();
+                    body.insert("input_references".into(), json!(images));
+                }
+                "/images"
+            }
+        }
+    }
+}
+
+/// Where xAI's reply reports the call's cost: `usage.cost_in_usd_ticks`, in
+/// ticks of a dollar.
+#[cfg(any(feature = "xai", feature = "xai-subscription"))]
+pub(crate) const TICKS: (&str, f64) = ("/usage/cost_in_usd_ticks", crate::responses::TICKS_PER_USD);
+
+/// Where OpenRouter's Images API reports the call's cost: `usage.cost`, in
+/// US dollars.
+#[cfg(feature = "openrouter")]
+pub(crate) const USD: (&str, f64) = ("/usage/cost", 1.0);
 
 /// What the call is for, as it is described in the summary line.
 pub(crate) struct Route<'a> {
@@ -35,8 +116,10 @@ pub(crate) struct Route<'a> {
     pub(crate) default_mime: &'a str,
     /// Hints read from the stage's parameters and sent as written.
     pub(crate) hints: &'a [&'a str],
-    /// Whether the reply's `cost_in_usd_ticks` is this call's cost.
-    pub(crate) reported_cost: bool,
+    /// Where the reply reports this call's cost, as a JSON pointer, and how
+    /// many of its unit make a dollar ([`TICKS`], [`USD`]); `None` when what
+    /// it reports is not the cost.
+    pub(crate) reported: Option<(&'a str, f64)>,
     /// The per-image price, for a reply that quotes no cost.
     pub(crate) unit: Option<UnitPrice>,
     /// The token rates, for a model billed by the tokens its reply's `usage`
@@ -75,29 +158,7 @@ pub(crate) async fn run(
             body.insert((*key).into(), json!(value));
         }
     }
-    let path = match references.is_empty() {
-        true => "/images/generations",
-        false => {
-            match (route.shape, references.as_slice()) {
-                #[cfg(any(feature = "xai", feature = "xai-subscription"))]
-                (EditShape::Xai, [one]) => {
-                    body.insert("image".into(), json!({ "url": one }));
-                }
-                #[cfg(any(feature = "xai", feature = "xai-subscription"))]
-                (EditShape::Xai, many) => {
-                    let images: Vec<Value> = many.iter().map(|u| json!({ "url": u })).collect();
-                    body.insert("images".into(), json!(images));
-                }
-                #[cfg(any(feature = "openai", feature = "meta"))]
-                (EditShape::Meta, many) => {
-                    let images: Vec<Value> =
-                        many.iter().map(|u| json!({ "image_url": u })).collect();
-                    body.insert("images".into(), json!(images));
-                }
-            }
-            "/images/edits"
-        }
-    };
+    let path = route.shape.carry(&mut body, &references);
 
     let response = endpoint.post_json(path, &Value::Object(body)).await?;
     let response =
@@ -118,9 +179,11 @@ pub(crate) async fn run(
         .map(|format| format!("image/{format}"));
     let entries = reply.get("data").and_then(Value::as_array);
     for (index, entry) in entries.into_iter().flatten().enumerate() {
+        // xAI says `mime_type`, Meta `mime`, OpenRouter `media_type`.
         let said = entry
             .get("mime_type")
             .or_else(|| entry.get("mime"))
+            .or_else(|| entry.get("media_type"))
             .and_then(Value::as_str)
             .map(str::to_string)
             .or_else(|| reply_mime.clone())
@@ -155,12 +218,13 @@ pub(crate) async fn run(
         )));
     }
 
-    let ticks = reply
-        .pointer("/usage/cost_in_usd_ticks")
-        .and_then(Value::as_f64)
-        .filter(|_| route.reported_cost)
-        .map(|t| t / crate::responses::TICKS_PER_USD);
-    let cost = ticks
+    let reported = route.reported.and_then(|(pointer, per_usd)| {
+        reply
+            .pointer(pointer)
+            .and_then(Value::as_f64)
+            .map(|cost| cost / per_usd)
+    });
+    let cost = reported
         .or_else(|| route.unit.map(|u| u.cost(parts.len() as f64)))
         .or_else(|| token_cost(route.tokens.as_ref(), &reply));
     let summary = super::summary(&format!("{}/{}", route.provider, request.model), &parts);
@@ -232,7 +296,7 @@ mod tests {
             shape,
             default_mime: "image/jpeg",
             hints: &["aspect_ratio", "resolution", "quality", "size"],
-            reported_cost: reported,
+            reported: reported.then_some(TICKS),
             unit: Some(UnitPrice {
                 usd: 0.01,
                 unit: PriceUnit::Image,

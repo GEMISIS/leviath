@@ -8,6 +8,8 @@ mod audio;
 #[cfg(feature = "openrouter")]
 mod catalog;
 #[cfg(feature = "openrouter")]
+mod images;
+#[cfg(feature = "openrouter")]
 mod prefix;
 #[cfg(feature = "openrouter")]
 mod video;
@@ -127,6 +129,11 @@ pub struct OpenRouterProvider {
     /// this build's table already names only a few dozen of hundreds.
     temperature_unsupported: crate::provider::ModelMemo,
 
+    /// Models chat refused as served on the Images API alone, by listed id.
+    /// The listing's `endpoints` says so up front; this is for a model it
+    /// has not described, learned from the refusal that names the endpoint.
+    images_route: crate::provider::ModelMemo,
+
     /// What OpenRouter's own `/models` endpoint says about each model, filled
     /// once by [`Provider::prime_capabilities`].
     ///
@@ -186,6 +193,7 @@ impl OpenRouterProvider {
             capability_overrides: HashMap::new(),
             warned_unknown: Default::default(),
             temperature_unsupported: Default::default(),
+            images_route: Default::default(),
             learned: Default::default(),
             zdr_models: std::sync::RwLock::new(None),
             extra_headers: Vec::new(),
@@ -832,6 +840,9 @@ impl Provider for OpenRouterProvider {
         if self.is_video_job(request) {
             return self.video(request, self.video_poll).await;
         }
+        if self.is_image_job(request) {
+            return self.image(request).await;
+        }
         // OpenRouter requires `stream: true` for audio modalities. Reuse the
         // streaming transport here too so callers of the buffered trait method
         // receive the same assembled audio part instead of a gateway 400.
@@ -851,9 +862,10 @@ impl Provider for OpenRouterProvider {
         let mut body = self.build_request_body(request);
         let url = format!("{}/chat/completions", self.base_url);
         let headers = self.chat_headers();
-        let response = self
-            .send_with_temperature_retry(&url, &headers, &mut body, request)
-            .await?;
+        let response = match self.send_chat(&url, &headers, &mut body, request).await? {
+            images::Sent::Chat(response) => response,
+            images::Sent::Drawn(drawn) => return Ok(drawn),
+        };
 
         let response_body: serde_json::Value = crate::provider::decode_json(response).await?;
 
@@ -887,6 +899,9 @@ impl Provider for OpenRouterProvider {
                 self.video(request, self.video_poll).await?,
             ));
         }
+        if self.is_image_job(request) {
+            return Ok(crate::media::one_chunk(self.image(request).await?));
+        }
 
         if let Some(limiter) = &self.rate_limiter {
             limiter.acquire().await?;
@@ -900,9 +915,10 @@ impl Provider for OpenRouterProvider {
         // refusal is the initial HTTP response, before any stream bytes, so it
         // is caught and retried here too. Without it an image model reached by
         // streaming fails the run over a temperature it never needed.
-        let response = self
-            .send_with_temperature_retry(&url, &headers, &mut body, request)
-            .await?;
+        let response = match self.send_chat(&url, &headers, &mut body, request).await? {
+            images::Sent::Chat(response) => response,
+            images::Sent::Drawn(drawn) => return Ok(crate::media::one_chunk(drawn)),
+        };
 
         // Reuse OpenAI SSE parser since the format is identical
         let peer = leviath_net::read_caps::peer_of(&response);

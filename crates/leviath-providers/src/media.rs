@@ -12,7 +12,8 @@
     feature = "openai",
     feature = "xai",
     feature = "xai-subscription",
-    feature = "meta"
+    feature = "meta",
+    feature = "openrouter"
 ))]
 pub(crate) mod images;
 
@@ -54,7 +55,8 @@ use crate::provider::InferenceRequest;
     feature = "google",
     feature = "bedrock",
     feature = "meta",
-    feature = "meshy"
+    feature = "meshy",
+    feature = "openrouter"
 ))]
 use crate::provider::{ContentBlock, MessageContent};
 #[cfg(any(
@@ -111,7 +113,8 @@ pub(crate) const DEFAULT_TASK_SECS: u64 = 900;
     feature = "xai",
     feature = "xai-subscription",
     feature = "meta",
-    feature = "meshy"
+    feature = "meshy",
+    feature = "openrouter"
 ))]
 pub(crate) fn data_uris(request: &InferenceRequest, want: impl Fn(&str) -> bool) -> Vec<String> {
     parts(request, want)
@@ -128,7 +131,8 @@ pub(crate) fn data_uris(request: &InferenceRequest, want: impl Fn(&str) -> bool)
     feature = "google",
     feature = "bedrock",
     feature = "meta",
-    feature = "meshy"
+    feature = "meshy",
+    feature = "openrouter"
 ))]
 fn parts<'a>(
     request: &'a InferenceRequest,
@@ -412,7 +416,8 @@ where
     feature = "openai",
     feature = "xai",
     feature = "xai-subscription",
-    feature = "meta"
+    feature = "meta",
+    feature = "openrouter"
 ))]
 pub(crate) async fn download(
     client: &reqwest::Client,
@@ -442,7 +447,8 @@ pub(crate) async fn download(
     feature = "xai",
     feature = "xai-subscription",
     feature = "bedrock",
-    feature = "meta"
+    feature = "meta",
+    feature = "openrouter"
 ))]
 pub(crate) fn blob(mime: &str, bytes: Vec<u8>, name: &str) -> Result<Blob> {
     let mime_type = MimeType::parse(mime).map_err(|e| {
@@ -628,7 +634,8 @@ pub(crate) fn summary(route: &str, parts: &[Blob]) -> String {
     feature = "xai-subscription",
     feature = "google",
     feature = "bedrock",
-    feature = "meta"
+    feature = "meta",
+    feature = "openrouter"
 ))]
 pub(crate) fn extension(mime: &str) -> &'static str {
     match mime {

@@ -190,6 +190,15 @@ mod tests {
             "[bad-request] HTTP 400 Bad Request: this model does not support audio output".into(),
         );
         assert_eq!(Reroute::of(&incapable), Some(Reroute::Incapable));
+        // A model refused on this endpoint (OpenRouter's 404 for an image
+        // model sent to chat) is not retried as an outage: it moves on.
+        let wrong_endpoint = ProviderError::from_http(
+            reqwest::StatusCode::NOT_FOUND,
+            r#"{"error":{"message":"black-forest-labs/flux-3-image is an image generation model and cannot be used with the chat/completions endpoint. Use the /api/v1/images endpoint instead.","code":404}}"#,
+            None,
+        );
+        assert!(!wrong_endpoint.is_transient(), "{wrong_endpoint}");
+        assert_eq!(Reroute::of(&wrong_endpoint), Some(Reroute::Incapable));
         // What fails the same way everywhere ends the stage.
         for stays in [
             ProviderError::ApiError("[bad-request] HTTP 400 Bad Request: no".into()),

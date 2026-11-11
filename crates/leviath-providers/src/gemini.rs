@@ -570,6 +570,7 @@ fn parse_native_entry(item: &serde_json::Value) -> Option<(String, LearnedModel)
             // The listing names no modalities; the family table answers.
             input_types: None,
             output_types: None,
+            endpoints: None,
         },
     ))
 }

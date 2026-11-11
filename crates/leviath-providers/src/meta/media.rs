@@ -64,7 +64,7 @@ pub(crate) async fn run(
                         "reasoning_strength",
                         "moderation",
                     ],
-                    reported_cost: false,
+                    reported: None,
                     unit,
                     tokens: None,
                     response_format: true,
