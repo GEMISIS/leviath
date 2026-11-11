@@ -102,13 +102,14 @@ fn every_kind_says_what_it_settles() {
         (FailureKind::ServerError, Some(true)),
         (FailureKind::ModelUnavailable, Some(true)),
         (FailureKind::MalformedResponse, Some(true)),
+        (FailureKind::WrongEndpoint, Some(true)),
     ] {
         let label = kind.label();
         assert_eq!(kind.request_sent(), sent, "{label}");
         let error = ProviderError::labelled(kind, "sending the request", "it failed");
         assert_eq!(error.request_sent(), sent, "{label}");
     }
-    assert_eq!(FailureKind::ALL.len(), 11, "a new kind needs a row above");
+    assert_eq!(FailureKind::ALL.len(), 12, "a new kind needs a row above");
 }
 
 /// A tag at the head of the message answers before the variant or the kind

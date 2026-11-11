@@ -141,6 +141,7 @@ models = [
 | `model-unavailable`: the model is listed but could not be served | Yes, with backoff | The next entry in the list |
 | `not-found`: a real 404 for the model | No | A bare model name only: the next provider serving that model |
 | `route-incapable`: a bad request saying the model does not support what was asked (a modality, a parameter or a value: "does not support", "not supported", `unsupported_parameter`, "No endpoints found that support") | No | The next entry in the list |
+| `wrong-endpoint`: the model does not work on the endpoint the call went to ("cannot be used with the chat/completions endpoint", whatever the status) | No | The next entry in the list |
 | Any other bad request, a refused prompt, a request over the window | No | The stage ends (or takes its `error` edge) |
 
 Each move uses up the entry it moves to, so a call moves at most once per entry in the list.
@@ -999,11 +1000,19 @@ answers such a model with text alone and bills the clip anyway, so a stage whose
 includes `video/*` never goes there. The job takes the prompt and `duration`, `resolution`,
 `aspect_ratio`, `size`, `seed` and `generate_audio`. It is not sent the stage's images.
 
-A model that makes images (`google/gemini-3.1-flash-image`, `openai/gpt-5-image`, and the
-image-only ones such as `black-forest-labs/flux.2-klein-4b`) answers Chat Completions with the
-picture, and a model that makes audio (`openai/gpt-audio`, `google/lyria-3-clip-preview`) does
-when the stage declares `audio/*` output. Leviath reads OpenRouter's listing with the image-only
-and video-only models included, so a stage can name one.
+A model that makes images and text (`google/gemini-3.1-flash-image`, `openai/gpt-5-image`)
+answers Chat Completions with the picture, and a model that makes audio (`openai/gpt-audio`,
+`google/lyria-3-clip-preview`) does when the stage declares `audio/*` output. Leviath reads
+OpenRouter's listing with the image-only and video-only models included, so a stage can name one.
+
+An image model the listing names under the Images API alone (its `endpoints` is
+`["/api/v1/images"]`, as for `black-forest-labs/flux-3-image` and `flux.2-klein-4b`) is drawn
+there: `POST /images` with the stage's prompt, the images it was handed as `input_references`, and
+`resolution`, `aspect_ratio`, `size`, `quality`, `output_format`, `background` and `n` when the
+stage sets them. The picture is the stage's output, priced at the `usage.cost` the reply reports.
+Chat refuses these models ("cannot be used with the chat/completions endpoint"), so the listing,
+not the model's name, decides. When the listing could not be read, that refusal sends the call to
+the Images API instead, and the model goes there for the rest of the process.
 
 An OpenAI audio model reached through OpenRouter streams raw samples and nothing else, so its
 audio is always a 24 kHz WAV, whatever type the stage declares. Declare the artifact as `audio/*`

@@ -157,6 +157,19 @@ pub(crate) fn parse_entry(entry: &serde_json::Value) -> Option<(String, LearnedM
                 .map(str::to_string),
             input_types: modalities(entry, "input_modalities"),
             output_types: modalities(entry, "output_modalities"),
+            // `endpoints`: "Request API paths that serve this model". An
+            // image model OpenRouter serves only from its Images API lists
+            // `/api/v1/images` alone, and is refused on chat.
+            endpoints: entry
+                .get("endpoints")
+                .and_then(|v| v.as_array())
+                .map(|paths| {
+                    paths
+                        .iter()
+                        .filter_map(|p| p.as_str())
+                        .map(str::to_string)
+                        .collect()
+                }),
         },
     ))
 }
@@ -302,6 +315,33 @@ mod tests {
         // The write rate is backfilled from input, which is why the marker
         // signal reads the raw key instead.
         assert!((pricing.cache_write_per_mtok - 0.3).abs() < 1e-9);
+    }
+
+    /// The request paths each model is served on, as the live listing had
+    /// them (2026-11-11): flux-3-image on the Images API alone, a Gemini
+    /// image model on chat as well.
+    #[test]
+    fn the_paths_that_serve_a_model_are_kept() {
+        let (_, flux) = parse_entry(&json!({
+            "id": "black-forest-labs/flux-3-image",
+            "architecture": { "output_modalities": ["image"] },
+            "endpoints": ["/api/v1/images"]
+        }))
+        .unwrap();
+        assert_eq!(flux.endpoints.unwrap(), vec!["/api/v1/images"]);
+        let (_, gemini) = parse_entry(&json!({
+            "id": "google/gemini-3-pro-image",
+            "endpoints": ["/api/v1/chat/completions", "/api/v1/images", 7]
+        }))
+        .unwrap();
+        assert_eq!(
+            gemini.endpoints.unwrap(),
+            vec!["/api/v1/chat/completions", "/api/v1/images"]
+        );
+        assert_eq!(
+            parse_entry(&json!({ "id": "x" })).unwrap().1.endpoints,
+            None
+        );
     }
 
     #[test]

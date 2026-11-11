@@ -142,7 +142,7 @@ pub(crate) async fn run(
                         "output_format",
                         "moderation",
                     ],
-                    reported_cost: false,
+                    reported: None,
                     unit: None,
                     tokens: billing.tokens,
                     response_format: false,

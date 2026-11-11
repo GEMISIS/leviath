@@ -153,7 +153,8 @@ impl FailureKind {
             | FailureKind::NotFound
             | FailureKind::ServerError
             | FailureKind::ModelUnavailable
-            | FailureKind::MalformedResponse => Some(true),
+            | FailureKind::MalformedResponse
+            | FailureKind::WrongEndpoint => Some(true),
             FailureKind::Timeout | FailureKind::ConnectionDropped | FailureKind::Transport => None,
         }
     }

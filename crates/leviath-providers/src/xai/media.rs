@@ -110,7 +110,7 @@ pub(crate) async fn run(
                     shape: images::EditShape::Xai,
                     default_mime: "image/jpeg",
                     hints: &["aspect_ratio", "resolution", "quality"],
-                    reported_cost: billing.reported,
+                    reported: billing.reported.then_some(images::TICKS),
                     unit: billing.unit.filter(|_| billing.reported),
                     tokens: None,
                     response_format: true,

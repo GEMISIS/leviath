@@ -60,6 +60,7 @@ pub(super) fn parse_entry(entry: &serde_json::Value) -> Option<(String, LearnedM
             // images and PDFs, which the table says.
             input_types: None,
             output_types: None,
+            endpoints: None,
         },
     ))
 }

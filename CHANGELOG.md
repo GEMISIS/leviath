@@ -15,6 +15,16 @@ same list.
 
 ### Changed
 
+- An OpenRouter image model served only on OpenRouter's Images API (`black-forest-labs/flux-3-image`,
+  `flux-3-image-klein` and the others its listing names under `/api/v1/images` alone) is drawn
+  there, with the stage's prompt and reference images, and priced at the cost the reply reports.
+  It was sent to Chat Completions, which refuses it with a 404 ("cannot be used with the
+  chat/completions endpoint"); Leviath read that as a short outage, tried it four times with
+  backoff on every call and moved to the next model. Which models go there is read from the listing's
+  `endpoints`, and with no listing the refusal itself sends the call there. A refusal of that kind
+  that nothing can reroute is now `wrong-endpoint`: not retried, and the call moves to the next
+  route, saying the model does not work on that endpoint.
+
 - A stage that asks a model for the media it makes is offered no tools, on every provider. The
   rule was each vendor's listing, and an image model listed as calling tools
   (`google/gemini-nano-banana-2.1` through OpenRouter) answered an image stage with four tool

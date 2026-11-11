@@ -75,6 +75,11 @@ pub struct LearnedModel {
     pub input_types: Option<Vec<String>>,
     /// Mime type patterns the listing says the model can hand back.
     pub output_types: Option<Vec<String>>,
+    /// The request paths the listing says serve the model, as it spells
+    /// them (`/api/v1/chat/completions`, `/api/v1/images`). OpenRouter's
+    /// `endpoints`: an image model listed under `/api/v1/images` alone is
+    /// refused on chat and is sent to its images endpoint instead.
+    pub endpoints: Option<Vec<String>>,
 }
 
 impl LearnedModel {

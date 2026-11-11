@@ -77,11 +77,17 @@ pub enum FailureKind {
     ModelUnavailable,
     /// The provider answered something this build could not parse.
     MalformedResponse,
+    /// The provider says this model does not work on the endpoint the call
+    /// went to, and names another: OpenRouter's "is an image generation
+    /// model and cannot be used with the chat/completions endpoint. Use the
+    /// /api/v1/images endpoint instead." It is the same answer every time,
+    /// so it is not retried; the call moves to the next route.
+    WrongEndpoint,
 }
 
 impl FailureKind {
     /// Every kind, for the places that read one back from its label.
-    pub const ALL: [FailureKind; 11] = [
+    pub const ALL: [FailureKind; 12] = [
         FailureKind::DnsFailure,
         FailureKind::ConnectionRefused,
         FailureKind::TlsFailure,
@@ -93,6 +99,7 @@ impl FailureKind {
         FailureKind::ServerError,
         FailureKind::ModelUnavailable,
         FailureKind::MalformedResponse,
+        FailureKind::WrongEndpoint,
     ];
 
     /// A short, stable label for logs, metrics attributes and the API.
@@ -109,6 +116,7 @@ impl FailureKind {
             FailureKind::ServerError => "server-error",
             FailureKind::ModelUnavailable => "model-unavailable",
             FailureKind::MalformedResponse => "malformed-response",
+            FailureKind::WrongEndpoint => "wrong-endpoint",
         }
     }
 
@@ -153,6 +161,11 @@ impl FailureKind {
             }
             FailureKind::MalformedResponse => {
                 "the provider answered with something this build could not parse"
+            }
+            FailureKind::WrongEndpoint => {
+                "this model does not work on the endpoint the call went to (the provider \
+                 names another); it is not an outage, so the call is not retried and moves \
+                 to the next route"
             }
         }
     }
@@ -206,7 +219,8 @@ impl FailureKind {
             | FailureKind::NotFound
             | FailureKind::ServerError
             | FailureKind::ModelUnavailable
-            | FailureKind::MalformedResponse => true,
+            | FailureKind::MalformedResponse
+            | FailureKind::WrongEndpoint => true,
             // `Transport` is the unrecognised case, and it is counted as not
             // reached on purpose: the patient threshold is the one that lets a
             // dead provider keep taking work, so an unknown failure takes the
@@ -241,13 +255,31 @@ impl FailureKind {
     /// 404 (no upstream named) stays [`FailureKind::NotFound`], and a relayed
     /// 400 stays a bad request: a request the upstream refused is refused
     /// everywhere.
+    ///
+    /// A 4xx whose body says the model cannot be used with this endpoint
+    /// (see [`names_another_endpoint`]) is [`FailureKind::WrongEndpoint`]
+    /// whatever its status: OpenRouter answers an image model sent to chat
+    /// with a 404, which read as a missing or listed-but-down model.
     pub fn from_response(status: u16, body: &str) -> Self {
+        if matches!(status, 400..=499) && names_another_endpoint(body) {
+            return FailureKind::WrongEndpoint;
+        }
         let relayed = matches!(status, 404 | 408 | 500..=599) && relayed_upstream(body).is_some();
         match relayed {
             true => FailureKind::ModelUnavailable,
             false => Self::from_status(status),
         }
     }
+}
+
+/// Whether a refusal says the model cannot be used with the endpoint the call
+/// went to, in the words OpenRouter uses: "`<model>` is an image generation
+/// model and cannot be used with the chat/completions endpoint. Use the
+/// /api/v1/images endpoint instead." Both halves are asked for, so a refusal
+/// that says only "cannot be used with" (a key, a region) is not this.
+pub fn names_another_endpoint(body: &str) -> bool {
+    let body = body.to_ascii_lowercase();
+    body.contains("cannot be used with the") && body.contains("endpoint")
 }
 
 /// The upstream provider a gateway's error body says it relayed the failure
@@ -509,7 +541,13 @@ impl ProviderError {
     /// field or a prompt over the window fails the same way everywhere, and
     /// stays a plain bad request. Only the provider's own words are read, not
     /// the remedy this crate appends.
+    ///
+    /// A [`FailureKind::WrongEndpoint`] is one too: the model does not work
+    /// on this route at all, so the next route is the only answer.
     pub fn is_capability_refusal(&self) -> bool {
+        if self.failure_kind() == Some(FailureKind::WrongEndpoint) {
+            return true;
+        }
         const SAID: [&str; 9] = [
             "does not support",
             "doesn't support",
@@ -830,6 +868,43 @@ mod tests {
         ] {
             assert!(other.listed_model_unavailable().is_none(), "{other}");
         }
+    }
+
+    /// OpenRouter's answer to an image model sent to chat, as live run 8 got
+    /// it, is a model that does not work on this route: not an outage to
+    /// retry, not a missing model, and a route the next model can replace.
+    #[test]
+    fn a_model_refused_on_this_endpoint_is_the_wrong_route_not_an_outage() {
+        let said = r#"{"error":{"message":"black-forest-labs/flux-3-image is an image generation model and cannot be used with the chat/completions endpoint. Use the /api/v1/images endpoint instead.","code":404},"user_id":"u"}"#;
+        for status in [
+            reqwest::StatusCode::NOT_FOUND,
+            reqwest::StatusCode::BAD_REQUEST,
+        ] {
+            let err = ProviderError::from_http(status, said, None);
+            assert_eq!(
+                err.failure_kind(),
+                Some(FailureKind::WrongEndpoint),
+                "{err}"
+            );
+            assert!(!err.is_transient(), "{err}");
+            assert!(err.is_capability_refusal(), "{err}");
+            assert!(err.listed_model_unavailable().is_none(), "{err}");
+            let text = err.to_string();
+            assert!(text.contains("does not work on the endpoint"), "{text}");
+            assert!(!text.contains("short outage"), "{text}");
+        }
+        // The same words on a 5xx are the server's trouble, and a 404 that
+        // names no endpoint stays a missing model.
+        let busy = ProviderError::from_http(reqwest::StatusCode::BAD_GATEWAY, said, None);
+        assert_eq!(busy.failure_kind(), Some(FailureKind::ServerError));
+        let gone = ProviderError::from_http(
+            reqwest::StatusCode::NOT_FOUND,
+            "this model cannot be used with your key",
+            None,
+        );
+        assert_eq!(gone.failure_kind(), Some(FailureKind::NotFound));
+        assert_eq!(FailureKind::WrongEndpoint.request_sent(), Some(true));
+        assert!(FailureKind::WrongEndpoint.provider_was_reached());
     }
 
     /// A message whose bracket never closes is not a prefix, and must not be
