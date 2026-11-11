@@ -611,6 +611,112 @@ fn a_model_that_ignores_the_system_prompt_gets_it_folded_into_the_user_turn() {
     assert_eq!(req.messages.last().unwrap().content.as_text(), "Begin.");
 }
 
+/// A model that makes images and no text, listed (as a gateway's catalogue
+/// lists it) as reading a system prompt.
+struct DrawsOnly;
+#[async_trait::async_trait]
+impl Provider for DrawsOnly {
+    async fn infer(
+        &self,
+        r: &InferenceRequest,
+    ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
+        provider(true, 1000).infer(r).await
+    }
+    async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
+        1
+    }
+    fn max_context_tokens(&self, _m: &str) -> usize {
+        100_000
+    }
+    fn name(&self) -> &str {
+        "draws-only"
+    }
+    fn capabilities(&self, _m: &str) -> leviath_providers::ModelCapabilities {
+        leviath_providers::ModelCapabilities {
+            supports_tools: false,
+            supports_system_prompt: true,
+            ..Default::default()
+        }
+    }
+    fn mime(&self, _m: &str) -> leviath_providers::capabilities::ModelMime {
+        leviath_providers::capabilities::ModelMime::new(&["text/*"], &["image/*"])
+    }
+}
+
+/// Live run 8: a draw stage on OpenRouter's `flux.2-flex` named its prompt
+/// regions, and the model was sent them as system messages followed by the
+/// bare "Begin." turn. Its catalogue entry says nothing about system prompts,
+/// so nothing folded them, and all 24 tiles came back unrelated to the brief,
+/// four of them the word "Begin". A model that answers in no text is sent the
+/// stage's prompt as its whole request instead, whatever its listing says;
+/// a chat model on the same stage is sent what it always was.
+#[tokio::test]
+async fn a_model_that_answers_in_no_text_is_sent_its_prompt_and_not_the_nudge() {
+    let mut w = ContextWindow::new(10_000);
+    for (name, text) in [
+        ("items", "boilerplate about the whole project"),
+        ("brief", "2D pixel art, 32px tiles, mossy greens"),
+        ("piece_1", "temple_brick: a weathered stone brick"),
+    ] {
+        w.add_region(Region::new(name.to_string(), RegionKind::Pinned, 1000));
+        w.add_typed_entry(name, leviath_core::EntryKind::Text, text.to_string(), 5)
+            .unwrap();
+    }
+    let config = InferenceConfig {
+        extra_params: [(
+            leviath_providers::PROMPT_REGIONS_KEY.to_string(),
+            serde_json::json!(["brief", "piece_1"]),
+        )]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    };
+    let draws = Arc::new(DrawsOnly) as Arc<dyn Provider>;
+    let flux = stage("black-forest-labs/flux.2-flex", vec![], None);
+    let build = |w: &ContextWindow, provider: &Arc<dyn Provider>| {
+        build_request(
+            w,
+            Some(&config),
+            &flux,
+            provider,
+            "draw_1",
+            0,
+            crate::pipeline::inference::PriorCalls::default(),
+        )
+        .0
+    };
+
+    let req = build(&w, &draws);
+    assert!(req.system.is_empty(), "{:?}", req.system);
+    assert_eq!(req.messages.len(), 1, "{:?}", req.messages);
+    assert_eq!(req.messages[0].role, "user");
+    assert_eq!(
+        req.messages[0].content.as_text(),
+        "2D pixel art, 32px tiles, mossy greens\ntemple_brick: a weathered stone brick"
+    );
+    assert!(
+        req.extra
+            .get(leviath_providers::PROMPT_REGIONS_KEY)
+            .is_none(),
+        "{}",
+        req.extra
+    );
+
+    // A chat model on the same stage reads the system prompt and is nudged.
+    let chat = build(&w, &provider(true, 1000));
+    assert_eq!(chat.messages.last().unwrap().content.as_text(), "Begin.");
+    assert!(format!("{:?}", chat.system).contains("temple_brick"));
+
+    // Nothing to draw from: left as assembled, for the call to refuse.
+    let bare = build(&ContextWindow::new(10_000), &draws);
+    assert_eq!(bare.messages.last().unwrap().content.as_text(), "Begin.");
+
+    assert_eq!(draws.infer(&req).await.unwrap().content, "ok");
+    assert_eq!(draws.count_tokens("x", "m").await, 1);
+    assert_eq!(draws.max_context_tokens("m"), 100_000);
+    assert_eq!(draws.name(), "draws-only");
+}
+
 /// The fold, on the turn shapes `build_request` cannot produce on its own: a
 /// first user turn carrying blocks (an input image), a real text turn (prefixed
 /// not replaced), and no user turn at all (the system becomes one).

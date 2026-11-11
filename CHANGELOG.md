@@ -87,6 +87,14 @@ same list.
 
 ### Fixed
 
+- A model that answers in no text (an image, audio or video model) is sent its stage's prompt and
+  nothing else, on every provider. Behind a chat route it was sent the stage's regions as system
+  messages and the bare "Begin." turn: OpenRouter's `flux.2-flex` drew a 24-tile sheet that had
+  nothing to do with its brief, four tiles of it the word "Begin". Which models were spared was
+  a capability no catalogue reports plus a list of names; it is now read off what the model
+  makes. The prompt is what a media route already read: the stage's `prompt_regions`, or else the
+  conversation's text, or else its regions' text. A request to such a model that holds nothing
+  but "Begin." is refused before it is sent, and the stage fails saying why (#1116).
 - A spawn refused for a validator tool set to `ask` now says what would let it run. For an MCP
   tool the hint said to write `<tool> = "allow"` in `tool_permissions`, which a graph cannot do
   (it may loosen only `web_search` and `web_fetch`, unless the user opted in), so a graph that

@@ -852,6 +852,7 @@ pub(crate) async fn run_attempt(
         return;
     }
     let trip = async {
+        refuse_unprompted(provider.as_ref(), &request)?;
         // Bytes go in here and nowhere earlier: the assembled request, the
         // journal and every snapshot carry references only. `infer` borrows
         // the request, so the trip sends this one copy.
@@ -936,6 +937,31 @@ pub(crate) async fn run_attempt(
         attempt: report,
     });
     wake.notify_one();
+}
+
+/// Refuse, before anything is sent, a request to a model that answers in no
+/// text when it holds nothing to make anything from: no prompt and no part,
+/// only the runtime's opening turn.
+///
+/// Such a model takes the request's text as its prompt, so sent anyway it is
+/// paid to draw "Begin.". The fault is the stage's, so the refusal is not one
+/// another model would answer differently: the stage fails, saying why.
+pub(crate) fn refuse_unprompted(
+    provider: &dyn Provider,
+    request: &InferenceRequest,
+) -> Result<(), ProviderError> {
+    match !provider.mime(&request.model).answers_in_text()
+        && leviath_providers::prompt::unprompted(request)
+    {
+        true => Err(ProviderError::unsent(format!(
+            "{}/{} makes no text, so it takes the stage's text as its prompt, and the \
+             stage handed it none: name the stage's prompt regions, or give the model \
+             a region or a message to draw from",
+            provider.name(),
+            request.model
+        ))),
+        false => Ok(()),
+    }
 }
 
 /// The error a call reports when it runs out of its whole allowance, trips and
@@ -1288,6 +1314,96 @@ mod tests {
         fn capabilities(&self, _model: &str) -> leviath_providers::ModelCapabilities {
             leviath_providers::ModelCapabilities::default()
         }
+    }
+
+    /// A model that makes images and no text, tallying every call that
+    /// reaches it.
+    struct Painter(std::sync::atomic::AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl Provider for Painter {
+        async fn infer(
+            &self,
+            _req: &InferenceRequest,
+        ) -> leviath_providers::Result<InferenceResponse> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(response("drawn"))
+        }
+        async fn count_tokens(&self, _text: &str, _model: &str) -> usize {
+            1
+        }
+        fn max_context_tokens(&self, _model: &str) -> usize {
+            100_000
+        }
+        fn name(&self) -> &str {
+            "painter"
+        }
+        fn capabilities(&self, _model: &str) -> leviath_providers::ModelCapabilities {
+            leviath_providers::ModelCapabilities::default()
+        }
+        fn mime(&self, _model: &str) -> leviath_providers::ModelMime {
+            leviath_providers::ModelMime::new(&["text/*"], &["image/*"])
+        }
+    }
+
+    /// Live run 8: an image model was paid to draw "Begin.", the only text
+    /// its request held. A request to a model that answers in no text that
+    /// holds nothing but the opening turn is refused before it is sent, and
+    /// the model never sees it; with a prompt it goes out; and a chat model's
+    /// nudge is sent as it always was.
+    #[tokio::test]
+    async fn only_the_opening_turn_is_never_sent_to_a_model_that_makes_no_text() {
+        let turn = |text: &str| {
+            let mut request = test_request();
+            request.model = "flux".to_string();
+            request.messages.push(leviath_providers::Message {
+                role: "user".to_string(),
+                content: text.to_string().into(),
+                cache_breakpoint: false,
+                reasoning: None,
+            });
+            request
+        };
+        let painter = Arc::new(Painter(std::sync::atomic::AtomicUsize::new(0)));
+        let send = |request: InferenceRequest| {
+            let mut job = job(painter.clone());
+            job.request = request;
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            async move {
+                run_inference_job(
+                    job,
+                    tx,
+                    Arc::new(Notify::new()),
+                    RetryPolicy::default(),
+                    crate::cancel::CancelToken::new(),
+                )
+                .await;
+                rx.try_recv().expect("outcome sent").result
+            }
+        };
+
+        let err = send(turn(leviath_providers::OPENING_TURN))
+            .await
+            .expect_err("refused");
+        assert_eq!(err.request_sent(), Some(false));
+        assert!(
+            err.to_string().contains("painter/flux makes no text"),
+            "{err}"
+        );
+        assert_eq!(painter.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        let drawn = send(turn("a mossy temple brick")).await.expect("sent");
+        assert_eq!(drawn.content, "drawn");
+        assert_eq!(painter.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let chat = Counter::new(1, 1000);
+        assert!(refuse_unprompted(&chat, &turn(leviath_providers::OPENING_TURN)).is_ok());
+        assert_eq!(painter.count_tokens("x", "flux").await, 1);
+        assert_eq!(painter.max_context_tokens("flux"), 100_000);
+        assert_eq!(
+            painter.capabilities("flux"),
+            leviath_providers::ModelCapabilities::default()
+        );
     }
 
     /// A job whose request carries `prompt_bytes` of user text, so the guard's
