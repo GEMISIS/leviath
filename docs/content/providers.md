@@ -945,6 +945,12 @@ cannot read (`duration = "4.5s"`, `resolution = "lowest"`) fails the stage befor
 sent, naming the parameter and what it takes, rather than letting the vendor answer at its own
 default.
 
+Every reply from a media model is a paid generation, so a media stage is never asked more than
+three times. A reply that holds nothing of the type the stage makes is sent back twice, with the
+model's own words, and the third one fails the stage, whatever its `max_iterations`. The error
+names what the last reply held, each part by type and size, so a route that returned the wrong
+thing can be told from a model that returned nothing.
+
 **OpenAI**
 
 | Model | Takes | Makes | Parameters |
@@ -960,12 +966,27 @@ default.
 |---|---|---|---|
 | `gemini-3.1-flash-image`, `gemini-3-pro-image`, `nano-banana-pro-preview` | text, and images to edit | JPEG images, and a line of text | `aspect_ratio`, `image_size` |
 | `veo-3.1-generate-preview`, `veo-3.1-fast-generate-preview`, `veo-3.1-lite-generate-preview` | text, and an image to start from | an MP4 video with sound | `duration` (4, 6 or 8 seconds, written `4`, `"4"` or `"4s"`; 8 unless set), `aspect_ratio` (`16:9` or `9:16`), `resolution` (`720p`, `1080p` or `4k`), `negative_prompt` |
+| `gemini-omni-1.2-flash`, `gemini-omni-1.1-flash` | text, and images or a video to work from | an MP4 video with sound | `duration` (3 to 15 seconds, written `4`, `"4"` or `"4s"`), `aspect_ratio` (`16:9` or `9:16`), `resolution` (`360p`, `720p`, `1080p` or `4k`), `seed` |
 | `gemini-3.1-flash-tts-preview`, `gemini-2.5-flash-preview-tts`, `gemini-2.5-pro-preview-tts` | text to read aloud | speech as a 24 kHz WAV | `voice` (`Kore`, `Puck` and the rest), `language` |
 | `lyria-3.5`, `lyria-3-pro-preview`, `lyria-3-clip-preview` | a description of the music | an MP3, and its lyrics with timings as text | none |
 
 A Gemini speech model reads out the text it is given. It refuses a prompt it would answer in words
 instead ("Model tried to generate text"), so hand it the words to speak rather than a request to
 write them.
+
+The omni models answer on the chat route and take no tools: Google refuses a request that
+declares a function ("Function calling is not enabled for this model"). Leviath sends them the
+prompt and the stage's parts with the video asked for, and keeps the clip the answer holds. They
+are billed by the token, so the token rates price them.
+
+**OpenRouter**
+
+A model OpenRouter lists as making video (`google/gemini-omni-1.2-flash` and the others
+`GET /models?output_modalities=video` names) is made through its Videos API: a job that is
+started, waited for and downloaded, priced at the cost the finished job reports. Chat Completions
+answers such a model with text alone and bills the clip anyway, so a stage whose declared output
+includes `video/*` never goes there. The job takes the prompt and `duration`, `resolution`,
+`aspect_ratio`, `size`, `seed` and `generate_audio`. It is not sent the stage's images.
 
 **AWS Bedrock**
 

@@ -188,7 +188,8 @@ fn settle<T>(log: Option<&JobLog>, step: &str, waited: Result<T>) -> Result<T> {
     feature = "xai",
     feature = "xai-subscription",
     feature = "google",
-    feature = "meshy"
+    feature = "meshy",
+    feature = "openrouter"
 ))]
 pub(crate) fn noted(summary: String, notes: impl IntoIterator<Item = Option<String>>) -> String {
     notes

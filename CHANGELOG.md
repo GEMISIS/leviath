@@ -15,6 +15,11 @@ same list.
 
 ### Changed
 
+- A media stage stops after three replies that made nothing. A stage that makes an image, a video
+  or audio and gets a reply with none is sent back twice and then fails, whatever its
+  `max_iterations`, with an error naming what the last reply held (each part by type and size, and
+  how much text). It used to be let go after three nudges and then asked three more times for
+  `submit_output`, each one a paid generation (#1100).
 - `lev setup` says when a provider is configured and not in the provider priority. The Review
   screen lists each one before the config is written, and the closing summary, in the wizard
   and with `--non-interactive`, warns about each one, because a provider outside
@@ -63,6 +68,18 @@ same list.
 
 ### Fixed
 
+- Google's omni video models (`gemini-omni-1.2-flash`, `gemini-omni-1.1-flash`) run. They were
+  sent as chat models, with the stage's `submit_output` declared, and Google refused the request
+  with `Function calling is not enabled for this model`. They are media models now: sent the
+  prompt and the stage's parts with `response_format = {type = "video"}` and no tools, and the
+  clip in the answer becomes the stage's part. `duration`, `aspect_ratio`, `resolution` and
+  `seed` are read from the stage's parameters (#1100).
+- A video model reached through OpenRouter returns its video. Chat Completions answers such a
+  model with text and bills the clip without returning it, which a `require_output` stage then
+  repeated up to its iteration limit. A stage that declares `video/*` output on a model
+  OpenRouter lists as making video now runs as a job on OpenRouter's Videos API: started, polled,
+  downloaded, and priced at the cost the job reports. A job interrupted by a restart is picked up
+  again, not started twice (#1100).
 - Approving a compound shell command "for this run" covers the whole command for the rest of the
   run. When part of the line already held a stage approval (say `node` in
   `node --check app.js && npm test`), the run approval recorded only the rest, so the same line

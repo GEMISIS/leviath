@@ -5741,18 +5741,91 @@ fn image_stage_does_not_nudge_when_the_reply_has_an_image() {
     assert_eq!(p.no_image_nudges, 0, "so the image guard did not fire");
 }
 
+/// A media stage whose nudges are spent and that still has nothing fails,
+/// naming what the last reply held: each further reply is a paid generation.
 #[test]
-fn image_stage_lets_go_once_its_image_nudge_budget_is_spent() {
-    // Budget spent and still no image: the guard steps aside so the stage can
-    // end rather than loop. The stage's nudge is off, so the fall-through
-    // resolves rather than nudging on text alone.
-    let mut bp = image_bp();
-    graph_mut(&mut bp).stages[0].nudge = Some(crate::spec::graph::NudgeDef {
-        enabled: Some(false),
+fn a_media_stage_that_made_nothing_fails_once_its_nudges_are_spent() {
+    let spent = || StageProgress {
+        no_image_nudges: MAX_NO_IMAGE_NUDGES,
         ..Default::default()
-    });
+    };
+    // The wrong kind of part, and text, both named in the failure.
+    let mut reply = infer_result_only(false);
+    reply.parts = vec![leviath_core::mime::Part::inline(
+        leviath_core::mime::MimeType::parse("application/json").unwrap(),
+        "{}",
+    )];
+    let mut world = World::new();
+    let e = world
+        .spawn((
+            agent_state(),
+            ctx(&[("conversation", 10_000)]),
+            offering(&[]),
+            reply,
+            spent(),
+            image_bp(),
+            StageCursor { index: 0 },
+            ReadyForTransition,
+        ))
+        .id();
+    // A run with no state component fails the same way.
+    let bare = world
+        .spawn((
+            ctx(&[("conversation", 10_000)]),
+            infer_result(false),
+            spent(),
+            image_bp(),
+            StageCursor { index: 0 },
+            ReadyForTransition,
+        ))
+        .id();
+    run_empty(&mut world);
+    for entity in [e, bare] {
+        assert!(world.get::<ResolveTransition>(entity).is_some());
+        assert!(world.get::<ReadyToInfer>(entity).is_none());
+        assert!(world.get::<ReadyForTransition>(entity).is_none());
+    }
+    let Some(StageOutcome::Errored(message)) = world.get::<StageOutcome>(e) else {
+        panic!("the stage did not fail");
+    };
+    assert!(
+        message.starts_with("stage 'draw' makes image, and 3 replies in a row carried none"),
+        "{message}"
+    );
+    assert!(message.contains("application/json (2 bytes)"), "{message}");
+    assert!(message.contains("1 characters of text"), "{message}");
+    assert!(matches!(
+        &world.get::<AgentState>(e).unwrap().status,
+        AgentStatus::Error { message: said } if said == message
+    ));
+    // The reply it failed on is still in the conversation.
+    assert!(conversation_text(&world, e).contains('r'));
+}
+
+/// What the failure says about a reply: stored parts by their size, and a
+/// reply that held nothing at all.
+#[test]
+fn the_media_failure_names_what_the_last_reply_held() {
+    let registry = leviath_core::mime::MimeRegistry::builtin();
+    let blob = leviath_core::mime::Blob::new(
+        leviath_core::mime::MimeType::parse("audio/wav").unwrap(),
+        vec![0; 44],
+    );
+    let stored = leviath_core::mime::Part::stored(blob.describe(&registry));
+    let said = no_media_failure("clip", "video", 3, "  ", &[stored]);
+    assert!(said.contains("stage 'clip' makes video"), "{said}");
+    assert!(said.contains("held audio/wav (44 bytes)."), "{said}");
+    let empty = no_media_failure("clip", "video", 3, "", &[]);
+    assert!(empty.contains("held nothing at all."), "{empty}");
+}
+
+/// A media stage that has called tools is not failed for a reply without
+/// media: a tool makes its media, so the reply is accepted as any other.
+#[test]
+fn a_media_stage_that_called_tools_is_let_go_once_its_nudges_are_spent() {
     let progress = StageProgress {
         no_image_nudges: MAX_NO_IMAGE_NUDGES,
+        total_tool_calls: 1,
         ..Default::default()
     };
     let mut world = World::new();
@@ -5761,13 +5834,14 @@ fn image_stage_lets_go_once_its_image_nudge_budget_is_spent() {
             ctx(&[("conversation", 10_000)]),
             infer_result(false),
             progress,
-            bp,
+            image_bp(),
             StageCursor { index: 0 },
             ReadyForTransition,
         ))
         .id();
     run_empty(&mut world);
     assert!(world.get::<ResolveTransition>(e).is_some());
+    assert!(world.get::<StageOutcome>(e).is_none());
     assert_eq!(
         world.get::<StageProgress>(e).unwrap().no_image_nudges,
         MAX_NO_IMAGE_NUDGES,
@@ -23567,7 +23641,8 @@ mod typed_tool_results {
 mod model_parts {
     use super::*;
     use crate::blob_store::{BlobStoreHandle, MimeLimits, MimeParams, MimeRegistryHandle};
-    use crate::pipeline::response::{dropped_part_notes, reply_content, store_model_parts};
+    use crate::pipeline::reply::reply_content;
+    use crate::pipeline::response::{dropped_part_notes, store_model_parts};
     use crate::pipeline::tool_results::{Reply, apply_tool_results_with_parts};
     use leviath_core::mime::{Blob, MemoryBlobStore, MimeType, Part};
 

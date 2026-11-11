@@ -276,8 +276,10 @@ impl GeminiProvider {
 #[cfg(feature = "google")]
 impl Provider for GeminiProvider {
     async fn infer(&self, request: &InferenceRequest) -> Result<InferenceResponse> {
-        if media::kind(&request.model) == Some(media::Kind::Video) {
-            return self.video(request, self.video_poll).await;
+        match media::kind(&request.model) {
+            Some(media::Kind::Video) => return self.video(request, self.video_poll).await,
+            Some(media::Kind::Omni) => return self.omni(request).await,
+            Some(media::Kind::Prompted) | None => {}
         }
         // The route streams; a buffered call is the stream collected, so the
         // two paths cannot read the same answer differently.
@@ -294,6 +296,9 @@ impl Provider for GeminiProvider {
             return Ok(crate::media::one_chunk(
                 self.video(request, self.video_poll).await?,
             ));
+        }
+        if kind == Some(media::Kind::Omni) {
+            return Ok(crate::media::one_chunk(self.omni(request).await?));
         }
 
         if let Some(limiter) = &self.rate_limiter {

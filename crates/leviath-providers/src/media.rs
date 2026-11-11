@@ -17,6 +17,7 @@
 pub(crate) mod images;
 
 #[cfg(any(
+    feature = "openrouter",
     feature = "openai",
     feature = "xai",
     feature = "xai-subscription",
@@ -25,6 +26,7 @@ pub(crate) mod images;
 ))]
 use std::time::Duration;
 #[cfg(any(
+    feature = "openrouter",
     feature = "openai",
     feature = "xai",
     feature = "xai-subscription",
@@ -33,6 +35,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 #[cfg(any(
+    feature = "openrouter",
     feature = "openai",
     feature = "xai",
     feature = "xai-subscription",
@@ -51,11 +54,20 @@ use crate::provider::{ContentBlock, InferenceRequest, MessageContent};
     feature = "bedrock",
     feature = "meta"
 ))]
+use base64::Engine as _;
+#[cfg(any(
+    feature = "openrouter",
+    feature = "openai",
+    feature = "xai",
+    feature = "xai-subscription",
+    feature = "google",
+    feature = "bedrock",
+    feature = "meta"
+))]
 use {
     crate::provider::{
         FinishReason, InferenceResponse, ProviderError, Result, StreamChunk, TokenUsage,
     },
-    base64::Engine as _,
     leviath_core::mime::{Blob, MimeType},
 };
 
@@ -63,6 +75,7 @@ use {
 /// speech track can pass the 64 MiB a JSON reply is capped at. What is kept is
 /// still bounded by `[mime] max_part_bytes` when the runtime stores it.
 #[cfg(any(
+    feature = "openrouter",
     feature = "openai",
     feature = "xai",
     feature = "xai-subscription",
@@ -73,6 +86,7 @@ pub(crate) const DOWNLOAD_CAP: usize = 512 * 1024 * 1024;
 
 /// How long a media task may run when the stage names no timeout.
 #[cfg(any(
+    feature = "openrouter",
     feature = "openai",
     feature = "xai",
     feature = "xai-subscription",
@@ -96,6 +110,15 @@ pub(crate) fn data_uris(request: &InferenceRequest, want: impl Fn(&str) -> bool)
 
 /// Every hydrated mime block whose type passes `want`: the part, its base64
 /// bytes, and its name.
+#[cfg(any(
+    feature = "openai",
+    feature = "xai",
+    feature = "xai-subscription",
+    feature = "google",
+    feature = "bedrock",
+    feature = "meta",
+    feature = "meshy"
+))]
 fn parts<'a>(
     request: &'a InferenceRequest,
     want: impl Fn(&str) -> bool + 'a,
@@ -309,6 +332,7 @@ fn unlabelled<'a>(text: &'a str, region: &str) -> &'a str {
 
 /// A non-empty string hint from `request.extra`.
 #[cfg(any(
+    feature = "openrouter",
     feature = "openai",
     feature = "xai",
     feature = "xai-subscription",
@@ -328,6 +352,7 @@ pub(crate) fn extra_str(request: &InferenceRequest, key: &str) -> Option<String>
 
 /// An integer hint from `request.extra`.
 #[cfg(any(
+    feature = "openrouter",
     feature = "openai",
     feature = "xai",
     feature = "xai-subscription",
@@ -359,6 +384,7 @@ pub(crate) fn extra_f64(request: &InferenceRequest, key: &str) -> Option<f64> {
 /// what was asked for and cost more (Veo dropped `"4s"` and made eight
 /// seconds).
 #[cfg(any(
+    feature = "openrouter",
     feature = "openai",
     feature = "xai",
     feature = "xai-subscription",
@@ -423,6 +449,7 @@ pub(crate) fn extra_bool(request: &InferenceRequest, key: &str) -> Option<bool> 
 
 /// The absolute deadline for a whole media task, from its stage timeout.
 #[cfg(any(
+    feature = "openrouter",
     feature = "openai",
     feature = "xai",
     feature = "xai-subscription",
@@ -434,6 +461,7 @@ pub(crate) fn deadline(request: &InferenceRequest) -> Instant {
 
 /// What one poll of a long task found.
 #[cfg(any(
+    feature = "openrouter",
     feature = "openai",
     feature = "xai",
     feature = "xai-subscription",
@@ -451,6 +479,7 @@ pub(crate) enum Poll {
 /// Poll `check` every `interval` until it is done or fails, or `deadline`
 /// passes. `what` names the task in the errors.
 #[cfg(any(
+    feature = "openrouter",
     feature = "openai",
     feature = "xai",
     feature = "xai-subscription",
@@ -534,7 +563,7 @@ pub(crate) fn blob(mime: &str, bytes: Vec<u8>, name: &str) -> Result<Blob> {
 
 /// A file of a type this code names itself (`video/mp4`), so it is known to
 /// parse.
-#[cfg(any(feature = "openai", feature = "google"))]
+#[cfg(any(feature = "openrouter", feature = "openai", feature = "google"))]
 pub(crate) fn typed_blob(mime: &'static str, bytes: Vec<u8>, name: &str) -> Blob {
     Blob::new(
         MimeType::parse(mime).expect("a type named in code is a mime type"),
@@ -544,7 +573,7 @@ pub(crate) fn typed_blob(mime: &'static str, bytes: Vec<u8>, name: &str) -> Blob
 }
 
 /// A response's body, up to [`DOWNLOAD_CAP`].
-#[cfg(any(feature = "openai", feature = "google"))]
+#[cfg(any(feature = "openrouter", feature = "openai", feature = "google"))]
 pub(crate) async fn body_bytes(response: reqwest::Response) -> Result<Vec<u8>> {
     Ok(
         leviath_net::read_caps::read_body_capped(response, DOWNLOAD_CAP)
@@ -628,6 +657,7 @@ pub(crate) fn json_blob(bytes: Vec<u8>, name: &str) -> Blob {
 /// The response for a media call: a one-line summary as the text, the files
 /// as parts, and the call's cost when it is known.
 #[cfg(any(
+    feature = "openrouter",
     feature = "openai",
     feature = "xai",
     feature = "xai-subscription",
@@ -656,6 +686,7 @@ pub(crate) fn response(
 /// drops parts, which for a provider whose whole output is a part would lose
 /// the file.
 #[cfg(any(
+    feature = "openrouter",
     feature = "openai",
     feature = "xai",
     feature = "xai-subscription",
@@ -678,6 +709,7 @@ pub(crate) fn one_chunk(response: InferenceResponse) -> crate::rate_limit::Chunk
 
 /// The summary line for `parts` from `route`.
 #[cfg(any(
+    feature = "openrouter",
     feature = "openai",
     feature = "xai",
     feature = "xai-subscription",

@@ -1,11 +1,13 @@
 //! The media stage's nudge: a stage that makes an image, a video or audio and
-//! answered with text alone is sent back, with its own words, a few times.
+//! answered with none is sent back, with its own words, twice, and then
+//! fails saying what came back.
 
-/// How many text-only replies an image stage is nudged back before it is let
-/// go. Small on purpose: an image model that returns text three times running
-/// is refusing or erroring, not warming up, and the stage's own
-/// `require_output`/`max_iterations` then ends it rather than looping.
-pub(crate) const MAX_NO_IMAGE_NUDGES: usize = 3;
+/// How many replies with nothing of its family a media stage is nudged back
+/// before it fails: three generations in all, whatever the graph's
+/// `max_iterations`. Small on purpose: each reply from a media model is a paid
+/// generation, and one that makes nothing three times running is refusing,
+/// erroring, or on a route that cannot hand its media back.
+pub(crate) const MAX_NO_IMAGE_NUDGES: usize = 2;
 
 /// The media family a stage declares it makes (`image`, `video` or `audio`),
 /// from a `format` or an `output_routing` target: `None` for a stage that
@@ -31,6 +33,43 @@ pub(crate) fn media_part_count(parts: &[leviath_core::mime::Part], family: &str)
         .iter()
         .filter(|p| p.mime_type.matches(&pattern))
         .count()
+}
+
+/// Why a media stage stopped: `attempts` replies in a row held nothing of the
+/// `family` it makes. Names what the last one did hold, each part by type and
+/// size, so a route that returned the wrong thing can be told from a model
+/// that returned nothing.
+pub(crate) fn no_media_failure(
+    stage: &str,
+    family: &str,
+    attempts: usize,
+    reply_text: &str,
+    parts: &[leviath_core::mime::Part],
+) -> String {
+    let mut held: Vec<String> = parts
+        .iter()
+        .map(|part| {
+            let size = match &part.body {
+                leviath_core::mime::PartBody::Inline(text) => text.len() as u64,
+                leviath_core::mime::PartBody::Stored(blob) => blob.size,
+            };
+            format!("{} ({size} bytes)", part.mime_type)
+        })
+        .collect();
+    let characters = reply_text.trim().chars().count();
+    if characters > 0 {
+        held.push(format!("{characters} characters of text"));
+    }
+    let held = match held.is_empty() {
+        true => "nothing at all".to_string(),
+        false => held.join(", "),
+    };
+    format!(
+        "stage '{stage}' makes {family}, and {attempts} replies in a row carried none. The last \
+         one held {held}. A media model is not asked a fourth time: every reply is a paid \
+         generation. Check that the stage's model makes {family} on the provider it ran on \
+         (`lev models show <model>`)."
+    )
 }
 
 /// The `[System]` line sent back when a media stage returned text and nothing
