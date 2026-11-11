@@ -121,7 +121,10 @@ fn is_chat_model_id(model_key: &str) -> bool {
 #[cfg(feature = "openai")]
 fn serves_id(model_key: &str) -> bool {
     const MEDIA_FAMILIES: &[&str] = &["gpt-", "chatgpt-", "sora", "tts-", "whisper"];
+    // `gpt-audio*` is a chat model that also hears and speaks, on Chat
+    // Completions.
     is_chat_model_id(model_key)
+        || media::speaks_in_chat(model_key)
         || (media::kind(model_key).is_some()
             && MEDIA_FAMILIES.iter().any(|f| model_key.starts_with(f)))
 }
@@ -463,7 +466,7 @@ impl Provider for OpenAIProvider {
         if let Some(kind) = media::kind(&request.model) {
             return self.run_media(kind, request).await;
         }
-        if media::speaks_in_chat(request) {
+        if media::speaks_in_chat(&request.model) {
             return self.speak(request).await;
         }
         // The route streams; a buffered call is the stream collected, so the
@@ -483,7 +486,7 @@ impl Provider for OpenAIProvider {
                 self.run_media(kind, request).await?,
             ));
         }
-        if media::speaks_in_chat(request) {
+        if media::speaks_in_chat(&request.model) {
             return Ok(crate::media::one_chunk(self.speak(request).await?));
         }
         tracing::debug!(model = %request.model, "Calling OpenAI API");
@@ -627,6 +630,8 @@ impl Provider for OpenAIProvider {
         // narrowed to what a Responses body carries.
         match media::kind(model) {
             Some(_) => mime,
+            // `gpt-audio*` is asked over Chat Completions, which carries audio.
+            None if media::speaks_in_chat(model) => crate::mime::WireShape::OpenAi.carried(mime),
             None => crate::mime::WireShape::Responses.carried(mime),
         }
     }

@@ -604,18 +604,71 @@ fn none() -> Value {
 }
 
 #[test]
-fn only_a_gpt_audio_model_whose_stage_declares_audio_output_speaks_in_chat() {
-    let asked = |model: &str, extra: Value| speaks_in_chat(&request(model, "hi", vec![], extra));
-    assert!(asked("gpt-audio", audio_extra(none())));
-    assert!(asked("gpt-audio-mini", audio_extra(none())));
-    // Text output, nothing declared, or a different model: the ordinary route.
-    assert!(!asked("gpt-audio", Value::Null));
-    assert!(!asked(
-        "gpt-audio",
-        serde_json::json!({ "output_mimes": ["image/png", "text/markdown"] })
-    ));
-    assert!(!asked("gpt-5.5", audio_extra(none())));
-    assert!(!asked("gpt-audio-realtime", audio_extra(none())));
+fn every_gpt_audio_model_is_asked_over_chat_completions() {
+    assert!(speaks_in_chat("gpt-audio"));
+    assert!(speaks_in_chat("gpt-audio-mini"));
+    assert!(speaks_in_chat("gpt-audio-1.5"));
+    assert!(!speaks_in_chat("gpt-5.5"));
+    assert!(!speaks_in_chat("gpt-audio-realtime"));
+}
+
+/// A stage that declares no audio output and hands the model audio is
+/// answered in text: no `modalities`, no `audio`, and the reply's words.
+#[tokio::test]
+async fn gpt_audio_handed_audio_and_asked_for_text_answers_in_text() {
+    let reply = serde_json::json!({
+        "choices": [{ "message": { "content": "a fox" }, "finish_reason": "stop" }]
+    });
+    let (url, bodies) =
+        spawn_mock_sequence(vec![(200, "OK", reply.to_string().into_bytes())]).await;
+    let asked = request(
+        "gpt-audio-mini",
+        "what is said?",
+        vec![part("audio/wav", "fox.wav")],
+        Value::Null,
+    );
+    let response = chat_audio(&endpoint(&url), &asked, true)
+        .await
+        .expect("text");
+    assert_eq!(response.content, "a fox");
+    assert!(response.parts.is_empty());
+    let body: Value = serde_json::from_str(&bodies.lock().unwrap()[0]).unwrap();
+    assert!(body.get("modalities").is_none(), "{body}");
+    assert!(body.get("audio").is_none(), "{body}");
+
+    // An empty text answer is still the model's answer, not a missing clip.
+    let empty = serde_json::json!({
+        "choices": [{ "message": { "content": "" }, "finish_reason": "stop" }]
+    });
+    let (url, _) = spawn_mock_sequence(vec![(200, "OK", empty.to_string().into_bytes())]).await;
+    let response = chat_audio(&endpoint(&url), &asked, true)
+        .await
+        .expect("an empty answer");
+    assert!(response.content.is_empty());
+}
+
+/// With audio on neither side OpenAI refuses the model, so the stage is
+/// refused first, with what to change.
+#[tokio::test]
+async fn gpt_audio_with_no_audio_in_or_out_is_refused_unsent() {
+    let nothing_listens = endpoint("http://127.0.0.1:9");
+    for extra in [
+        Value::Null,
+        serde_json::json!({ "output_mimes": ["image/png", "text/markdown"] }),
+    ] {
+        let err = chat_audio(
+            &nothing_listens,
+            &request("gpt-audio", "hi", vec![part("image/png", "a.png")], extra),
+            true,
+        )
+        .await
+        .unwrap_err();
+        let said = err.to_string();
+        assert!(
+            said.contains("needs audio in its input or its output"),
+            "{said}"
+        );
+    }
 }
 
 #[tokio::test]

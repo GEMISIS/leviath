@@ -952,6 +952,7 @@ type EmptyResponseQuery = (
     Option<&'static GlobalNudge>,
     Option<&'static super::ConversationEnded>,
     Option<&'static super::UnansweredMessage>,
+    Option<&'static StageInference>,
 );
 
 /// Empty-response system: for each `ReadyForTransition` agent decide whether the
@@ -975,6 +976,7 @@ type EmptyResponseQuery = (
 pub(crate) fn handle_empty_response(
     mut agents: Query<EmptyResponseQuery, With<ReadyForTransition>>,
     mime: crate::blob_store::MimeParams,
+    providers: Option<Res<Providers>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
@@ -989,6 +991,7 @@ pub(crate) fn handle_empty_response(
         global,
         ended,
         unanswered,
+        stage_inf,
     ) in agents.iter_mut()
     {
         crate::tick_scope::enter(entity);
@@ -1098,9 +1101,21 @@ pub(crate) fn handle_empty_response(
         // answer is what it just produced. (The image-failure case above has
         // already had its say: it only nudges when nothing was drawn.)
         let produced_a_part = !infer.parts.is_empty();
+        // The built-in nudge tells the model to use its tools. A model that
+        // cannot call any (a transcription model, an image model) was offered
+        // none, so asking again buys the same answer at the same price. A
+        // nudge the blueprint worded itself is the author's to send.
+        let cannot_call_tools = nudge.text == crate::spec::graph::DEFAULT_NUDGE_TEXT
+            && stage_inf.is_some_and(|inf| {
+                providers
+                    .as_ref()
+                    .and_then(|p| p.0.get(&inf.provider_name))
+                    .is_some_and(|p| !p.capabilities(&inf.model).supports_tools)
+            });
         if progress.total_tool_calls > 0
             || produced_a_part
             || !nudge.enabled
+            || cannot_call_tools
             || progress.text_only_nudges >= nudge.max
         {
             // The reply is accepted as the stage's last word, so it goes into

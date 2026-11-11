@@ -89,11 +89,17 @@ pub(crate) fn gemini(model: &str) -> ModelMime {
     if m.starts_with("veo") {
         return ModelMime::new(&["text/*", "image/*"], &["video/*"]);
     }
-    if m.contains("-image") || m.starts_with("nano-banana") {
+    if m.contains("-image") || m.contains("nano-banana") {
         return ModelMime::new(&["text/*", "image/*"], &["text/*", "image/*"]);
     }
     if m.contains("-tts") {
         return ModelMime::new(TEXT, &["audio/*"]);
+    }
+    if m.contains("transcribe") {
+        return ModelMime::new(&["text/*", "audio/*"], TEXT);
+    }
+    if m.starts_with("gemini-omni") {
+        return ModelMime::new(&["text/*", "image/*", "video/*"], &["text/*", "video/*"]);
     }
     if m.starts_with("lyria") {
         return ModelMime::new(TEXT, &["text/*", "audio/*"]);

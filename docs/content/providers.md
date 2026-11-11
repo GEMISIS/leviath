@@ -945,6 +945,12 @@ cannot read (`duration = "4.5s"`, `resolution = "lowest"`) fails the stage befor
 sent, naming the parameter and what it takes, rather than letting the vendor answer at its own
 default.
 
+A stage that asks a model for the media it makes is a generation, on every provider: the model is
+offered no tools, even one its vendor lists as calling them, and what earlier stages did with
+tools reaches it as prose. The picture, clip or audio it returns is the stage's output, with no
+`submit_output` call. A text model on a media stage keeps its tools, since there a tool makes the
+media.
+
 Every reply from a media model is a paid generation, so a media stage is never asked more than
 three times. A reply that holds nothing of the type the stage makes is sent back twice, with the
 model's own words, and the third one fails the stage, whatever its `max_iterations`. The error
@@ -964,15 +970,20 @@ thing can be told from a model that returned nothing.
 
 | Model | Takes | Makes | Parameters |
 |---|---|---|---|
-| `gemini-3.1-flash-image`, `gemini-3-pro-image`, `nano-banana-pro-preview` | text, and images to edit | JPEG images, and a line of text | `aspect_ratio`, `image_size` |
+| `gemini-3.1-flash-image`, `gemini-3.1-flash-lite-image`, `gemini-3-pro-image`, `gemini-nano-banana-2.1`, `nano-banana-pro-preview` | text, and images to edit | JPEG images, and a line of text | `aspect_ratio`, `image_size` |
 | `veo-3.1-generate-preview`, `veo-3.1-fast-generate-preview`, `veo-3.1-lite-generate-preview` | text, and an image to start from | an MP4 video with sound | `duration` (4, 6 or 8 seconds, written `4`, `"4"` or `"4s"`; 8 unless set), `aspect_ratio` (`16:9` or `9:16`), `resolution` (`720p`, `1080p` or `4k`), `negative_prompt` |
 | `gemini-omni-1.2-flash`, `gemini-omni-1.1-flash` | text, and images or a video to work from | an MP4 video with sound | `duration` (3 to 15 seconds, written `4`, `"4"` or `"4s"`), `aspect_ratio` (`16:9` or `9:16`), `resolution` (`360p`, `720p`, `1080p` or `4k`), `seed` |
-| `gemini-3.1-flash-tts-preview`, `gemini-2.5-flash-preview-tts`, `gemini-2.5-pro-preview-tts` | text to read aloud | speech as a 24 kHz WAV | `voice` (`Kore`, `Puck` and the rest), `language` |
+| `gemini-3.8-flash-tts`, `gemini-3.8-flash-lite-tts`, `gemini-3.1-flash-tts-preview` | text to read aloud | speech as a 24 kHz WAV | `voice` (`Kore`, `Puck` and the rest), `language` |
+| `gemini-3.5-transcribe` | audio, and a line of instruction | the transcript as text | none |
 | `lyria-3.5`, `lyria-3-pro-preview`, `lyria-3-clip-preview` | a description of the music | an MP3, and its lyrics with timings as text | none |
 
 A Gemini speech model reads out the text it is given. It refuses a prompt it would answer in words
 instead ("Model tried to generate text"), so hand it the words to speak rather than a request to
 write them.
+
+A Google model is a media model by what it makes, not by its name: one the modality table says
+makes images, audio or video is sent the prompt and the stage's parts alone, with no tools and no
+system instruction, since Google refuses those for every one of them.
 
 The omni models answer on the chat route and take no tools: Google refuses a request that
 declares a function ("Function calling is not enabled for this model"). Leviath sends them the
@@ -987,6 +998,19 @@ started, waited for and downloaded, priced at the cost the finished job reports.
 answers such a model with text alone and bills the clip anyway, so a stage whose declared output
 includes `video/*` never goes there. The job takes the prompt and `duration`, `resolution`,
 `aspect_ratio`, `size`, `seed` and `generate_audio`. It is not sent the stage's images.
+
+A model that makes images (`google/gemini-3.1-flash-image`, `openai/gpt-5-image`, and the
+image-only ones such as `black-forest-labs/flux.2-klein-4b`) answers Chat Completions with the
+picture, and a model that makes audio (`openai/gpt-audio`, `google/lyria-3-clip-preview`) does
+when the stage declares `audio/*` output. Leviath reads OpenRouter's listing with the image-only
+and video-only models included, so a stage can name one.
+
+An OpenAI audio model reached through OpenRouter streams raw samples and nothing else, so its
+audio is always a 24 kHz WAV, whatever type the stage declares. Declare the artifact as `audio/*`
+or `audio/wav`.
+
+OpenRouter's text-to-speech, transcription, embedding and rerank models each speak an endpoint of
+their own, which Leviath does not. A stage that names one is refused before the run starts.
 
 **AWS Bedrock**
 
@@ -1015,7 +1039,10 @@ unpriced.
 **Not offered here.** The realtime and live models (`gpt-realtime-*`, `gemini-*-live*`,
 `lyria-realtime-exp`) speak a streaming socket rather than a request.
 
-**`gpt-audio` and `gpt-audio-mini`** are chat models that also speak. A stage whose declared output
+**`gpt-audio`, `gpt-audio-mini` and `gpt-audio-1.5`** are chat models that also hear and speak.
+They need audio on one side of the call: a stage that declares no audio output must hand the
+model an audio part, and is then answered in text. With audio on neither side the stage fails
+before anything is sent, saying so. A stage whose declared output
 includes `audio/*` (an `output` format or an `output_routing` key such as `audio/mpeg`) is sent to
 Chat Completions with `modalities = ["text", "audio"]` and `audio = {voice, format}`, and the audio
 that comes back becomes an output part, with its transcript as the reply text. Parameters: `voice`

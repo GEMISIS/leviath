@@ -279,7 +279,7 @@ impl Provider for GeminiProvider {
         match media::kind(&request.model) {
             Some(media::Kind::Video) => return self.video(request, self.video_poll).await,
             Some(media::Kind::Omni) => return self.omni(request).await,
-            Some(media::Kind::Prompted) | None => {}
+            Some(media::Kind::Prompted | media::Kind::Transcribe) | None => {}
         }
         // The route streams; a buffered call is the stream collected, so the
         // two paths cannot read the same answer differently.
