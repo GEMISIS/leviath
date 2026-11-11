@@ -107,6 +107,13 @@ same list.
     for as `pcm16` and kept as a WAV, the spoken words are read from the audio's transcript, and
     a stream that ends on `[DONE]` with audio in it is a finished answer.
 - An audio part made through OpenRouter is named with its extension (`audio-<sha>.mp3`).
+- A GraphQL subscription older than `request_timeout_secs` no longer answers its events with
+  `request took longer than 30 s` (`REQUEST_TIMEOUT`). The deadline was taken from when the
+  subscription opened, so once it was older than that, any event whose resolution had to wait
+  at all (a `run` read off the run index, say) came back as a timeout instead of data. A
+  subscription has no deadline of its own now; each event gets `request_timeout_secs` on a
+  clock that starts when that event does, and one stuck past it is a timeout in its place
+  while the events after it still arrive.
 - Google's omni video models (`gemini-omni-1.2-flash`, `gemini-omni-1.1-flash`) run. They were
   sent as chat models, with the stage's `submit_output` declared, and Google refused the request
   with `Function calling is not enabled for this model`. They are media models now: sent the

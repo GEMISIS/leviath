@@ -266,3 +266,73 @@ async fn a_spawn_beside_another_field_gets_the_ordinary_deadline() {
         .await;
     assert!(inline.errors.is_empty(), "{:?}", inline.errors);
 }
+
+/// One event of [`Ticks`], whose resolution takes `secs` of (virtual) time.
+struct Tick {
+    secs: u64,
+}
+
+#[Object]
+impl Tick {
+    async fn done(&self) -> bool {
+        tokio::time::sleep(Duration::from_secs(self.secs)).await;
+        true
+    }
+}
+
+struct Ticks;
+
+#[async_graphql::Subscription]
+impl Ticks {
+    /// One event a second apart for each entry of `secs`, each taking that
+    /// many seconds to resolve.
+    async fn ticks(&self, secs: Vec<u64>) -> impl futures_util::Stream<Item = Tick> {
+        futures_util::StreamExt::then(futures_util::stream::iter(secs), |secs| async move {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            Tick { secs }
+        })
+    }
+}
+
+/// The events of `subscription { ticks(secs: ...) { done } }` under an
+/// ordinary deadline of `ordinary` seconds, each as its error code, or
+/// `None` for one that arrived as data.
+async fn ticks(ordinary: u64, secs: &[u64]) -> Vec<Option<String>> {
+    let schema = Schema::build(Query, Mutation, Ticks)
+        .extension(Deadlines {
+            ordinary,
+            spawn: 330,
+        })
+        .finish();
+    let document = format!("subscription {{ ticks(secs: {secs:?}) {{ done }} }}");
+    let events: Vec<Response> =
+        futures_util::StreamExt::collect(schema.execute_stream(document)).await;
+    let data = Value::from_json(serde_json::json!({ "ticks": { "done": true } })).unwrap();
+    events
+        .iter()
+        .map(|event| {
+            let code = code(event);
+            if code.is_none() {
+                assert_eq!(event.data, data);
+            }
+            code
+        })
+        .collect()
+}
+
+/// A subscription outlives the ordinary deadline: an event that has to wait
+/// still arrives as data long after the subscription opened.
+#[tokio::test(start_paused = true)]
+async fn a_subscription_outlives_the_ordinary_deadline() {
+    assert_eq!(ticks(3, &[1, 1, 1, 1, 1]).await, vec![None; 5]);
+}
+
+/// Each event has the ordinary deadline on a clock of its own: one stuck
+/// past it is a timeout in its place, and the events after it still arrive.
+#[tokio::test(start_paused = true)]
+async fn an_event_stuck_past_its_own_deadline_is_a_timeout_and_the_rest_arrive() {
+    assert_eq!(
+        ticks(3, &[2, 5, 2]).await,
+        vec![None, Some(REQUEST_TIMEOUT.to_string()), None]
+    );
+}
