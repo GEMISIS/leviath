@@ -9,6 +9,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::provider::ProviderError;
 
+mod sent;
+
+#[cfg(feature = "rhai")]
+pub(crate) use sent::said;
+pub(crate) use sent::{either, leading_tags, reqwest_request_sent, tagged};
+
 /// What actually went wrong when a provider call failed, at the granularity a
 /// person debugging it needs.
 ///
@@ -33,13 +39,18 @@ pub enum FailureKind {
     /// The TLS handshake failed: an expired or untrusted certificate, or a
     /// proxy intercepting the connection with its own.
     TlsFailure,
-    /// The request went out and no answer came back in time. Distinct from a
-    /// refusal: something is listening and is either slow or wedged.
+    /// No answer came back in time. Distinct from a refusal: something is
+    /// listening and is either slow or wedged. Usually the request went out
+    /// and the reply never came; a connect that did not finish in time is one
+    /// too, and [`ProviderError::request_sent`] tells the two apart.
     Timeout,
-    /// The connection died mid-body. The provider answered and the answer did
-    /// not finish arriving.
+    /// The connection died. Usually mid-body: the provider answered and the
+    /// answer did not finish arriving. A reset during the handshake is one
+    /// too, and [`ProviderError::request_sent`] tells the two apart.
     ConnectionDropped,
-    /// A transport failure this build cannot place more precisely.
+    /// A transport failure this build cannot place more precisely. Whether
+    /// the request went out is a separate question, which
+    /// [`ProviderError::request_sent`] answers where it can.
     Transport,
     /// The provider answered, and the answer says the fault is ours: a
     /// malformed request, an unknown parameter, a model name it does not carry.
@@ -423,13 +434,16 @@ impl ProviderError {
     /// that does not resolve, a port with nothing behind it, and a certificate
     /// nobody trusts. The kind is worked out here, where the typed error still
     /// exists, and carried in the message so it survives every layer that only
-    /// passes strings.
+    /// passes strings. So is whether the request went out (see
+    /// [`ProviderError::request_sent`]), which the kind alone does not say: a
+    /// timeout is a connect that never finished or a reply that never came.
     pub fn transport(context: &str, e: &reqwest::Error) -> Self {
         ProviderError::labelled(
             FailureKind::from_reqwest(e),
             context,
             &error_chain_display(e),
         )
+        .with_request_sent(sent::reqwest_request_sent(e))
     }
 
     /// This failure as one message for a person checking their setup: what
@@ -477,8 +491,10 @@ impl ProviderError {
             ProviderError::InvalidResponse(_) => return Some(FailureKind::MalformedResponse),
             _ => return None,
         };
-        let label = message.strip_prefix('[')?.split_once(']')?.0;
-        FailureKind::ALL.into_iter().find(|k| k.label() == label)
+        leading_tags(message)
+            .0
+            .into_iter()
+            .find_map(|tag| FailureKind::ALL.into_iter().find(|k| k.label() == tag))
     }
 
     /// Whether this is a bad request that says the route cannot do what was

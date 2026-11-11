@@ -157,21 +157,21 @@ impl UnavailableReason {
 /// rather than the first number anywhere in the text: an error body quoting a
 /// token count must not be mistaken for a status.
 fn leading_http_status(message: &str) -> Option<u16> {
-    // A `[kind]` prefix may sit in front of the status now that a failure
-    // carries what it was. Stepping over it keeps a message classifiable
-    // whichever layer labelled it: a prefix that hid the status here would have
-    // silently stopped a 402 from failing over, which is the behaviour the
-    // status extraction exists to drive.
-    let message = match message.strip_prefix('[') {
-        Some(rest) => rest.split_once("] ").map_or(message, |(_, after)| after),
-        None => message,
-    };
+    // Tags may sit in front of the status: the failure's kind, and whether
+    // its request went out. Stepping over them keeps a message classifiable
+    // whichever layer tagged it: a tag that hid the status here would silently
+    // stop a 402 from failing over, which is the behaviour the status
+    // extraction exists to drive.
+    let message = crate::failure::leading_tags(message).1;
     let rest = message.strip_prefix("HTTP ")?;
     let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
     digits.parse().ok()
 }
 
 /// Errors that can occur during provider operations.
+///
+/// Every one answers [`ProviderError::request_sent`]: whether anything the
+/// call asked of the provider went out before it failed.
 #[derive(Error, Debug)]
 pub enum ProviderError {
     /// HTTP request failed. The string carries the kind as a `[label]` prefix
@@ -223,7 +223,10 @@ pub enum ProviderError {
         retry_after_secs: Option<u64>,
     },
 
-    /// Invalid response from provider
+    /// The provider answered, and the answer could not be used: it did not
+    /// parse, or it lacked what the call was for. Only ever an answer, so its
+    /// request was sent; a call refused before sending is
+    /// [`ProviderError::unsent`].
     #[error("Invalid response: {0}")]
     InvalidResponse(String),
 
@@ -253,9 +256,16 @@ pub enum ProviderError {
         reply_budget: usize,
         /// The model's context window.
         max: usize,
+        /// Whether the request went out before the overflow was found:
+        /// `false` from the window guard, which measures before sending, and
+        /// `true` when a provider answered the overflow itself.
+        sent: bool,
     },
 
-    /// Other error
+    /// Any other failure. On its own it does not say whether a request went
+    /// out; one built with [`ProviderError::unsent`] or marked with
+    /// [`ProviderError::after_send`] does (see
+    /// [`ProviderError::request_sent`]).
     #[error("{0}")]
     Other(String),
 }
@@ -1086,7 +1096,7 @@ pub trait Provider: Send + Sync {
         upload: &crate::files::FileUpload,
     ) -> Result<crate::files::RemoteFile> {
         let _ = upload;
-        Err(ProviderError::Other(format!(
+        Err(ProviderError::unsent(format!(
             "{} has no file storage",
             self.name()
         )))
@@ -1428,7 +1438,8 @@ mod tests {
             !ProviderError::TokenLimitExceeded {
                 used: 9,
                 reply_budget: 0,
-                max: 8
+                max: 8,
+                sent: false,
             }
             .is_transient()
         );
@@ -1470,6 +1481,7 @@ mod tests {
                 used: 9,
                 reply_budget: 0,
                 max: 8,
+                sent: false,
             },
         ] {
             assert!(!err.retry_advice().capacity, "{err}");
@@ -1828,6 +1840,7 @@ mod tests {
                 used: 9,
                 reply_budget: 0,
                 max: 8,
+                sent: false,
             },
             ProviderError::RateLimitExceeded {
                 retry_after_secs: Some(5),
@@ -1949,6 +1962,7 @@ mod tests {
             used: 430,
             reply_budget: 8192,
             max: 8192,
+            sent: false,
         };
         assert_eq!(
             err.to_string(),

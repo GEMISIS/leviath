@@ -211,7 +211,9 @@ async fn video(
     let url = video.get("url").and_then(Value::as_str).ok_or_else(|| {
         ProviderError::InvalidResponse("a finished video task carried no URL".into())
     })?;
-    let (bytes, mime) = media::download(&endpoint.client, url).await?;
+    let (bytes, mime) = media::download(&endpoint.client, url)
+        .await
+        .map_err(ProviderError::after_send)?;
     let mime = mime.unwrap_or_else(|| "video/mp4".to_string());
     let seconds = video.get("duration").and_then(Value::as_f64).unwrap_or(0.0);
     let parts = vec![media::blob(
@@ -237,8 +239,8 @@ async fn speech(
 ) -> Result<InferenceResponse> {
     let text = media::request_text(request);
     if text.is_empty() {
-        return Err(ProviderError::InvalidResponse(
-            "grok-tts needs text to speak: the stage handed it none".into(),
+        return Err(ProviderError::unsent(
+            "grok-tts needs text to speak: the stage handed it none",
         ));
     }
     let mut body = serde_json::Map::new();
@@ -299,8 +301,8 @@ async fn transcribe(
     billing: &Billing,
 ) -> Result<InferenceResponse> {
     let audio = media::first_part(request, |m| m.starts_with("audio/")).ok_or_else(|| {
-        ProviderError::InvalidResponse(
-            "grok-stt needs an audio part to transcribe: the stage handed it none".into(),
+        ProviderError::unsent(
+            "grok-stt needs an audio part to transcribe: the stage handed it none",
         )
     })?;
     let language = media::extra_str(request, "language");

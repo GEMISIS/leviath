@@ -250,11 +250,16 @@ impl ChatTarget<'_> {
         temperature: &ModelMemo,
         token_limit: Option<&ModelMemo>,
     ) -> Result<reqwest::Response> {
+        // Once a refusal has come back, every later attempt follows a request
+        // that went out, whatever happens to it.
+        let mut refused = false;
         loop {
             let detail = match self.send(body).await {
                 Err(ProviderError::ApiError(detail)) => detail,
+                Err(e) if refused => return Err(e.after_send()),
                 other => return other,
             };
+            refused = true;
             if body.get("temperature").is_some()
                 && crate::openai_compat::temperature_refused(&detail)
             {
@@ -385,8 +390,10 @@ impl From<BodyReadError> for ProviderError {
     /// and permanent, since the same request draws the same oversized answer.
     fn from(e: BodyReadError) -> Self {
         match e {
+            // The response whose body this is had arrived, whatever the
+            // transport says about how the read ended.
             BodyReadError::Transport(e) => {
-                ProviderError::transport("reading the response body", &e)
+                ProviderError::transport("reading the response body", &e).after_send()
             }
             too_large @ BodyReadError::TooLarge { .. } => {
                 ProviderError::InvalidResponse(too_large.to_string())

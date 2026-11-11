@@ -129,8 +129,15 @@ impl Endpoint {
         match (&self.auth, response.status().as_u16()) {
             (Auth::Signin(tokens), 401) => {
                 tracing::debug!("a subscription token was rejected; refreshing and retrying once");
-                let fresh = tokens.refresh_stale(&bearer).await.map_err(signed_out)?;
-                self.once(&builder, &fresh.access_token).await
+                // The rejected request went out, so what fails from here on
+                // follows one that did.
+                let fresh = tokens
+                    .refresh_stale(&bearer)
+                    .await
+                    .map_err(|e| signed_out(e).after_send())?;
+                self.once(&builder, &fresh.access_token)
+                    .await
+                    .map_err(ProviderError::after_send)
             }
             _ => Ok(response),
         }
@@ -170,12 +177,14 @@ impl Endpoint {
     }
 }
 
-/// A refresh that failed, as the error that says to sign in again.
+/// A refresh that failed, as the error that says to sign in again. No request
+/// was made with the token it could not get.
 pub fn signed_out(error: RefreshError) -> ProviderError {
     ProviderError::Unavailable {
         reason: UnavailableReason::AuthFailed,
         detail: error.to_string(),
     }
+    .before_send()
 }
 
 /// A refused request whose body was already read.
@@ -260,6 +269,78 @@ mod tests {
             Some(UnavailableReason::AuthFailed)
         );
         assert!(err.to_string().contains("revoked"), "{err}");
+        // The request that drew the 401 had gone out.
+        assert_eq!(err.request_sent(), Some(true));
+    }
+
+    /// With no token to send, nothing is sent; with a fresh one that cannot
+    /// be delivered, the request the provider rejected still went out.
+    #[tokio::test]
+    async fn a_sign_in_failure_says_whether_a_request_went_out() {
+        struct SignedOut;
+        #[async_trait]
+        impl TokenSource for SignedOut {
+            async fn credentials(&self) -> std::result::Result<Credentials, RefreshError> {
+                Err(RefreshError::Terminal("signed out".into()))
+            }
+            async fn refresh_stale(
+                &self,
+                _: &str,
+            ) -> std::result::Result<Credentials, RefreshError> {
+                Ok(Credentials::default())
+            }
+            fn grant(&self) -> Option<ProviderGrant> {
+                None
+            }
+        }
+        assert!(SignedOut.grant().is_none());
+        assert!(SignedOut.refresh_stale("").await.is_ok());
+        let (url, _) = spawn_mock_sequence(vec![(401, "Unauthorized", vec![])]).await;
+        let endpoint = Endpoint::new(
+            reqwest::Client::new(),
+            &url,
+            Auth::Signin(Arc::new(SignedOut)),
+        );
+        let before = endpoint
+            .post_json("/responses", &serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            before.unavailable_reason(),
+            Some(UnavailableReason::AuthFailed)
+        );
+        assert_eq!(before.request_sent(), Some(false));
+
+        // One answer in the sequence: the request sent again with the fresh
+        // token finds nothing listening.
+        struct Refreshes;
+        #[async_trait]
+        impl TokenSource for Refreshes {
+            async fn credentials(&self) -> std::result::Result<Credentials, RefreshError> {
+                Ok(Credentials::default())
+            }
+            async fn refresh_stale(
+                &self,
+                _: &str,
+            ) -> std::result::Result<Credentials, RefreshError> {
+                Ok(Credentials::default())
+            }
+            fn grant(&self) -> Option<ProviderGrant> {
+                None
+            }
+        }
+        assert!(Refreshes.grant().is_none());
+        let endpoint = Endpoint::new(
+            reqwest::Client::new(),
+            &url,
+            Auth::Signin(Arc::new(Refreshes)),
+        );
+        let after = endpoint
+            .post_json("/responses", &serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(after.to_string().starts_with("Request failed: "), "{after}");
+        assert_eq!(after.request_sent(), Some(true));
     }
 
     #[test]

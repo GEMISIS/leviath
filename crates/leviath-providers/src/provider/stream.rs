@@ -142,7 +142,8 @@ impl Stream for FramedStream {
                     return std::task::Poll::Ready(Some(Err(ProviderError::transport(
                         "reading the response stream",
                         &e,
-                    ))));
+                    )
+                    .after_send())));
                 }
                 std::task::Poll::Ready(None) => {
                     // The bytes are over, and every whole frame in them was
@@ -242,7 +243,8 @@ pub async fn collect_stream(
             FailureKind::ConnectionDropped,
             "reading the response stream",
             "the stream ended before the model said it had finished",
-        ));
+        )
+        .after_send());
     };
 
     Ok(InferenceResponse {

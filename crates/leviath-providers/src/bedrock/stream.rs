@@ -141,17 +141,22 @@ impl Stream for ConverseStream {
                     }
                 }
                 Poll::Ready(Some(Err(e))) => {
-                    return this.fail(ProviderError::transport("reading the response stream", &e));
+                    return this.fail(
+                        ProviderError::transport("reading the response stream", &e).after_send(),
+                    );
                 }
                 Poll::Ready(None) => {
                     // A frame that was still arriving is one that never will:
                     // the reply is cut, and saying so beats a silent end.
                     if !this.buffer.is_empty() {
-                        return this.fail(ProviderError::labelled(
-                            FailureKind::ConnectionDropped,
-                            "reading the response stream",
-                            "the event stream ended inside a frame",
-                        ));
+                        return this.fail(
+                            ProviderError::labelled(
+                                FailureKind::ConnectionDropped,
+                                "reading the response stream",
+                                "the event stream ended inside a frame",
+                            )
+                            .after_send(),
+                        );
                     }
                     this.finished = true;
                     return Poll::Ready(None);

@@ -212,6 +212,8 @@ async fn a_401_whose_refresh_fails_reports_the_refresh_failure() {
         .await
         .unwrap_err();
     assert!(err.to_string().contains("session has expired"), "got {err}");
+    // The request the provider rejected had gone out.
+    assert_eq!(err.request_sent(), Some(true));
 }
 
 #[tokio::test]
@@ -225,6 +227,9 @@ async fn a_retry_that_cannot_be_sent_is_a_transport_failure() {
         .await
         .unwrap_err();
     assert!(err.failure_kind().is_some(), "got {err:?}");
+    // The retry never connected, and the first request was still answered:
+    // the kind alone would say nothing left this machine.
+    assert_eq!(err.request_sent(), Some(true));
 }
 
 #[tokio::test]
@@ -238,6 +243,8 @@ async fn a_dead_grant_says_how_to_sign_in_again() {
         err.to_string().contains("lev auth login codex"),
         "got {err}"
     );
+    // No token, so no request: nothing was sent.
+    assert_eq!(err.request_sent(), Some(false));
 }
 
 #[tokio::test]

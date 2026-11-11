@@ -3822,6 +3822,7 @@ fn collect_learns_from_a_refused_request_too() {
             used: 1_300,
             reply_budget: 100,
             max: 1_350,
+            sent: false,
         }),
         pricing: None,
         attempt: None,

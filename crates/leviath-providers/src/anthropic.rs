@@ -1130,6 +1130,7 @@ impl AnthropicProvider {
             let body = self.fetch_models_page(url).await?;
             let data = body.get("data").and_then(|d| d.as_array()).ok_or_else(|| {
                 ProviderError::RequestFailed("missing 'data' field in /models response".to_string())
+                    .after_send()
             })?;
             learned.extend(data.iter().filter_map(catalog::parse_entry));
             match catalog::next_page(&body) {
@@ -1178,6 +1179,7 @@ impl AnthropicProvider {
                 "reaching the provider",
                 &e.to_string(),
             )
+            .after_send()
         })
     }
 }

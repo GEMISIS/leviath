@@ -413,6 +413,7 @@ async fn a_transcript_is_priced_by_seconds_or_by_tokens_as_usage_says() {
     .await
     .unwrap_err();
     assert!(err.to_string().contains("needs an audio part"), "{err}");
+    assert_eq!(err.request_sent(), Some(false));
 }
 
 /// A stored part with no name, as an attachment handed on without one.
@@ -448,9 +449,10 @@ async fn a_video_job_that_fails_at_any_step_is_an_error() {
     assert!(video(&url).await.is_err());
     let (url, _) = spawn_mock_sequence(vec![(200, "OK", b"not json".to_vec())]).await;
     assert!(video(&url).await.is_err());
-    // The poll cannot be read.
+    // The poll cannot be read. It never connects, and the job it asks after
+    // was created: a request went out.
     let (url, _) = spawn_mock_sequence(vec![(200, "OK", br#"{"id":"v"}"#.to_vec())]).await;
-    assert!(video(&url).await.is_err());
+    assert_eq!(video(&url).await.unwrap_err().request_sent(), Some(true));
     // The file is refused, or cannot be fetched at all.
     let (url, _) = spawn_mock_sequence(vec![
         (200, "OK", br#"{"id":"v"}"#.to_vec()),
@@ -464,7 +466,7 @@ async fn a_video_job_that_fails_at_any_step_is_an_error() {
         (200, "OK", br#"{"status":"completed"}"#.to_vec()),
     ])
     .await;
-    assert!(video(&url).await.is_err());
+    assert_eq!(video(&url).await.unwrap_err().request_sent(), Some(true));
     // A finished job whose delete cannot be sent still hands its video back,
     // and a length given as a number is read as one.
     let (url, _) = spawn_mock_sequence(vec![
@@ -668,6 +670,7 @@ async fn gpt_audio_with_no_audio_in_or_out_is_refused_unsent() {
             said.contains("needs audio in its input or its output"),
             "{said}"
         );
+        assert_eq!(err.request_sent(), Some(false));
     }
 }
 

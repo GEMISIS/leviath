@@ -201,6 +201,37 @@ same list.
 
 ### Added
 
+- `leviath-providers`: a failed call says whether its request was sent.
+  `ProviderError::request_sent()` answers `Some(false)` when nothing went out (refused on this
+  machine, or no connection to send on), `Some(true)` when a request was written to an open
+  connection, and `None` when the error cannot say. A caller that keeps its own account of spend
+  can use it to tell a call the provider never heard of from one it may have charged for, which
+  the variant and the `FailureKind` did not settle: a timeout is a connect that never finished
+  or a reply that never came, and both were `[timeout]`. Where the variant and the kind leave it
+  open, the answer rides at the head of the message as `[sent]`, `[not-sent]` or
+  `[sent-unknown]`, after the kind's label, so it survives a provider script and every layer that
+  passes strings. `FailureKind::request_sent()` says what a kind settles alone, and
+  `after_send()`, `before_send()` and `ProviderError::unsent(message)` let a caller that builds
+  its own errors say it too. What changes with it (#1108):
+  - A call that makes several requests says "sent" once any of them went out: a poll or a
+    download behind a submitted job (Meshy, and the video routes of OpenAI, xAI, Google and
+    OpenRouter), a request sent again without a refused temperature, `max_tokens` or reasoning
+    effort, and one sent again after a sign-in token was refreshed. The step that failed may
+    never have connected.
+  - A request refused before sending is no longer an `InvalidResponse`. A media model handed no
+    prompt, no audio or no mesh, a Meshy operation that does not exist, and a length, size or
+    format that does not read are `ProviderError::Other` with `[not-sent]`, so they stop being
+    recorded as `malformed-response`.
+  - A script provider's errors answer from what its HTTP calls did, with nothing for the script
+    to add (see the Rhai providers page). A transport error the host hands a script opens with
+    `[sent]` or `[not-sent]` when the host knows.
+  - **Breaking, library.** `ProviderError::TokenLimitExceeded` gains a `sent: bool` field:
+    `false` from the window guard, `true` when a provider answered the overflow itself, as
+    Ollama does.
+  - Still `None`: a deadline that fired with nothing in the error to show whether the connection
+    was up (measured: the error for a connect still under way is the same as the one for a
+    provider that took the request and never answered), the dispatch layer's own job, title and
+    compaction deadlines, and an error a script threw after a request the host could not place.
 - `leviath-providers`: `TokenUsage::merged(self, chunk)` adds one usage chunk of a streamed call
   onto the running total, by the rule `collect_stream` folds a stream's usage with (counts add
   and saturate, the reported total is reconciled against the parts, a reported cost replaces).

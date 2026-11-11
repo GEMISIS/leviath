@@ -625,6 +625,7 @@ pub async fn guard_context_window(
             used,
             reply_budget: request.max_tokens,
             max,
+            sent: false,
         });
     }
     tracing::debug!(
@@ -1191,6 +1192,9 @@ mod tests {
             Some(leviath_providers::UnavailableReason::Unreachable),
             "so it fails over, and parks the run when there is nowhere left to go"
         );
+        // Raised above the provider, which may have been mid-request or still
+        // waiting its turn: this layer cannot say whether a request went out.
+        assert_eq!(err.request_sent(), None);
         // …and its pool slot is free again for the next agent.
         assert!(
             pools.try_acquire("p", "m").is_some(),
@@ -1441,6 +1445,8 @@ mod tests {
              that window is wrong for this model, set the real one under \
              [model_capabilities.<model>]"
         );
+        // Measured and refused before sending.
+        assert_eq!(err.request_sent(), Some(false));
     }
 
     /// A refusal is a fact about the request, not the network: it is reported
@@ -2144,7 +2150,8 @@ mod tests {
                 &ProviderError::TokenLimitExceeded {
                     used: 9,
                     reply_budget: 0,
-                    max: 8
+                    max: 8,
+                    sent: false,
                 },
                 1,
                 Duration::ZERO

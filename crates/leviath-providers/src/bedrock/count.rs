@@ -75,14 +75,13 @@ impl BedrockProvider {
         match vendor_of(model) {
             Vendor::Anthropic => {
                 let hosts = self.mantle_hosts().ok_or_else(|| {
-                    ProviderError::Other(
-                        "a gateway is configured; Anthropic's count route is not reached through it"
-                            .to_string(),
+                    ProviderError::unsent(
+                        "a gateway is configured; Anthropic's count route is not reached through it",
                     )
                 })?;
                 self.count_on_anthropic_route(&hosts, text, model).await
             }
-            _ => Err(ProviderError::Other(format!(
+            _ => Err(ProviderError::unsent(format!(
                 "Bedrock counts no tokens for {model}"
             ))),
         }

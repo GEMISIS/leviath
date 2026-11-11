@@ -346,10 +346,13 @@ impl OpenAIProvider {
     /// to the next route without a retry.
     fn retired_refusal(&self, model: &str) -> Option<ProviderError> {
         let date = self.learned.retired(model)?;
-        Some(ProviderError::Unavailable {
-            reason: crate::provider::UnavailableReason::ModelRetired,
-            detail: format!("{}/{model} was retired by OpenAI on {date}", self.name),
-        })
+        Some(
+            ProviderError::Unavailable {
+                reason: crate::provider::UnavailableReason::ModelRetired,
+                detail: format!("{}/{model} was retired by OpenAI on {date}", self.name),
+            }
+            .before_send(),
+        )
     }
 
     /// The Responses body for `request`, with the Chat Completions names a
@@ -426,7 +429,9 @@ impl OpenAIProvider {
                 if takes && crate::openai_compat::temperature_refused(&detail) =>
             {
                 self.temperature_unsupported.insert(&request.model);
-                media::chat_audio(&self.endpoint, request, false).await
+                media::chat_audio(&self.endpoint, request, false)
+                    .await
+                    .map_err(ProviderError::after_send)
             }
             other => other,
         }
@@ -502,7 +507,9 @@ impl Provider for OpenAIProvider {
                 );
                 self.temperature_unsupported.insert(&request.model);
                 crate::provider::drop_temperature(&mut body);
-                self.post(request, &body).await?
+                self.post(request, &body)
+                    .await
+                    .map_err(ProviderError::after_send)?
             }
             other => other?,
         };

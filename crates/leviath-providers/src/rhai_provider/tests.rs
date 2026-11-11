@@ -455,7 +455,9 @@ async fn infer_script_throw_maps_transient() {
     let p = build(&src, FakeExecutor::new()).unwrap();
     let err = p.infer(&request("m")).await.err().unwrap();
     assert!(err.is_transient());
-    assert!(matches!(err, ProviderError::RequestFailed(m) if m == "upstream down"));
+    // The script made no request, so its error says none was sent.
+    assert!(matches!(&err, ProviderError::RequestFailed(m) if m == "[not-sent] upstream down"));
+    assert_eq!(err.request_sent(), Some(false));
 }
 
 #[tokio::test]
@@ -802,7 +804,7 @@ async fn native_stream_script_throw_becomes_error_item() {
     let p = build(&src, FakeExecutor::new()).unwrap();
     let chunks = collect_stream(&p, request("m")).await;
     assert_eq!(chunks.len(), 1);
-    assert!(matches!(chunks[0], Err(ProviderError::Other(ref m)) if m == "boom"));
+    assert!(matches!(chunks[0], Err(ProviderError::Other(ref m)) if m == "[not-sent] boom"));
 }
 
 #[tokio::test]
@@ -830,7 +832,7 @@ async fn stream_fallback_propagates_infer_error() {
     );
     let p = build(&src, FakeExecutor::new()).unwrap();
     let err = p.infer_stream(&request("m")).await.err().unwrap();
-    assert!(matches!(err, ProviderError::Other(m) if m == "nope"));
+    assert!(matches!(err, ProviderError::Other(m) if m == "[not-sent] nope"));
 }
 
 // ── free-function coverage ───────────────────────────────────────────────────
@@ -845,11 +847,15 @@ async fn task_failed_and_finalize_stream_arms() {
 
     // finalize_stream: Ok(Ok) sends nothing; Ok(Err) and Err(join) each send one.
     let (tx, mut rx) = mpsc::unbounded_channel();
-    finalize_stream(Ok(Ok(())), &tx);
-    finalize_stream(Ok(Err(ProviderError::Other("x".into()))), &tx);
+    finalize_stream(Ok(Ok(())), Sends::default(), &tx);
+    finalize_stream(
+        Ok(Err(ProviderError::Other("x".into()))),
+        Sends::default(),
+        &tx,
+    );
     let handle2 = tokio::task::spawn_blocking(|| panic!("again"));
     let je2 = handle2.await.err().unwrap();
-    finalize_stream(Err(je2), &tx);
+    finalize_stream(Err(je2), Sends::default(), &tx);
     drop(tx);
     let mut errs = 0;
     while let Some(item) = rx.recv().await {
@@ -1434,4 +1440,164 @@ async fn a_bytes_request_is_rate_limited_like_any_other() {
         .await
         .unwrap();
     assert_eq!(r.content, "audio/mpeg");
+}
+
+// ── whether a call's request went out ────────────────────────────────────────
+
+/// A script reaches the network only through the host, so the requests the
+/// broker served decide what an error says: none made is not sent, one
+/// answered is sent, and one that failed without a mark leaves it unknown.
+#[tokio::test]
+async fn a_script_error_says_what_its_requests_say() {
+    // An answered request, then the script's own complaint about it.
+    let after_answer = format!(
+        "{NOOP_INIT}fn inference(s, r) {{ let x = http_get(\"https://api/x\"); throw \"no choices in the reply\"; }}"
+    );
+    let exec = FakeExecutor::with_responses(vec![Ok("{}".to_string())]);
+    let err = build(&after_answer, exec)
+        .unwrap()
+        .infer(&request("m"))
+        .await
+        .unwrap_err();
+    assert!(matches!(&err, ProviderError::Other(m) if m == "[sent] no choices in the reply"));
+    assert_eq!(err.request_sent(), Some(true));
+
+    // A request the host could not place, swallowed, then a complaint.
+    let after_unknown = format!(
+        "{NOOP_INIT}fn inference(s, r) {{ try {{ http_get(\"https://api/x\"); }} catch {{ }} throw \"gave up\"; }}"
+    );
+    let exec =
+        FakeExecutor::with_responses(vec![Err(HostHttpError::Transport("timed out".into()))]);
+    let err = build(&after_unknown, exec)
+        .unwrap()
+        .infer(&request("m"))
+        .await
+        .unwrap_err();
+    assert!(matches!(&err, ProviderError::Other(m) if m == "gave up"));
+    assert_eq!(err.request_sent(), None);
+
+    // A request that never connected, passed on as it came.
+    let unsent = format!(
+        "{NOOP_INIT}fn inference(s, r) {{ let x = http_get(\"https://api/x\"); #{{ content: x }} }}"
+    );
+    let exec = FakeExecutor::with_responses(vec![Err(HostHttpError::Transport(
+        "[not-sent] connection refused".into(),
+    ))]);
+    let err = build(&unsent, exec)
+        .unwrap()
+        .infer(&request("m"))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ProviderError::RequestFailed(_)), "{err:?}");
+    assert_eq!(err.request_sent(), Some(false));
+
+    // An error the script calls an API error, with no request behind it.
+    let claimed = format!(
+        "{NOOP_INIT}fn inference(s, r) {{ throw #{{ kind: \"api\", message: \"HTTP 400: no\" }}; }}"
+    );
+    let err = build(&claimed, FakeExecutor::new())
+        .unwrap()
+        .infer(&request("m"))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ProviderError::ApiError(_)), "{err:?}");
+    assert_eq!(err.request_sent(), Some(false));
+}
+
+/// A reply the script built wrong is judged the same way: it is the
+/// script's doing, not a provider's answer, unless a request went out.
+#[tokio::test]
+async fn a_reply_the_script_built_wrong_says_what_its_requests_say() {
+    let bare = format!("{NOOP_INIT}fn inference(s, r) {{ [1, 2, 3] }}");
+    let err = build(&bare, FakeExecutor::new())
+        .unwrap()
+        .infer(&request("m"))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ProviderError::InvalidResponse(_)), "{err:?}");
+    assert_eq!(err.request_sent(), Some(false));
+
+    let asked = format!(
+        "{NOOP_INIT}fn inference(s, r) {{ let x = http_get(\"https://api/x\"); [1, 2, 3] }}"
+    );
+    let exec = FakeExecutor::with_responses(vec![Ok("{}".to_string())]);
+    let err = build(&asked, exec)
+        .unwrap()
+        .infer(&request("m"))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ProviderError::InvalidResponse(_)), "{err:?}");
+    assert_eq!(err.request_sent(), Some(true));
+}
+
+/// Each outcome a served request can have, and what a streaming request
+/// changes: its outcome reaches the script as events the broker never sees,
+/// so afterwards only a known send is added to an error.
+#[test]
+fn the_broker_counts_what_each_request_says() {
+    let ok: std::result::Result<String, HostHttpError> = Ok("{}".into());
+    let refused: std::result::Result<String, HostHttpError> =
+        Err(HostHttpError::Api("HTTP 400: no".into()));
+    let unsent: std::result::Result<String, HostHttpError> =
+        Err(HostHttpError::Transport("[not-sent] refused".into()));
+    let unknown: std::result::Result<String, HostHttpError> =
+        Err(HostHttpError::Transport("timed out".into()));
+
+    let mut sends = Sends::default();
+    assert_eq!(sends.sent, Some(false), "no request, nothing sent");
+    sends.note(&unsent);
+    assert_eq!(sends.sent, Some(false));
+    sends.note(&unknown);
+    assert_eq!(sends.sent, None);
+    sends.note(&refused);
+    assert_eq!(sends.sent, Some(true), "an answer of any status went out");
+    let mut answered = Sends::default();
+    answered.note(&ok);
+    assert_eq!(answered.sent, Some(true));
+
+    let other = || ProviderError::Other("boom".into());
+    assert_eq!(Sends::default().say_on(other()).request_sent(), Some(false));
+    assert_eq!(answered.say_on(other()).request_sent(), Some(true));
+    // After a stream, nothing is taken away from what the error says.
+    let streamed = Sends {
+        sent: Some(false),
+        streamed: true,
+    };
+    assert_eq!(streamed.say_on(other()).request_sent(), None);
+    let streamed_and_answered = Sends {
+        sent: Some(true),
+        streamed: true,
+    };
+    assert_eq!(
+        streamed_and_answered.say_on(other()).request_sent(),
+        Some(true)
+    );
+}
+
+/// A streaming script whose stream fails mid-way passes on what the host
+/// said of it, and one that throws before asking for anything sent nothing.
+#[tokio::test]
+async fn a_streaming_script_error_says_what_its_requests_say() {
+    let src = format!("{NOOP_INIT}fn inference(s, r) {{ #{{}} }}\n{STREAM_SCRIPT}");
+    let exec = FakeExecutor::with_stream(vec![
+        Ok("{\"d\":\"a\"}".to_string()),
+        Err(HostHttpError::Transport("[sent] reset".into())),
+    ]);
+    let chunks = collect_stream(&build(&src, exec).unwrap(), request("m")).await;
+    let err = chunks
+        .into_iter()
+        .find_map(|c| c.err())
+        .expect("the stream ends in an error");
+    assert_eq!(err.request_sent(), Some(true));
+
+    let thrown = format!(
+        "{NOOP_INIT}fn inference(s, r) {{ #{{}} }}\n\
+         fn stream(state, request, on_chunk) {{ throw \"boom\"; }}"
+    );
+    let chunks = collect_stream(&build(&thrown, FakeExecutor::new()).unwrap(), request("m")).await;
+    let err = chunks
+        .into_iter()
+        .find_map(|c| c.err())
+        .expect("the stream ends in an error");
+    assert_eq!(err.request_sent(), Some(false));
 }

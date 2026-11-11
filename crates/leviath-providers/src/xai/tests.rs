@@ -210,6 +210,21 @@ async fn a_refused_effort_is_retried_without_one_and_remembered() {
     );
 }
 
+/// The request sent again without the refused effort never connects. The
+/// refusal was an answer, so a request of this call went out.
+#[tokio::test]
+async fn a_resend_that_never_connects_follows_a_request_that_was_sent() {
+    let refusal =
+        br#"{"error":"Model grok-4.3 does not support parameter reasoning.effort"}"#.to_vec();
+    // One answer in the sequence: the listener is gone for the resend.
+    let (url, bodies) = spawn_mock_sequence(vec![(400, "Bad Request", refusal)]).await;
+    let provider = keyed(&url).with_reasoning_effort(Some("high".into()));
+    let err = provider.infer(&request("grok-4.3")).await.unwrap_err();
+    assert_eq!(bodies.lock().unwrap().len(), 1);
+    assert!(err.failure_kind().is_some(), "{err:?}");
+    assert_eq!(err.request_sent(), Some(true));
+}
+
 #[tokio::test]
 async fn a_400_that_is_not_about_effort_is_the_error_itself() {
     let (url, _) =
