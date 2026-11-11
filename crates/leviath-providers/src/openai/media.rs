@@ -60,25 +60,29 @@ pub(crate) fn kind(model: &str) -> Option<Kind> {
     }
 }
 
-/// Whether `request` is a `gpt-audio*` chat call whose stage declares audio as
-/// its output. Those models answer in speech only on Chat Completions (the
-/// Responses API has no audio output), and only when asked for it; a stage that
-/// declares no audio output keeps the ordinary text route.
+/// Whether `model` is a `gpt-audio*` model, which answers Chat Completions
+/// and nothing else: the Responses API refuses it by name ("not supported
+/// with the Responses API", measured 2026-11-10).
 #[cfg(feature = "openai")]
-pub(crate) fn speaks_in_chat(request: &InferenceRequest) -> bool {
-    let model = request.model.to_ascii_lowercase();
-    model.starts_with("gpt-audio")
-        && !model.contains("realtime")
-        && request
-            .extra
-            .get(crate::provider::OUTPUT_MIMES_KEY)
-            .and_then(Value::as_array)
-            .is_some_and(|mimes| {
-                mimes
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .any(|m| m.starts_with("audio/"))
-            })
+pub(crate) fn speaks_in_chat(model: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+    model.starts_with("gpt-audio") && !model.contains("realtime")
+}
+
+/// Whether the stage declares audio among its outputs, which is what makes a
+/// `gpt-audio*` model answer in speech.
+#[cfg(feature = "openai")]
+fn wants_audio(request: &InferenceRequest) -> bool {
+    request
+        .extra
+        .get(crate::provider::OUTPUT_MIMES_KEY)
+        .and_then(Value::as_array)
+        .is_some_and(|mimes| {
+            mimes
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|m| m.starts_with("audio/"))
+        })
 }
 
 /// The media models this build names, for `lev validate` and a listing that
@@ -172,10 +176,16 @@ fn chat_audio_type(format: &str) -> Option<&'static str> {
     }
 }
 
-/// Ask a `gpt-audio*` model for a spoken answer over Chat Completions:
-/// `modalities: ["text", "audio"]` and `audio: {voice, format}`. The audio comes
-/// back base64 under the message's `audio.data`, with its transcript, and
-/// becomes an output part; the transcript is the reply's text.
+/// Ask a `gpt-audio*` model over Chat Completions. For a stage that declares
+/// audio output the answer is spoken: `modalities: ["text", "audio"]` and
+/// `audio: {voice, format}`. The audio comes back base64 under the message's
+/// `audio.data`, with its transcript, and becomes an output part; the
+/// transcript is the reply's text.
+///
+/// A stage that declares none is answered in text, which these models do
+/// only for a request that carries audio. One with audio on neither side is
+/// refused here, before OpenAI refuses it ("requires that either input
+/// content or output modality contain audio").
 ///
 /// The `voice` (default `alloy`) and `audio_format` (`mp3`, `wav`, `flac`,
 /// `opus` or `pcm16`; default `mp3`) come from the stage's model parameters.
@@ -188,6 +198,15 @@ pub(crate) async fn chat_audio(
     send_temperature: bool,
 ) -> Result<InferenceResponse> {
     use base64::Engine as _;
+    let speak = wants_audio(request);
+    if !speak && media::first_part(request, |m| m.starts_with("audio/")).is_none() {
+        return Err(ProviderError::Other(format!(
+            "{} needs audio in its input or its output, and this stage has neither. Declare \
+             audio output on the stage (an `output_routing` key such as `audio/mpeg`), hand \
+             it an audio part, or name a text model.",
+            request.model
+        )));
+    }
     let format = media::extra_str(request, "audio_format").unwrap_or_else(|| "mp3".to_string());
     let mime = chat_audio_type(&format).ok_or_else(|| {
         ProviderError::InvalidResponse(format!(
@@ -211,8 +230,10 @@ pub(crate) async fn chat_audio(
     if !send_temperature {
         fields.remove("temperature");
     }
-    fields.insert("modalities".into(), json!(["text", "audio"]));
-    fields.insert("audio".into(), json!({ "voice": voice, "format": format }));
+    if speak {
+        fields.insert("modalities".into(), json!(["text", "audio"]));
+        fields.insert("audio".into(), json!({ "voice": voice, "format": format }));
+    }
     let url = endpoint.url("/chat/completions");
     let timeout = request.request_timeout_secs;
     let response = endpoint
@@ -242,7 +263,7 @@ pub(crate) async fn chat_audio(
         {
             parsed.content = refusal.to_string();
         }
-        if !parsed.tool_calls.is_empty() || !parsed.content.trim().is_empty() {
+        if !speak || !parsed.tool_calls.is_empty() || !parsed.content.trim().is_empty() {
             return Ok(parsed);
         }
         return Err(ProviderError::InvalidResponse(format!(

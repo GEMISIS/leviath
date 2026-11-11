@@ -728,3 +728,88 @@ async fn omni_failures_and_bad_answers_are_errors() {
         .unwrap_err();
     assert!(err.to_string().contains("`resolution`"), "{err}");
 }
+
+/// A media model is one by what it makes, whatever it is called: the table's
+/// row for `gemini-nano-banana-2.1` says images, and a transcription model
+/// answers in text from audio. The live models speak a socket.
+#[test]
+fn a_media_model_is_known_by_what_it_makes() {
+    assert_eq!(kind("gemini-nano-banana-2.1"), Some(Kind::Prompted));
+    assert_eq!(kind("gemini-3.1-flash-lite-image"), Some(Kind::Prompted));
+    assert_eq!(kind("gemini-3.8-flash-lite-tts"), Some(Kind::Prompted));
+    assert_eq!(kind("gemini-3.5-transcribe"), Some(Kind::Transcribe));
+    assert_eq!(kind("gemini-omni-flash-preview"), Some(Kind::Omni));
+    for socket in [
+        "gemini-3.5-transcribe-live",
+        "gemini-3.8-live",
+        "lyria-realtime-exp",
+    ] {
+        assert_eq!(kind(socket), None, "{socket}");
+    }
+    for chat in ["gemini-3.8-flash", "gemini-4-carbon", "gemma-4-31b-it"] {
+        assert_eq!(kind(chat), None, "{chat}");
+    }
+
+    // A transcript is tokens, so its reply budget is the model's own.
+    let listed = crate::ModelCapabilities {
+        max_context_tokens: 131_072,
+        max_output_tokens: 65_536,
+        ..crate::ModelCapabilities::default()
+    };
+    let transcribe = adjusted("gemini-3.5-transcribe", listed.clone());
+    assert!(!transcribe.supports_tools);
+    assert_eq!(transcribe.max_output_tokens, 65_536);
+    assert_eq!(
+        adjusted("gemini-nano-banana-2.1", listed).max_output_tokens,
+        4_096
+    );
+    let google = provider("http://127.0.0.1:1");
+    let mime = google.mime("gemini-3.5-transcribe");
+    assert!(mime.input.iter().any(|t| t == "audio/*"), "{mime:?}");
+    assert_eq!(mime.output, ["text/*"]);
+}
+
+/// A transcription model is sent the audio and the prompt alone: it refuses
+/// a system instruction and a function declaration alike. With no words in
+/// the stage, the audio goes by itself.
+#[tokio::test]
+async fn a_transcription_model_is_sent_its_audio_and_no_tools() {
+    let audio = || {
+        let blob = Blob::new(MimeType::parse("audio/wav").unwrap(), vec![1, 2, 3]).named("a.wav");
+        let part = Part::stored(blob.describe(&MimeRegistry::builtin())).named("a.wav");
+        let mut block = ContentBlock::mime(&part).unwrap();
+        if let ContentBlock::Mime { data, .. } = &mut block {
+            *data = "AQID".into();
+        }
+        block
+    };
+    let events = [
+        serde_json::json!({ "event_type": "step.start", "index": 0, "step": { "type": "model_output" } }),
+        serde_json::json!({ "event_type": "step.delta", "index": 0, "delta": { "type": "text", "text": "The quick brown fox." } }),
+        serde_json::json!({ "event_type": "interaction.completed", "interaction": { "status": "completed" } }),
+    ]
+    .iter()
+    .map(|e| format!("data: {e}\n\n"))
+    .collect::<String>();
+    let (url, bodies) = spawn_mock_sequence(vec![(200, "OK", events.into_bytes())]).await;
+    let mut asked = request("gemini-3.5-transcribe", "", vec![audio()], Value::Null);
+    asked.system = vec![crate::provider::SystemBlock {
+        text: "Transcribe.".into(),
+        cache_hint: leviath_core::CacheHint::UntilChanged,
+        volatility: leviath_core::Volatility::Stable,
+        region: String::new(),
+    }];
+    asked.tools = vec![leviath_core::Tool {
+        name: "submit_output".into(),
+        description: String::new(),
+        parameters: serde_json::json!({}),
+    }];
+    let response = provider(&url).infer(&asked).await.expect("a transcript");
+    assert_eq!(response.content, "The quick brown fox.");
+    let body: Value = serde_json::from_str(&bodies.lock().unwrap()[0]).unwrap();
+    assert!(body.get("tools").is_none(), "{body}");
+    assert!(body.get("system_instruction").is_none(), "{body}");
+    let content = body["input"][0]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 1, "the audio alone: {body}");
+    assert_eq!(content[0]["type"], "audio");
+}

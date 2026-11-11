@@ -352,23 +352,7 @@ pub(crate) struct Pcm {
 impl Pcm {
     /// The audio as a WAV file: a 44-byte header in front of the samples.
     fn into_wav(self) -> leviath_core::mime::Blob {
-        let block_align = self.channels * 2;
-        let byte_rate = self.rate * u32::from(block_align);
-        let data_len = self.samples.len() as u32;
-        let mut wav = Vec::with_capacity(44 + self.samples.len());
-        wav.extend_from_slice(b"RIFF");
-        wav.extend_from_slice(&(36 + data_len).to_le_bytes());
-        wav.extend_from_slice(b"WAVEfmt ");
-        wav.extend_from_slice(&16u32.to_le_bytes());
-        wav.extend_from_slice(&1u16.to_le_bytes());
-        wav.extend_from_slice(&self.channels.to_le_bytes());
-        wav.extend_from_slice(&self.rate.to_le_bytes());
-        wav.extend_from_slice(&byte_rate.to_le_bytes());
-        wav.extend_from_slice(&block_align.to_le_bytes());
-        wav.extend_from_slice(&16u16.to_le_bytes());
-        wav.extend_from_slice(b"data");
-        wav.extend_from_slice(&data_len.to_le_bytes());
-        wav.extend(self.samples);
+        let wav = crate::mime_output::pcm16_wav(self.samples, self.rate, self.channels);
         leviath_core::mime::Blob::new(
             leviath_core::mime::MimeType::parse("audio/wav").expect("audio/wav is a mime type"),
             wav,

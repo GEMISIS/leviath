@@ -368,7 +368,7 @@ impl OpenRouterProvider {
         if wants_audio {
             body["modalities"] = serde_json::json!(["text", "audio"]);
             body["audio"] = serde_json::json!({
-                "format": request_audio_format(request),
+                "format": self.audio_format(request),
                 "voice": request_audio_voice(request),
             });
         }
@@ -667,6 +667,21 @@ impl OpenRouterProvider {
         self.temperature_unsupported.contains(model)
     }
 
+    /// The format an audio answer is asked for in. The gateway streams audio,
+    /// and an OpenAI model streams `pcm16` alone ("'audio.format' does not
+    /// support 'wav' when stream=true", measured 2026-11-10), which the
+    /// reader wraps as a WAV. Any other upstream is asked for the type the
+    /// stage declares.
+    fn audio_format(&self, request: &InferenceRequest) -> String {
+        match self
+            .listed_id(gateway_id(&request.model))
+            .starts_with("openai/")
+        {
+            true => "pcm16".to_string(),
+            false => request_audio_format(request),
+        }
+    }
+
     /// Send a chat request, retrying without temperature if the model refuses
     /// it, for both the buffered and the streaming paths so they cannot drift.
     ///
@@ -700,10 +715,19 @@ impl OpenRouterProvider {
     /// GET `/models`, shared by [`Provider::list_models`] and
     /// [`Provider::prime_capabilities`] so the two cannot disagree about what
     /// the endpoint is or how its failures read.
+    ///
+    /// Asked for every output a stage can be handed: the plain listing names
+    /// only the models that answer in text, and leaves out the ones that make
+    /// an image or a video and nothing else (measured 2026-11-10: 433 models
+    /// against 519). Speech, transcription, embedding and rerank models stay
+    /// out: each speaks an endpoint of its own that this provider does not.
     async fn fetch_models_json(&self) -> Result<serde_json::Value> {
         crate::provider::fetch_listing(
             &self.client,
-            &format!("{}/models", self.base_url),
+            &format!(
+                "{}/models?output_modalities=text,image,video,audio",
+                self.base_url
+            ),
             &self.listing_headers(),
             Some(crate::provider::SIDE_CALL_TIMEOUT_SECS),
         )
@@ -882,7 +906,7 @@ impl Provider for OpenRouterProvider {
         let stream = if request_wants_audio(request) {
             let mut audio = AudioStreamAccumulator::new(
                 request_audio_mime(request),
-                &request_audio_format(request),
+                &self.audio_format(request),
             );
             let kept = details::keeping();
             let (asked, closing, closed) =
@@ -1401,19 +1425,28 @@ mod tests {
             extra: serde_json::json!({ "output_mimes": ["audio/mpeg"] }),
             request_timeout_secs: None,
         };
+        // An OpenAI model streams `pcm16` and nothing else, whatever the
+        // stage declares.
         let body = provider.build_request_body(&request);
         assert_eq!(
             body["audio"],
-            serde_json::json!({ "format": "mp3", "voice": "alloy" })
+            serde_json::json!({ "format": "pcm16", "voice": "alloy" })
         );
 
         request.extra = serde_json::json!({ "output_mimes": ["audio/wav"], "voice": "verse" });
         let body = provider.build_request_body(&request);
         assert_eq!(
             body["audio"],
-            serde_json::json!({ "format": "wav", "voice": "verse" })
+            serde_json::json!({ "format": "pcm16", "voice": "verse" })
         );
         assert!(body.get("voice").is_none(), "{body}");
+
+        // Any other upstream is asked for the type the stage declares.
+        request.model = "google/lyria-3-clip-preview".to_string();
+        request.extra = serde_json::json!({ "output_mimes": ["audio/mpeg"] });
+        let body = provider.build_request_body(&request);
+        assert_eq!(body["audio"]["format"], "mp3");
+        request.model = "openai/gpt-audio".to_string();
 
         // A stage that asks for no audio keeps `voice` as the parameter it wrote.
         request.extra = serde_json::json!({ "voice": "verse" });
@@ -2678,6 +2711,7 @@ mod tests {
         let (url, seen) = leviath_testkit::spawn_mock_recorder(200, "OK", body.to_vec()).await;
         let provider = provider_with_url(url);
         let mut request = simple_request();
+        request.model = "google/lyria-3-clip-preview".to_string();
         request.extra = serde_json::json!({ "output_mimes": ["audio/wav"] });
         let mut stream = provider.infer_stream(&request).await.unwrap();
         use tokio_stream::StreamExt;
@@ -2712,6 +2746,55 @@ mod tests {
         );
         assert_eq!(request_json["audio"]["format"], "wav");
         assert_eq!(request_json["stream"], true);
+    }
+
+    /// An error the gateway sends inside the stream is the call's error,
+    /// with or without audio ahead of it.
+    #[test]
+    fn an_error_event_in_an_audio_stream_is_the_error() {
+        let mut audio = AudioStreamAccumulator::new(None, "wav");
+        let mut event =
+            "data: {\"error\":{\"message\":\"upstream failed\",\"code\":502}}\n\n".to_string();
+        let answered = openrouter_audio_sse_event(
+            &mut event,
+            &mut audio,
+            &crate::openai_compat::details::discarding(),
+            "",
+        );
+        let error = answered
+            .expect("an event")
+            .expect("not the end")
+            .expect_err("the error");
+        assert!(error.to_string().contains("upstream failed"), "{error}");
+    }
+
+    /// An OpenAI model's audio arrives as raw 24 kHz samples, which are no
+    /// file on their own: the part is a WAV holding them.
+    #[tokio::test]
+    async fn an_openai_models_streamed_samples_become_a_wav() {
+        // As measured: the words arrive as the audio's transcript, nothing
+        // says the answer finished, and the stream ends on usage and DONE.
+        let body = b"data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\",\"audio\":{\"id\":\"a1\",\"transcript\":\"Hi\"}}}]}\n\ndata: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\",\"audio\":{\"transcript\":\" there\"}}}]}\n\ndata: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\",\"audio\":{\"data\":\"AQIDBA==\"}}}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":4,\"total_tokens\":7}}\n\ndata: [DONE]\n\n";
+        let (url, seen) = leviath_testkit::spawn_mock_recorder(200, "OK", body.to_vec()).await;
+        let provider = provider_with_url(url);
+        let mut request = simple_request();
+        request.model = "openai/gpt-audio-mini".to_string();
+        request.extra = serde_json::json!({ "output_mimes": ["audio/mpeg"] });
+        let response = provider.infer(&request).await.unwrap();
+        assert_eq!(response.content, "Hi there");
+        assert_eq!(
+            response.finish_reason,
+            crate::provider::FinishReason::Complete
+        );
+        let part = &response.parts[0];
+        assert_eq!(part.mime_type.as_str(), "audio/wav");
+        assert_eq!(&part.bytes[..4], b"RIFF");
+        assert_eq!(&part.bytes[8..12], b"WAVE");
+        assert_eq!(&part.bytes[24..28], &24_000u32.to_le_bytes());
+        assert_eq!(&part.bytes[44..], &[1, 2, 3, 4]);
+        assert!(part.name.as_deref().unwrap().ends_with(".wav"));
+        let sent = leviath_core::sync::lock(&seen)[0].clone();
+        assert!(sent.contains("\"format\":\"pcm16\""), "{sent}");
     }
 
     #[tokio::test]

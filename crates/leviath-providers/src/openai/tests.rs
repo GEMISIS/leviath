@@ -842,3 +842,26 @@ async fn a_gpt_audio_turn_retries_without_a_temperature_the_api_refuses() {
     assert!(!sent[1].contains("temperature"));
     assert!(provider.temperature_is_unsupported("gpt-audio"));
 }
+
+/// `gpt-audio*` is served: a chat model on Chat Completions, which carries
+/// the audio a Responses body has no block for. The realtime line is not.
+#[test]
+fn the_gpt_audio_models_are_served_and_take_audio() {
+    let provider = OpenAIProvider::new(reqwest::Client::new(), "k".to_string());
+    for model in ["gpt-audio", "gpt-audio-mini", "gpt-audio-1.5"] {
+        assert_eq!(provider.serves_model(model).as_deref(), Some(model));
+        let mime = provider.mime(model);
+        assert!(
+            mime.input.iter().any(|t| t == "audio/*"),
+            "{model}: {mime:?}"
+        );
+    }
+    assert!(provider.serves_model("gpt-realtime-2").is_none());
+    assert!(
+        !provider
+            .mime("gpt-5.5")
+            .input
+            .iter()
+            .any(|t| t == "audio/*")
+    );
+}

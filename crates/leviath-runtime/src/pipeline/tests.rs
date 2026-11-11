@@ -349,6 +349,104 @@ fn window_with_tool_turns() -> ContextWindow {
     w
 }
 
+/// A model that calls tools and also makes images, as a gateway lists some.
+struct Draws;
+#[async_trait::async_trait]
+impl Provider for Draws {
+    async fn infer(
+        &self,
+        r: &InferenceRequest,
+    ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
+        provider(true, 1000).infer(r).await
+    }
+    async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
+        1
+    }
+    fn max_context_tokens(&self, _m: &str) -> usize {
+        100_000
+    }
+    fn name(&self) -> &str {
+        "draws"
+    }
+    fn capabilities(&self, m: &str) -> leviath_providers::ModelCapabilities {
+        provider(true, 1000).capabilities(m)
+    }
+    fn mime(&self, _m: &str) -> leviath_providers::capabilities::ModelMime {
+        leviath_providers::capabilities::ModelMime::new(&["text/*"], &["text/*", "image/*"])
+    }
+}
+
+/// A stage that asks a model for the media it makes is a generation: no tool
+/// is advertised, even to a model listed as calling them. Offered tools, an
+/// image model answered with rounds of tool calls and a paid image apiece.
+/// The same model on a stage that asks for text, or for a family it does not
+/// make, keeps its tools.
+#[tokio::test]
+async fn a_model_asked_for_the_media_it_makes_is_offered_no_tools() {
+    let w = window();
+    let si = stage("draws-1", vec![tool("submit_output")], None);
+    let draws = Arc::new(Draws) as Arc<dyn Provider>;
+    assert_eq!(
+        draws
+            .infer(
+                &build_request(
+                    &w,
+                    None,
+                    &si,
+                    &draws,
+                    "generate",
+                    0,
+                    crate::pipeline::inference::PriorCalls::default(),
+                )
+                .0
+            )
+            .await
+            .unwrap()
+            .content,
+        "ok"
+    );
+    assert_eq!(draws.count_tokens("x", "draws-1").await, 1);
+    assert_eq!(draws.max_context_tokens("draws-1"), 100_000);
+    assert_eq!(draws.name(), "draws");
+    let tools_for = |mimes: serde_json::Value, provider: &Arc<dyn Provider>| {
+        let config = InferenceConfig {
+            extra_params: [(leviath_providers::OUTPUT_MIMES_KEY.to_string(), mimes)]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        build_request(
+            &w,
+            Some(&config),
+            &si,
+            provider,
+            "generate",
+            0,
+            crate::pipeline::inference::PriorCalls::default(),
+        )
+        .0
+        .tools
+        .len()
+    };
+    assert_eq!(tools_for(serde_json::json!(["image/png"]), &draws), 0);
+    assert_eq!(
+        tools_for(serde_json::json!(["text/markdown", "image/*"]), &draws),
+        0
+    );
+    // Text, a family the model does not make, and a value that is no type.
+    assert_eq!(tools_for(serde_json::json!(["text/markdown"]), &draws), 1);
+    assert_eq!(
+        tools_for(serde_json::json!(["audio/mpeg", "nonsense", 3]), &draws),
+        1
+    );
+    assert_eq!(tools_for(serde_json::json!("image/png"), &draws), 1);
+    // A text model on an image stage: a tool makes the image, so it keeps them.
+    assert_eq!(
+        tools_for(serde_json::json!(["image/png"]), &provider(true, 1000)),
+        1
+    );
+}
+
 /// Regression: an image model (`supports_tools = false`) re-entered after a
 /// stage that called `context_append` was sent that call in its history and
 /// Google refused the request with "Function calling is not enabled for
@@ -5846,6 +5944,70 @@ fn a_media_stage_that_called_tools_is_let_go_once_its_nudges_are_spent() {
         world.get::<StageProgress>(e).unwrap().no_image_nudges,
         MAX_NO_IMAGE_NUDGES,
         "the guard did not fire again"
+    );
+}
+
+/// A model that cannot call tools is not told to use them: its text is its
+/// answer, and the built-in nudge would only buy the same reply again. A
+/// nudge the blueprint wrote itself is still sent, and so is the built-in
+/// one to a model that can call tools or whose provider is unknown.
+#[test]
+fn a_model_that_cannot_call_tools_is_not_nudged_to_use_them() {
+    let world_with = |supports_tools: bool| {
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "cfg".to_string(),
+            Arc::new(Cfg {
+                supports_temperature: true,
+                max_output: 1000,
+                supports_tools,
+            }),
+        );
+        let mut world = World::new();
+        world.insert_resource(Providers(registry));
+        world
+    };
+    let spawn = |world: &mut World, bp: RunSpecC, provider: &str| {
+        let mut inf = stage("m", vec![tool("read_file")], None);
+        inf.provider_name = provider.to_string();
+        world
+            .spawn((
+                ctx(&[("conversation", 10_000)]),
+                infer_result_only(false),
+                inf,
+                StageProgress::default(),
+                bp,
+                StageCursor { index: 0 },
+                ReadyForTransition,
+            ))
+            .id()
+    };
+
+    let mut world = world_with(false);
+    let plain = spawn(&mut world, nudge_bp(false), "cfg");
+    let mut worded = nudge_bp(false);
+    graph_mut(&mut worded).stages[0].nudge = Some(crate::spec::graph::NudgeDef {
+        text: Some("Say more.".to_string()),
+        ..Default::default()
+    });
+    let worded = spawn(&mut world, worded, "cfg");
+    let unknown = spawn(&mut world, nudge_bp(false), "nobody");
+    run_empty(&mut world);
+    assert!(world.get::<ResolveTransition>(plain).is_some());
+    assert_eq!(
+        world.get::<StageProgress>(plain).unwrap().text_only_nudges,
+        0
+    );
+    assert!(world.get::<ReadyToInfer>(worded).is_some());
+    assert!(world.get::<ReadyToInfer>(unknown).is_some());
+
+    let mut world = world_with(true);
+    let able = spawn(&mut world, nudge_bp(false), "cfg");
+    run_empty(&mut world);
+    assert!(world.get::<ReadyToInfer>(able).is_some());
+    assert_eq!(
+        world.get::<StageProgress>(able).unwrap().text_only_nudges,
+        1
     );
 }
 

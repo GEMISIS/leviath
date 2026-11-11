@@ -15,6 +15,15 @@ same list.
 
 ### Changed
 
+- A stage that asks a model for the media it makes is offered no tools, on every provider. The
+  rule was each vendor's listing, and an image model listed as calling tools
+  (`google/gemini-nano-banana-2.1` through OpenRouter) answered an image stage with four tool
+  calls and an image apiece. The image, video or audio a model returns is the stage's output; a
+  text model on a media stage keeps its tools.
+- A model that cannot call tools is no longer told to use them. The built-in nudge ("You have
+  tools available...") is skipped when the stage's model takes no tools, so a transcription or
+  image model's text reply is its answer the first time. It was sent back until the nudge budget
+  ran out, each one a paid call. A nudge the blueprint words itself is still sent.
 - A media stage stops after three replies that made nothing. A stage that makes an image, a video
   or audio and gets a reply with none is sent back twice and then fails, whatever its
   `max_iterations`, with an error naming what the last reply held (each part by type and size, and
@@ -68,6 +77,26 @@ same list.
 
 ### Fixed
 
+- Media models are routed by what they make, after a sweep of every model Google, OpenRouter,
+  OpenAI and Meta list:
+  - Google's `gemini-nano-banana-2.1` was run as a chat model and failed on its token budget. A
+    Google model is a media model when the modality table says it makes images, audio or video,
+    whatever it is called.
+  - Google's `gemini-3.5-transcribe` refused the chat route's function declarations and system
+    instruction. It is sent its audio and the prompt alone, and answers in text.
+  - OpenAI's `gpt-audio`, `gpt-audio-mini` and `gpt-audio-1.5` were refused as "not served". They
+    run on Chat Completions: in speech for a stage that declares audio output, in text for one
+    that hands them audio, and a stage with audio on neither side fails before sending, since
+    OpenAI refuses it.
+  - OpenRouter's image-only and video-only models (`black-forest-labs/flux.2-klein-4b`,
+    `bytedance/seedance-2.0-mini` and the rest) were unknown to Leviath, because the plain model
+    listing leaves them out. The listing is now read with them in it.
+  - OpenAI's audio models through OpenRouter (`openai/gpt-audio`, `openai/gpt-audio-mini`)
+    failed every call: OpenAI streams `pcm16` alone and refused the `mp3` or `wav` asked for, and
+    its stream never says it finished, which read as a dropped connection. The samples are asked
+    for as `pcm16` and kept as a WAV, the spoken words are read from the audio's transcript, and
+    a stream that ends on `[DONE]` with audio in it is a finished answer.
+- An audio part made through OpenRouter is named with its extension (`audio-<sha>.mp3`).
 - Google's omni video models (`gemini-omni-1.2-flash`, `gemini-omni-1.1-flash`) run. They were
   sent as chat models, with the stage's `submit_output` declared, and Google refused the request
   with `Function calling is not enabled for this model`. They are media models now: sent the

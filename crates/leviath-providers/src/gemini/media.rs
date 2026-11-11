@@ -54,6 +54,9 @@ pub(crate) enum Kind {
     Prompted,
     /// An omni model: a video from the Interactions route, in one answer.
     Omni,
+    /// A transcription model on the Interactions route: sent the audio and
+    /// the prompt alone, and answers in text.
+    Transcribe,
 }
 
 /// The media models this build names, for `lev validate` and a listing that
@@ -91,34 +94,49 @@ const VEO_ASPECT_RATIOS: &[&str] = &["16:9", "9:16"];
 const OMNI_RESOLUTIONS: &[&str] = &["360p", "720p", "1080p", "4k"];
 
 /// The media kind `model` is, or `None` for a chat model.
+///
+/// Decided by what the model makes, as the modality table and its name rules
+/// say it ([`crate::mime_tables::gemini`]), so a media model under a new name
+/// is one as soon as the table has its row. Every one of them refuses a
+/// function declaration, and most a system instruction, which is what the
+/// chat route would send (measured 2026-11-10: `gemini-3.5-transcribe`
+/// answers 400 to either, `gemini-nano-banana-2.1` 500). The live models
+/// speak a socket and are left alone.
 pub(crate) fn kind(model: &str) -> Option<Kind> {
     let m = model.to_ascii_lowercase();
     if m.starts_with("veo") {
         return Some(Kind::Video);
     }
-    if m.starts_with("gemini-omni") {
+    if m.contains("live") || m.contains("realtime") {
+        return None;
+    }
+    if m.contains("transcribe") {
+        return Some(Kind::Transcribe);
+    }
+    let made = crate::mime_tables::gemini(model).output;
+    let makes = |family: &str| made.iter().any(|t| t.starts_with(family));
+    if makes("video/") {
         return Some(Kind::Omni);
     }
-    let prompted = m.contains("-image")
-        || m.starts_with("nano-banana")
-        || m.contains("-tts")
-        || m.starts_with("lyria");
-    prompted.then_some(Kind::Prompted)
+    (makes("image/") || makes("audio/")).then_some(Kind::Prompted)
 }
 
 /// `caps` as a media model has them: it calls no tools, it answers with parts
 /// rather than tokens, so the reply budget stays small, and the window the
 /// context guard measures is not the prompt limit the listing states (Veo
 /// lists 480 tokens), since the model is sent the prompt alone and never the
-/// stage's context. A chat model's are unchanged.
+/// stage's context. A transcription model answers in tokens, so its reply
+/// budget is left as listed. A chat model's are unchanged.
 pub(crate) fn adjusted(
     model: &str,
     mut caps: crate::ModelCapabilities,
 ) -> crate::ModelCapabilities {
-    if kind(model).is_some() {
+    if let Some(kind) = kind(model) {
         caps.supports_tools = false;
-        caps.max_output_tokens = caps.max_output_tokens.min(4_096);
         caps.max_context_tokens = caps.max_context_tokens.max(32_000);
+        if kind != Kind::Transcribe {
+            caps.max_output_tokens = caps.max_output_tokens.min(4_096);
+        }
     }
     caps
 }
@@ -178,7 +196,12 @@ pub(crate) fn prompted_body(request: &InferenceRequest) -> Value {
 /// turn: the request's text, then every stored part the stage handed it.
 #[cfg(feature = "google")]
 fn prompt_content(request: &InferenceRequest) -> Vec<Value> {
-    let mut content = vec![json!({ "type": "text", "text": media::request_text(request) })];
+    // A stage may hand over parts and no words (audio to transcribe).
+    let text = media::request_text(request);
+    let mut content = Vec::new();
+    if !text.is_empty() {
+        content.push(json!({ "type": "text", "text": text }));
+    }
     for message in &request.messages {
         if let MessageContent::Blocks(blocks) = &message.content {
             content.extend(

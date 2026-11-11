@@ -454,8 +454,13 @@ pub(crate) fn build_request(
     // A model that cannot call tools is refused by its provider for any
     // function call in the request, the history included. Everything a tool
     // did earlier in the run reaches it as prose instead, and nothing is
-    // advertised to it.
-    let (messages, filtered_tools) = if caps.supports_tools {
+    // advertised to it. A model asked for the media it makes is treated the
+    // same whatever its listing says about tools: the call is a generation,
+    // and one offered tools has answered with a round of tool calls and a
+    // paid image apiece.
+    let offers_tools =
+        caps.supports_tools && !generates_declared_media(provider.as_ref(), &stage.model, config);
+    let (messages, filtered_tools) = if offers_tools {
         (assembled.messages, filtered_tools)
     } else {
         // `submit_output` alone is what an output stage is always granted, and
@@ -517,6 +522,29 @@ pub(crate) fn build_request(
         request_timeout_secs: config.and_then(|c| c.request_timeout_secs),
     };
     (request, system_hash, block_hashes)
+}
+
+/// Whether this call is a generation: the stage declares an image, a video
+/// or audio among its outputs, and `model` makes that family.
+fn generates_declared_media(
+    provider: &dyn Provider,
+    model: &str,
+    config: Option<&InferenceConfig>,
+) -> bool {
+    let made = provider.mime(model).output;
+    config
+        .and_then(|c| c.extra_params.get(leviath_providers::OUTPUT_MIMES_KEY))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .filter_map(|mime| mime.split_once('/'))
+        .any(|(family, _)| {
+            ["image", "video", "audio"].contains(&family)
+                && made
+                    .iter()
+                    .any(|m| m.split_once('/').is_some_and(|(f, _)| f == family))
+        })
 }
 
 /// A stage's request extras with its `effort` added, as the provider serving

@@ -120,8 +120,7 @@ pub fn message_audio_blob(
     }
     // The MIME may be user supplied or introduced by a future model.
     let mime_type = audio_type_of(&bytes, said.as_deref())?;
-    let sha12: String = sha256_hex(&bytes).chars().take(12).collect();
-    Some(Blob::new(mime_type, bytes).named(format!("audio-{sha12}")))
+    Some(named_audio(mime_type, bytes))
 }
 
 /// Assemble base64 audio pieces from an OpenAI-shaped audio stream into one
@@ -171,9 +170,51 @@ pub fn streamed_audio_blob(
     if bytes.is_empty() {
         return None;
     }
+    // Raw samples are no file on their own: OpenAI streams `pcm16` at 24 kHz,
+    // one channel, and nothing else.
+    if format.map(str::trim) == Some("pcm16") && sniff_audio(&bytes).is_none() {
+        let wav = MimeType::parse("audio/wav").expect("audio/wav is a mime type");
+        return Some(named_audio(wav, pcm16_wav(bytes, 24_000, 1)));
+    }
     let mime_type = audio_type_of(&bytes, said.as_deref())?;
+    Some(named_audio(mime_type, bytes))
+}
+
+/// 16-bit little-endian PCM `samples` as a WAV file: a 44-byte header in
+/// front of them.
+pub(crate) fn pcm16_wav(samples: Vec<u8>, rate: u32, channels: u16) -> Vec<u8> {
+    let block_align = channels * 2;
+    let byte_rate = rate * u32::from(block_align);
+    let data_len = samples.len() as u32;
+    let mut wav = Vec::with_capacity(44 + samples.len());
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&channels.to_le_bytes());
+    wav.extend_from_slice(&rate.to_le_bytes());
+    wav.extend_from_slice(&byte_rate.to_le_bytes());
+    wav.extend_from_slice(&block_align.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_len.to_le_bytes());
+    wav.extend(samples);
+    wav
+}
+
+/// An audio blob named `audio-<sha12>.<ext>` after the first twelve hex of its
+/// bytes' sha256, with the extension the registry has for its type, or none
+/// for a type it does not know.
+fn named_audio(mime_type: MimeType, bytes: Vec<u8>) -> Blob {
+    let ext = MimeRegistry::builtin()
+        .info(&mime_type)
+        .extensions
+        .first()
+        .map(|e| format!(".{e}"))
+        .unwrap_or_default();
     let sha12: String = sha256_hex(&bytes).chars().take(12).collect();
-    Some(Blob::new(mime_type, bytes).named(format!("audio-{sha12}")))
+    Blob::new(mime_type, bytes).named(format!("audio-{sha12}{ext}"))
 }
 
 /// The type audio bytes are: what their leading bytes say when they say an
@@ -288,7 +329,8 @@ mod tests {
         .unwrap();
         assert_eq!(blob.mime_type.as_str(), "audio/wav");
         assert_eq!(blob.bytes, b"RIFF");
-        assert!(blob.name.as_deref().unwrap().starts_with("audio-"));
+        // Named by content, with the extension its type has.
+        assert_eq!(blob.name.as_deref(), Some("audio-a40ff3d5900f.wav"));
     }
 
     #[test]
