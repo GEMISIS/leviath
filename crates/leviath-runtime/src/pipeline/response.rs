@@ -1,5 +1,6 @@
 //! Response collection and stage-progress accounting.
 
+use super::reply::store_reply;
 use super::*;
 
 /// The response has been applied and is ready to be examined for tool calls (or
@@ -1032,11 +1033,43 @@ pub(crate) fn handle_empty_response(
         // content filter, or an error string in place of a data URI. Count what
         // this turn drew first (an image reply has no tool calls, so it lands
         // here too); if the stage still has no image, send the model's own words
-        // back so the retry is informed. Bounded, so a model that keeps refusing
-        // lets the stage end rather than looping.
+        // back so the retry is informed. Bounded: once the nudges are spent a
+        // stage that has called no tool fails with what the last reply held,
+        // since nothing but the model itself could have made its media and
+        // every further reply is another paid generation. A stage that has
+        // called tools is let go as any other, its media being a tool's to make.
         if let Some(family) = stage_expected_media(stage) {
             progress.images_produced += media_part_count(&infer.parts, family);
-            if progress.images_produced == 0 && progress.no_image_nudges < MAX_NO_IMAGE_NUDGES {
+            let spent = progress.no_image_nudges >= MAX_NO_IMAGE_NUDGES;
+            if progress.images_produced == 0 && spent && progress.total_tool_calls == 0 {
+                let message = no_media_failure(
+                    stage.map(|s| s.name.as_str()).unwrap_or(""),
+                    family,
+                    progress.no_image_nudges + 1,
+                    &infer.response,
+                    &infer.parts,
+                );
+                tracing::warn!(stage_error = %message, "ending the stage");
+                store_reply(
+                    &mut window,
+                    infer,
+                    infer.reasoning.clone(),
+                    stage,
+                    sink.as_ref(),
+                );
+                if let Some(state) = state.as_deref_mut() {
+                    state.status = AgentStatus::Error {
+                        message: message.clone(),
+                    };
+                }
+                commands
+                    .entity(entity)
+                    .remove::<ReadyForTransition>()
+                    .insert(StageOutcome::Errored(message))
+                    .insert(ResolveTransition);
+                continue;
+            }
+            if progress.images_produced == 0 && !spent {
                 progress.no_image_nudges += 1;
                 tracing::warn!(
                     stage = stage.map(|s| s.name.as_str()).unwrap_or(""),
@@ -1130,54 +1163,6 @@ pub(crate) fn handle_empty_response(
                 .insert(ReadyToInfer);
         }
     }
-}
-
-/// Record a reply with no tool calls in the conversation as the model's
-/// turn: its text and whatever mime it produced. A reply with nothing in it
-/// (a cut-off tool call, an empty answer) leaves no entry: an empty
-/// assistant message is noise to the next request and some providers refuse
-/// it outright.
-fn store_reply(
-    window: &mut ContextWindow,
-    infer: &crate::components::InferenceResult,
-    reasoning: Option<String>,
-    stage: Option<&crate::spec::graph::StageDef>,
-    sink: Option<&crate::context_setup::PartSink<'_>>,
-) {
-    // The stage may send some produced parts to regions of their own
-    // (`output_routing`). The reply's text and any unrouted part stay in the
-    // conversation as the assistant turn; the routed parts land in their
-    // regions as separate entries.
-    let routed = super::part_routing::split(stage, &infer.parts);
-    if let Some(content) = reply_content(&infer.response, &routed.kept, sink) {
-        let tokens = content.tokens(sink.map(|s| s.registry));
-        let _ = window.add_turn(
-            Some(leviath_core::ContextCause::ModelReply),
-            "conversation",
-            leviath_core::EntryKind::AssistantTurn { tool_calls: vec![] },
-            content,
-            tokens,
-            reasoning,
-        );
-    }
-    super::part_routing::store_routed(window, &routed);
-}
-
-/// A reply's text and produced parts as one entry's content, or `None` when
-/// there is nothing to record. Text over `[mime] inline_text_bytes` is stored
-/// through `sink` and the entry carries its stand-in; with no sink it stays
-/// inline.
-pub(crate) fn reply_content(
-    text: &str,
-    parts: &[leviath_core::mime::Part],
-    sink: Option<&crate::context_setup::PartSink<'_>>,
-) -> Option<leviath_core::region::EntryContent> {
-    let mut all = Vec::with_capacity(parts.len() + 1);
-    if !text.trim().is_empty() {
-        all.push(crate::context_setup::text_part(sink, "reply.txt", text));
-    }
-    all.extend(parts.iter().cloned());
-    (!all.is_empty()).then(|| leviath_core::region::EntryContent::from_parts(all))
 }
 
 /// Append a `[System]` nudge to the conversation region: the one injection path

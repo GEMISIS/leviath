@@ -9,6 +9,8 @@ mod audio;
 mod catalog;
 #[cfg(feature = "openrouter")]
 mod prefix;
+#[cfg(feature = "openrouter")]
+mod video;
 
 use crate::capabilities::{Match, Row};
 use crate::provider::{LimitsSource, ModelCapabilities};
@@ -151,6 +153,9 @@ pub struct OpenRouterProvider {
     /// The operator's extra headers, sent after the provider's own on every
     /// request to `base_url`: a gateway's token, a tenant tag.
     extra_headers: Vec<(String, String)>,
+
+    /// How often a video job is checked on.
+    video_poll: std::time::Duration,
 }
 
 #[cfg(feature = "openrouter")]
@@ -184,6 +189,7 @@ impl OpenRouterProvider {
             learned: Default::default(),
             zdr_models: std::sync::RwLock::new(None),
             extra_headers: Vec::new(),
+            video_poll: std::time::Duration::from_secs(10),
         }
     }
 
@@ -195,16 +201,9 @@ impl OpenRouterProvider {
         rate_limit: Option<&crate::provider::RateLimitConfig>,
     ) -> Self {
         Self {
-            client,
-            api_key,
-            base_url: "https://openrouter.ai/api/v1".to_string(),
             rate_limiter: rate_limit.map(crate::rate_limit::RateLimiter::new),
             capability_overrides: overrides,
-            warned_unknown: Default::default(),
-            temperature_unsupported: Default::default(),
-            learned: Default::default(),
-            zdr_models: std::sync::RwLock::new(None),
-            extra_headers: Vec::new(),
+            ..Self::new(client, api_key)
         }
     }
 
@@ -802,6 +801,9 @@ impl OpenRouterProvider {
 #[cfg(feature = "openrouter")]
 impl Provider for OpenRouterProvider {
     async fn infer(&self, request: &InferenceRequest) -> Result<InferenceResponse> {
+        if self.is_video_job(request) {
+            return self.video(request, self.video_poll).await;
+        }
         // OpenRouter requires `stream: true` for audio modalities. Reuse the
         // streaming transport here too so callers of the buffered trait method
         // receive the same assembled audio part instead of a gateway 400.
@@ -852,6 +854,11 @@ impl Provider for OpenRouterProvider {
         request: &InferenceRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>> {
         tracing::debug!(model = %request.model, "Calling OpenRouter API (streaming)");
+        if self.is_video_job(request) {
+            return Ok(crate::media::one_chunk(
+                self.video(request, self.video_poll).await?,
+            ));
+        }
 
         if let Some(limiter) = &self.rate_limiter {
             limiter.acquire().await?;
@@ -995,6 +1002,17 @@ impl Provider for OpenRouterProvider {
         // a temperature at all.
         if self.temperature_is_unsupported(model) {
             caps.supports_temperature = false;
+        }
+        // A model that makes video is reached through the Videos API, which
+        // takes a prompt and nothing else, and no such model calls a tool
+        // over chat either.
+        if self
+            .mime(written)
+            .output
+            .iter()
+            .any(|m| m.starts_with("video/"))
+        {
+            caps.supports_tools = false;
         }
         caps
     }

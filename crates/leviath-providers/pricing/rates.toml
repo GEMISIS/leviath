@@ -672,6 +672,15 @@ source = "litellm"
 
 [[rate]]
 provider = "google"
+prefix = "gemini-omni-1.2-flash"
+input = 1.5
+cache_read = 1.5
+cache_write = 1.5
+output = 9.0
+source = "openrouter"
+
+[[rate]]
+provider = "google"
 prefix = "gemini-omni-flash-preview"
 input = 1.5
 cache_read = 1.5

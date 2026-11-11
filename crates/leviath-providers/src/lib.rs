@@ -36,7 +36,8 @@ pub mod learned;
     feature = "google",
     feature = "bedrock",
     feature = "meta",
-    feature = "meshy"
+    feature = "meshy",
+    feature = "openrouter"
 ))]
 pub(crate) mod media;
 pub mod meshy;

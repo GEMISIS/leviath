@@ -53,8 +53,10 @@ fn the_media_models_are_known_by_name_and_sized_as_media() {
     ] {
         assert_eq!(kind(prompted), Some(Kind::Prompted), "{prompted}");
     }
+    assert_eq!(kind("gemini-omni-1.2-flash"), Some(Kind::Omni));
     assert_eq!(kind("gemini-3.5-flash"), None);
     assert!(CATALOG.iter().all(|(id, _)| kind(id).is_some()));
+    assert!(!adjusted("gemini-omni-1.2-flash", crate::ModelCapabilities::default()).supports_tools);
 
     let listed = crate::ModelCapabilities {
         max_context_tokens: 480,
@@ -526,4 +528,203 @@ async fn a_veo_call_made_again_polls_the_operation_it_started() {
         .expect("the video it paid for");
     assert_eq!(response.parts[0].bytes, b"MP4");
     assert_eq!(bodies.lock().unwrap().len(), 1, "one poll, no start");
+}
+
+const OMNI: &str = "gemini-omni-1.2-flash";
+
+/// The answer an omni model gives, as measured: a signed thought, then the
+/// clip inline in a `model_output` step, and usage by the token.
+fn omni_reply(content: Value) -> Vec<u8> {
+    serde_json::json!({
+        "status": "completed",
+        "usage": {
+            "total_input_tokens": 12,
+            "total_cached_tokens": 2,
+            "total_output_tokens": 5793,
+            "total_thought_tokens": 589
+        },
+        "steps": [
+            { "type": "thought", "signature": "sig" },
+            { "type": "model_output", "content": content },
+            { "type": "model_output" }
+        ]
+    })
+    .to_string()
+    .into_bytes()
+}
+
+#[tokio::test]
+async fn an_omni_model_is_asked_for_a_video_with_no_tools_and_answers_inline() {
+    let (url, bodies) = spawn_mock_sequence(vec![(
+        200,
+        "OK",
+        omni_reply(serde_json::json!([
+            { "type": "video", "mime_type": "video/mp4", "data": "TVA0" }
+        ])),
+    )])
+    .await;
+    let mut asked = request(
+        OMNI,
+        "a red ball",
+        vec![image_part()],
+        serde_json::json!({
+            "duration": "3s", "aspect_ratio": "9:16", "resolution": "4K", "seed": 7
+        }),
+    );
+    // What the stage carries is not what the model is sent: it refuses any
+    // function declaration, and reads no system instruction.
+    asked.tools = vec![leviath_core::Tool {
+        name: "submit_output".into(),
+        description: String::new(),
+        parameters: serde_json::json!({}),
+    }];
+    let response = provider(&url).infer(&asked).await.expect("a video");
+    assert_eq!(response.parts[0].bytes, b"MP4");
+    assert_eq!(response.parts[0].name.as_deref(), Some("video-1.mp4"));
+    assert!(
+        response.content.contains("video-1.mp4"),
+        "{}",
+        response.content
+    );
+    assert_eq!(response.tokens_used.prompt_tokens, 10);
+    assert_eq!(response.tokens_used.cached_tokens, 2);
+    assert_eq!(response.tokens_used.completion_tokens, 5793 + 589);
+    let body: Value = serde_json::from_str(&bodies.lock().unwrap()[0]).unwrap();
+    assert!(body.get("tools").is_none(), "{body}");
+    assert!(body.get("system_instruction").is_none(), "{body}");
+    assert!(body.get("stream").is_none(), "{body}");
+    assert_eq!(body["store"], false);
+    assert_eq!(
+        body["response_format"],
+        serde_json::json!({
+            "type": "video", "duration": "3s", "aspect_ratio": "9:16", "resolution": "4k"
+        })
+    );
+    assert_eq!(body["generation_config"]["seed"], 7);
+    let content = &body["input"][0]["content"];
+    assert_eq!(content[0]["text"], "a red ball");
+    assert_eq!(content[1]["type"], "image");
+
+    let bare = omni_body(&request(OMNI, "a red ball", vec![], Value::Null)).unwrap();
+    assert_eq!(
+        bare["response_format"],
+        serde_json::json!({ "type": "video" })
+    );
+    assert!(bare.get("generation_config").is_none());
+}
+
+/// A large clip arrives as a `uri` fetched with the key, an item may name no
+/// type, and the streaming path hands both on in its one chunk.
+#[tokio::test]
+async fn an_omni_clip_behind_a_uri_is_downloaded() {
+    use tokio_stream::StreamExt as _;
+    let video =
+        spawn_mock_server_with_headers(200, "OK", "Content-Type: video/mp4\r\n", b"BIG".to_vec())
+            .await;
+    let (url, _) = spawn_mock_sequence(vec![(
+        200,
+        "OK",
+        omni_reply(serde_json::json!([
+            { "type": "text", "text": "" },
+            { "type": "video", "uri": video },
+            { "type": "video", "mime_type": "video/webm", "data": "V0VC" },
+            { "type": "video" }
+        ])),
+    )])
+    .await;
+    let mut stream = provider(&url)
+        .infer_stream(&request(OMNI, "a red ball", vec![], Value::Null))
+        .await
+        .expect("a stream");
+    let chunk = stream.next().await.expect("one chunk").expect("the clips");
+    assert_eq!(chunk.parts.len(), 2);
+    assert_eq!(chunk.parts[0].bytes, b"BIG");
+    assert_eq!(chunk.parts[0].name.as_deref(), Some("video-1.mp4"));
+    assert_eq!(chunk.parts[1].mime_type.as_str(), "video/webm");
+    assert_eq!(chunk.parts[1].name.as_deref(), Some("video-2.bin"));
+}
+
+/// A reply with no media is the model's words, for the stage to judge.
+#[tokio::test]
+async fn an_omni_reply_without_media_is_its_text() {
+    let (url, _) = spawn_mock_sequence(vec![(
+        200,
+        "OK",
+        omni_reply(serde_json::json!([{ "type": "text", "text": "I cannot make that." }])),
+    )])
+    .await;
+    let response = provider(&url)
+        .infer(&request(OMNI, "a red ball", vec![], Value::Null))
+        .await
+        .expect("a reply");
+    assert!(response.parts.is_empty());
+    assert_eq!(response.content, "I cannot make that.");
+}
+
+#[tokio::test]
+async fn omni_failures_and_bad_answers_are_errors() {
+    let run = |status: u16, body: Vec<u8>| async move {
+        let (url, _) = spawn_mock_sequence(vec![(status, "X", body)]).await;
+        provider(&url)
+            .infer(&request(OMNI, "a red ball", vec![], Value::Null))
+            .await
+            .unwrap_err()
+            .to_string()
+    };
+    let said = run(
+        200,
+        br#"{"status":"failed","error":{"message":"quota"}}"#.to_vec(),
+    )
+    .await;
+    assert!(
+        said.contains("ended failed") && said.contains("quota"),
+        "{said}"
+    );
+    let said = run(200, br#"{"status":"cancelled"}"#.to_vec()).await;
+    assert!(said.contains("ended cancelled"), "{said}");
+    let said = run(200, b"not json".to_vec()).await;
+    assert!(said.contains("unreadable omni reply"), "{said}");
+    let said = run(
+        200,
+        omni_reply(serde_json::json!([{ "type": "video", "data": "!!" }])),
+    )
+    .await;
+    assert!(said.contains("undecodable omni media"), "{said}");
+    run(400, b"{}".to_vec()).await;
+    // The clip's uri cannot be fetched.
+    let said = run(
+        200,
+        omni_reply(serde_json::json!([{ "type": "video", "uri": "http://127.0.0.1:1/v" }])),
+    )
+    .await;
+    assert!(said.contains("downloading"), "{said}");
+
+    // Refused before anything is sent: no prompt, and a length that does
+    // not read.
+    let nothing_listens = provider("http://127.0.0.1:9");
+    let err = nothing_listens
+        .infer(&request(OMNI, "", vec![], Value::Null))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("needs a prompt"), "{err}");
+    let err = nothing_listens
+        .infer(&request(
+            OMNI,
+            "a red ball",
+            vec![],
+            serde_json::json!({ "duration": "long" }),
+        ))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("`duration`"), "{err}");
+    let err = nothing_listens
+        .infer(&request(
+            OMNI,
+            "a red ball",
+            vec![],
+            serde_json::json!({ "resolution": "8k" }),
+        ))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("`resolution`"), "{err}");
 }

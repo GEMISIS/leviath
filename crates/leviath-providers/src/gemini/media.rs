@@ -15,6 +15,18 @@
 //!   own instructions, tools or history is sent: the prompt, and the images a
 //!   stage hands an image model to edit. Speech arrives as raw 24 kHz PCM in
 //!   many deltas, which the stream joins into one WAV.
+//!
+//! Measured against the live API (2026-11-10):
+//!
+//! - **Omni** (`gemini-omni-*`): the Interactions route, not streamed, with
+//!   the prompt and the stage's image and video parts and a
+//!   `response_format` of `{type: "video", duration, aspect_ratio,
+//!   resolution}`. It refuses any function declaration (400, "Function
+//!   calling is not enabled for this model"). The answer is one JSON document
+//!   whose `steps` hold a `model_output` step, and the clip is a `video`
+//!   content item there, base64 under `data` or, for a large one, behind a
+//!   `uri` fetched with the key. Usage is in tokens (a three-second 360p clip
+//!   was 5,793 video output tokens), so the token rates price it.
 
 #[cfg(feature = "google")]
 use std::time::Duration;
@@ -40,6 +52,8 @@ pub(crate) enum Kind {
     /// An image, speech or music model on the Interactions route, sent the
     /// prompt alone.
     Prompted,
+    /// An omni model: a video from the Interactions route, in one answer.
+    Omni,
 }
 
 /// The media models this build names, for `lev validate` and a listing that
@@ -57,6 +71,8 @@ pub(crate) const CATALOG: &[(&str, &str)] = &[
     ("lyria-3.5", "Lyria 3.5"),
     ("lyria-3-pro-preview", "Lyria 3 Pro"),
     ("lyria-3-clip-preview", "Lyria 3 Clip"),
+    ("gemini-omni-1.2-flash", "Gemini Omni 1.2 Flash"),
+    ("gemini-omni-1.1-flash", "Gemini Omni 1.1 Flash"),
 ];
 
 /// The resolutions Veo 3.1 makes (<https://ai.google.dev/gemini-api/docs/veo>):
@@ -65,15 +81,23 @@ pub(crate) const CATALOG: &[(&str, &str)] = &[
 #[cfg(feature = "google")]
 const VEO_RESOLUTIONS: &[&str] = &["720p", "1080p", "4k"];
 
-/// The aspect ratios Veo 3.1 makes.
+/// The aspect ratios Veo 3.1 and the omni models make.
 #[cfg(feature = "google")]
 const VEO_ASPECT_RATIOS: &[&str] = &["16:9", "9:16"];
+
+/// The resolutions an omni model makes
+/// (<https://ai.google.dev/gemini-api/docs/omni>).
+#[cfg(feature = "google")]
+const OMNI_RESOLUTIONS: &[&str] = &["360p", "720p", "1080p", "4k"];
 
 /// The media kind `model` is, or `None` for a chat model.
 pub(crate) fn kind(model: &str) -> Option<Kind> {
     let m = model.to_ascii_lowercase();
     if m.starts_with("veo") {
         return Some(Kind::Video);
+    }
+    if m.starts_with("gemini-omni") {
+        return Some(Kind::Omni);
     }
     let prompted = m.contains("-image")
         || m.starts_with("nano-banana")
@@ -107,17 +131,7 @@ pub(crate) fn adjusted(
 /// (`image_config`), and `temperature` and `seed`.
 #[cfg(feature = "google")]
 pub(crate) fn prompted_body(request: &InferenceRequest) -> Value {
-    let mut content = vec![json!({ "type": "text", "text": media::request_text(request) })];
-    for message in &request.messages {
-        if let MessageContent::Blocks(blocks) = &message.content {
-            content.extend(
-                blocks
-                    .iter()
-                    .filter(|b| matches!(b, ContentBlock::Mime { data, .. } if !data.is_empty()))
-                    .filter_map(crate::mime::gemini_part),
-            );
-        }
-    }
+    let content = prompt_content(request);
     let mut generation = Map::new();
     let voice = media::extra_str(request, "voice");
     let language = media::extra_str(request, "language");
@@ -160,6 +174,60 @@ pub(crate) fn prompted_body(request: &InferenceRequest) -> Value {
     Value::Object(body)
 }
 
+/// What a media model on the Interactions route is sent as its one user
+/// turn: the request's text, then every stored part the stage handed it.
+#[cfg(feature = "google")]
+fn prompt_content(request: &InferenceRequest) -> Vec<Value> {
+    let mut content = vec![json!({ "type": "text", "text": media::request_text(request) })];
+    for message in &request.messages {
+        if let MessageContent::Blocks(blocks) = &message.content {
+            content.extend(
+                blocks
+                    .iter()
+                    .filter(|b| matches!(b, ContentBlock::Mime { data, .. } if !data.is_empty()))
+                    .filter_map(crate::mime::gemini_part),
+            );
+        }
+    }
+    content
+}
+
+/// The Interactions body for an omni model: the prompt and the stage's parts,
+/// and the video it is asked for. No system instruction, no tools, no
+/// history, and not streamed.
+///
+/// Parameters: `duration` (or `duration_seconds`), `aspect_ratio` and
+/// `resolution`, each refused when it does not read, since each is paid for;
+/// and `seed`.
+#[cfg(feature = "google")]
+pub(crate) fn omni_body(request: &InferenceRequest) -> Result<Value> {
+    let mut format = Map::new();
+    format.insert("type".into(), json!("video"));
+    if let Some(seconds) = media::extra_seconds(request, &["duration", "duration_seconds"])? {
+        format.insert("duration".into(), json!(format!("{seconds}s")));
+    }
+    for (key, allowed) in [
+        ("aspect_ratio", VEO_ASPECT_RATIOS),
+        ("resolution", OMNI_RESOLUTIONS),
+    ] {
+        if let Some(value) = media::extra_choice(request, key, allowed)? {
+            format.insert(key.into(), json!(value));
+        }
+    }
+    let mut body = Map::new();
+    body.insert("model".into(), json!(request.model));
+    body.insert(
+        "input".into(),
+        json!([{ "type": "user_input", "content": prompt_content(request) }]),
+    );
+    body.insert("store".into(), json!(false));
+    body.insert("response_format".into(), Value::Object(format));
+    if let Some(seed) = media::extra_i64(request, "seed") {
+        body.insert("generation_config".into(), json!({ "seed": seed }));
+    }
+    Ok(Value::Object(body))
+}
+
 /// `stream` with its closing chunk priced at `unit` for every file the stream
 /// handed on: a model billed by the clip (Lyria) reports no token cost, and
 /// its usage alone would record the call as free.
@@ -187,6 +255,125 @@ pub(crate) fn priced_by_unit(
 
 #[cfg(feature = "google")]
 impl super::GeminiProvider {
+    /// Ask an omni model for a video and keep what its answer holds.
+    ///
+    /// A reply with no media in it is handed back as the text it is (a
+    /// refusal says why there), for the stage to judge.
+    pub(super) async fn omni(&self, request: &InferenceRequest) -> Result<InferenceResponse> {
+        if media::request_text(request).is_empty() {
+            return Err(ProviderError::InvalidResponse(format!(
+                "google/{} needs a prompt: the stage handed it no text",
+                request.model
+            )));
+        }
+        let body = omni_body(request)?;
+        let response = crate::openai_compat::send_chat_request(
+            &self.client,
+            "gemini",
+            &format!("{}/interactions", self.base_url),
+            &self.headers(),
+            &body,
+            self.rate_limiter.as_ref(),
+            Some(
+                request
+                    .request_timeout_secs
+                    .unwrap_or(media::DEFAULT_TASK_SECS),
+            ),
+        )
+        .await?;
+        // The clip rides in the answer, so the answer is read under the
+        // download cap, not the one a JSON reply has.
+        let reply = media::body_bytes(response).await.and_then(|bytes| {
+            serde_json::from_slice::<Value>(&bytes)
+                .map_err(|e| ProviderError::InvalidResponse(format!("unreadable omni reply: {e}")))
+        })?;
+        let status = reply.get("status").and_then(Value::as_str);
+        if matches!(status, Some("failed" | "cancelled")) {
+            return Err(ProviderError::ApiError(format!(
+                "the interaction ended {}: {}",
+                status.unwrap_or_default(),
+                reply.get("error").map(Value::to_string).unwrap_or_default()
+            )));
+        }
+
+        // Gathered before the first download: a lazy walk of the answer does
+        // not cross an await.
+        let mut items: Vec<&Value> = Vec::new();
+        for step in reply
+            .get("steps")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if step.get("type").and_then(Value::as_str) == Some("model_output") {
+                items.extend(
+                    step.get("content")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten(),
+                );
+            }
+        }
+        let mut text = String::new();
+        let mut parts = Vec::new();
+        for item in items {
+            if item.get("type").and_then(Value::as_str) == Some("text") {
+                text.push_str(item.get("text").and_then(Value::as_str).unwrap_or_default());
+                continue;
+            }
+            let bytes = match (
+                item.get("data").and_then(Value::as_str),
+                item.get("uri").and_then(Value::as_str),
+            ) {
+                (Some(data), _) => base64::engine::general_purpose::STANDARD
+                    .decode(data)
+                    .map_err(|e| {
+                        ProviderError::InvalidResponse(format!("undecodable omni media: {e}"))
+                    })?,
+                (None, Some(uri)) => self.download_media(uri).await?,
+                (None, None) => continue,
+            };
+            // An omni model makes MP4; a type the answer names wins.
+            let mime_type = item
+                .get("mime_type")
+                .and_then(Value::as_str)
+                .and_then(|mime| leviath_core::mime::MimeType::parse(mime).ok())
+                .unwrap_or_else(|| {
+                    leviath_core::mime::MimeType::parse("video/mp4")
+                        .expect("video/mp4 is a mime type")
+                });
+            let name = format!(
+                "{}-{}.{}",
+                mime_type.as_str().split('/').next().unwrap_or("part"),
+                parts.len() + 1,
+                media::extension(mime_type.as_str())
+            );
+            parts.push(leviath_core::mime::Blob::new(mime_type, bytes).named(&name));
+        }
+
+        let count = |key: &str| {
+            reply
+                .pointer(&format!("/usage/{key}"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize
+        };
+        let cached = count("total_cached_tokens");
+        let usage = crate::provider::TokenUsage::new(
+            count("total_input_tokens").saturating_sub(cached),
+            cached,
+            0,
+            count("total_output_tokens") + count("total_thought_tokens"),
+        );
+        let content = match text.trim().is_empty() && !parts.is_empty() {
+            true => media::summary(&format!("google/{}", request.model), &parts),
+            false => text,
+        };
+        Ok(InferenceResponse {
+            tokens_used: usage,
+            ..media::response(content, parts, None)
+        })
+    }
+
     /// Make a Veo video, wait for it, and keep it.
     pub(super) async fn video(
         &self,
