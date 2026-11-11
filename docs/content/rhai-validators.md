@@ -156,7 +156,12 @@ the stage's tools if they are narrowed. The call answers to the same `tool_permi
 naming it.
 
 Nobody can approve a call in the middle of a submission. So a validator tool set to `deny` or
-`ask` refuses the spawn too. Set it to `allow`. A prompt that only arises at run time, from the
+`ask` refuses the spawn too. Set it to `allow`. A graph's own `tool_permissions` can do that
+only for `web_search` and `web_fetch`, or for any tool once the user turns on `[security]
+allow_blueprint_permissions`, and never above a value the user set themselves. For any other tool,
+such as an MCP tool, allow it in the launch's `allow` (`--allow` on the command line) or, for an
+installed blueprint, under `[agent_tool_permissions.<agent>]`. The refusal's hint names the ones
+that apply. A prompt that only arises at run time, from the
 taint gate or a permission changed under a resumed run, is never put to anyone: the tool could not
 run, and `on_validator_error` decides.
 

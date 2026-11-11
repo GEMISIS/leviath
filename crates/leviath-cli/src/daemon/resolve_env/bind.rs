@@ -185,7 +185,9 @@ fn validator_tool_refusals(spec: &RunSpec, tools: &AgentToolState) -> SpawnIssue
             written: 0,
             stage_index,
         };
-        let why = match crate::daemon::tool_service::decide_call(tools, &call, &ctx) {
+        let verdict = crate::daemon::tool_service::decide_call(tools, &call, &ctx);
+        let asks = matches!(verdict, leviath_runtime::pipeline::ToolVerdict::Ask { .. });
+        let why = match verdict {
             leviath_runtime::pipeline::ToolVerdict::Run { .. } => continue,
             // Its first sentence: the rest is written for a run already
             // going ("resume this run"), and the hint below says what to do
@@ -215,11 +217,19 @@ fn validator_tool_refusals(spec: &RunSpec, tools: &AgentToolState) -> SpawnIssue
                     validator.tool
                 ),
             )
-            .hint(format!(
-                "set `{} = \"allow\"` in tool_permissions, or name a tool the stage may call \
-                 unprompted",
-                validator.tool
-            )),
+            .hint(match asks {
+                true => super::validator_hint::ask_hint(
+                    tools,
+                    stage_index,
+                    validator.tool.as_str(),
+                    agent_name(spec),
+                ),
+                false => format!(
+                    "set `{} = \"allow\"` in tool_permissions, or name a tool the stage may \
+                     call unprompted",
+                    validator.tool
+                ),
+            }),
         );
     }
     issues

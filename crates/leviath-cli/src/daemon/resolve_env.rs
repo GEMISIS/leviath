@@ -48,6 +48,7 @@ use crate::daemon::tool_service::CliToolService;
 mod bind;
 mod layers;
 mod seeds;
+mod validator_hint;
 
 /// The longest part of a title a run id is minted from.
 const RUN_ID_STEM_CHARS: usize = 48;
