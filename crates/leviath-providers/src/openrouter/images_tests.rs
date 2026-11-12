@@ -132,6 +132,10 @@ async fn an_images_only_model_is_drawn_on_the_images_api() {
     assert!(body.get("ignored").is_none());
     assert!(body.get("response_format").is_none());
     assert!(body.get("messages").is_none(), "not a chat body");
+    assert!(
+        body.get("output_format").is_none(),
+        "no format known for the model, none asked for"
+    );
     let reference = &body["input_references"][0];
     assert_eq!(reference["type"], "image_url");
     assert!(
@@ -289,4 +293,94 @@ async fn a_failed_draw_is_an_error() {
     );
     let empty = gateway.infer(&request(FLUX)).await.unwrap_err();
     assert!(empty.to_string().contains("no image"), "{empty}");
+}
+
+const KLEIN: &str = "black-forest-labs/flux-3-image-klein";
+
+/// `GET /images/models` in the shape the live listing has (2026-11-11),
+/// trimmed: klein lists `jpeg` and `png`, flux-3-image no format at all,
+/// and one model the main listing never named.
+fn images_listing() -> (u16, &'static str, Vec<u8>) {
+    let listing = json!({ "data": [
+        { "id": KLEIN, "supported_parameters": {
+            "aspect_ratio": { "type": "enum", "values": ["1:1", "16:9"] },
+            "output_format": { "type": "enum", "values": ["jpeg", "png"] },
+            "n": { "type": "range", "min": 1, "max": 1 } } },
+        { "id": FLUX, "supported_parameters": { "seed": { "type": "boolean" } } },
+        { "id": "acme/unnamed", "supported_parameters": {
+            "output_format": { "type": "enum", "values": ["webp"] } } },
+        { "name": "no id" }
+    ] });
+    (200, "OK", listing.to_string().into_bytes())
+}
+
+/// The main listing, the zero-retention list, then the images listing:
+/// priming's three reads, in order.
+fn primed_by(images: (u16, &'static str, Vec<u8>)) -> Vec<(u16, &'static str, Vec<u8>)> {
+    let models = json!({ "data": [
+        { "id": KLEIN, "architecture": { "output_modalities": ["image"] }, "endpoints": ["/api/v1/images"] },
+        { "id": FLUX, "architecture": { "output_modalities": ["image"] }, "endpoints": ["/api/v1/images"] }
+    ] });
+    vec![
+        (200, "OK", models.to_string().into_bytes()),
+        (200, "OK", br#"{"data":[]}"#.to_vec()),
+        images,
+    ]
+}
+
+/// Priming reads the images listing beside `/models`: each model it names
+/// keeps the formats it lists (none, for one that lists none), and a model
+/// the main listing did not name is not added.
+#[tokio::test]
+async fn priming_learns_each_image_models_formats() {
+    let (url, _) = spawn_mock_sequence(primed_by(images_listing())).await;
+    let gateway = provider(&url);
+    gateway.prime_capabilities().await.expect("primes");
+    let formats = |id: &str| gateway.learned.get(id).and_then(|m| m.image_formats);
+    assert_eq!(formats(KLEIN), Some(vec!["jpeg".into(), "png".into()]));
+    assert_eq!(formats(FLUX), Some(vec![]));
+    assert!(!gateway.learned.contains("acme/unnamed"));
+}
+
+/// An images listing that fails or has no `data` does not fail priming,
+/// and leaves every model's formats unknown.
+#[tokio::test]
+async fn an_unreadable_images_listing_is_no_formats_and_no_failure() {
+    for broken in [
+        (500, "Internal Server Error", b"{}".to_vec()),
+        (200, "OK", br#"{"models":[]}"#.to_vec()),
+    ] {
+        let (url, _) = spawn_mock_sequence(primed_by(broken)).await;
+        let gateway = provider(&url);
+        gateway.prime_capabilities().await.expect("primes");
+        assert!(gateway.learned.contains(KLEIN));
+        assert_eq!(gateway.learned.get(KLEIN).unwrap().image_formats, None);
+    }
+}
+
+/// A stage declaring `image/png` on a model that lists `png` asks for it;
+/// on a model that lists no format nothing is asked; a format the stage
+/// names itself wins.
+#[tokio::test]
+async fn the_declared_type_is_asked_for_in_a_format_the_model_lists() {
+    let mut sequence = primed_by(images_listing());
+    sequence.extend([drawn(), drawn(), drawn()]);
+    let (url, bodies) = spawn_mock_sequence(sequence).await;
+    let gateway = provider(&url);
+    gateway.prime_capabilities().await.expect("primes");
+    let declaring = |model: &str, extra: Value| InferenceRequest {
+        extra,
+        ..request(model)
+    };
+    let png = json!({ "output_mimes": ["image/webp", "image/png"] });
+    gateway.infer(&declaring(KLEIN, png.clone())).await.unwrap();
+    gateway.infer(&declaring(FLUX, png)).await.unwrap();
+    let named = json!({ "output_mimes": ["image/png"], "output_format": "jpeg" });
+    gateway.infer(&declaring(KLEIN, named)).await.unwrap();
+    let bodies = bodies.lock().unwrap().clone();
+    let format =
+        |i: usize| serde_json::from_str::<Value>(&bodies[i]).unwrap()["output_format"].clone();
+    assert_eq!(format(3), "png");
+    assert_eq!(format(4), Value::Null);
+    assert_eq!(format(5), "jpeg");
 }

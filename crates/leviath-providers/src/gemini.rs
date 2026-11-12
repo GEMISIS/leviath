@@ -571,6 +571,7 @@ fn parse_native_entry(item: &serde_json::Value) -> Option<(String, LearnedModel)
             input_types: None,
             output_types: None,
             endpoints: None,
+            image_formats: None,
         },
     ))
 }

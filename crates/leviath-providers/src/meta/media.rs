@@ -68,6 +68,7 @@ pub(crate) async fn run(
                     unit,
                     tokens: None,
                     response_format: true,
+                    formats: None,
                 },
                 request,
             )

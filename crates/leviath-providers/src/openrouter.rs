@@ -1166,6 +1166,8 @@ impl Provider for OpenRouterProvider {
                 tracing::debug!(error = %e, "OpenRouter's zero-retention endpoints could not be read")
             }
         }
+        // Best effort too: which image formats each image model takes.
+        self.read_image_formats().await;
         Ok(())
     }
 

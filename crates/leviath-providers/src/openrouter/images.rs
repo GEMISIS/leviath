@@ -51,6 +51,24 @@ pub(super) enum Sent {
     Drawn(InferenceResponse),
 }
 
+/// The `output_format` values an images listing entry says its endpoint
+/// accepts: `supported_parameters.output_format.values`, an enum the guide
+/// calls definitive. Empty when the entry names none, which the guide reads
+/// as unsupported.
+pub(super) fn accepted_formats(entry: &serde_json::Value) -> Vec<String> {
+    entry
+        .pointer("/supported_parameters/output_format/values")
+        .and_then(|v| v.as_array())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Whether a listing's `endpoints` say the model is served on the Images API
 /// and not on chat.
 pub(super) fn images_only(endpoints: &[String]) -> bool {
@@ -92,6 +110,43 @@ impl OpenRouterProvider {
         }
     }
 
+    /// Read `GET /images/models` into the catalogue: the `output_format`
+    /// values each image model's endpoint accepts. Called by priming after
+    /// `/models` has filled the catalogue, so once per prime and never per
+    /// draw. Best effort: unread, no format is asked for and the provider's
+    /// default stands, as before.
+    pub(super) async fn read_image_formats(&self) {
+        match self.fetch_image_formats().await {
+            Ok(n) => tracing::debug!(models = n, "read OpenRouter's image output formats"),
+            Err(e) => {
+                tracing::debug!(error = %e, "OpenRouter's image models could not be read")
+            }
+        }
+    }
+
+    /// [`Self::read_image_formats`], answering how many models it amended.
+    async fn fetch_image_formats(&self) -> Result<usize> {
+        let body = crate::provider::fetch_listing(
+            &self.client,
+            &format!("{}/images/models", self.base_url),
+            &self.listing_headers(),
+            Some(crate::provider::SIDE_CALL_TIMEOUT_SECS),
+        )
+        .await?;
+        let rows = body
+            .get("data")
+            .and_then(|d| d.as_array())
+            .ok_or_else(|| ProviderError::InvalidResponse("Missing 'data' array".to_string()))?;
+        Ok(rows
+            .iter()
+            .filter_map(|row| row.get("id").and_then(|v| v.as_str()).map(|id| (id, row)))
+            .filter(|(id, row)| {
+                let formats = accepted_formats(row);
+                self.learned.amend(id, |m| m.image_formats = Some(formats))
+            })
+            .count())
+    }
+
     /// Whether chat's refusal `error` says the model is served on the Images
     /// API; if so the model is remembered as one, so this call and every
     /// later one go there.
@@ -131,6 +186,13 @@ impl OpenRouterProvider {
             model: self.listed_id(gateway_id(&request.model)),
             ..request.clone()
         };
+        // The formats the images listing says this model takes; none known,
+        // none asked for.
+        let formats = self
+            .learned
+            .get(&request.model)
+            .and_then(|m| m.image_formats)
+            .unwrap_or_default();
         images::run(
             &endpoint,
             &images::Route {
@@ -142,6 +204,7 @@ impl OpenRouterProvider {
                 unit: None,
                 tokens: None,
                 response_format: false,
+                formats: Some(&formats),
             },
             &request,
         )

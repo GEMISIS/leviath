@@ -11,7 +11,10 @@
 //! ```
 //!
 //! `LEVIATH_LIVE_OPENROUTER_IMAGE_MODEL` names another model to draw with
-//! (default `black-forest-labs/flux-3-image-klein`, one chat refuses).
+//! (default `black-forest-labs/flux-3-image-klein`, one chat refuses). The
+//! stage asks for `image/png`: the default model's images listing names
+//! `png`, so the part must be PNG; another model must answer PNG only when
+//! its listing names `png`.
 
 #![cfg(feature = "openrouter")]
 
@@ -58,10 +61,23 @@ async fn one_picture_comes_back_from_the_images_api() {
         response.tokens_used.reported_cost_usd
     );
     let picture = response.parts.first().expect("one part");
-    assert!(
-        picture.mime_type.as_str().starts_with("image/"),
-        "{} is not an image",
-        picture.mime_type.as_str()
-    );
+    println!("part type: {}", picture.mime_type.as_str());
     assert!(!picture.bytes.is_empty(), "an empty picture");
+    // The stage asked for PNG: a model whose images listing names `png`
+    // must answer PNG; any other may answer in its own default.
+    let formats = gateway
+        .learned_models()
+        .and_then(|learned| learned.listed(&model))
+        .and_then(|m| m.image_formats)
+        .unwrap_or_default();
+    println!("formats the images listing names for {model}: {formats:?}");
+    if formats.iter().any(|f| f == "png") {
+        assert_eq!(picture.mime_type.as_str(), "image/png");
+    } else {
+        assert!(
+            picture.mime_type.as_str().starts_with("image/"),
+            "{} is not an image",
+            picture.mime_type.as_str()
+        );
+    }
 }

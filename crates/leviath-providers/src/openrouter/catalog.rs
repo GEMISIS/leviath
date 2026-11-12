@@ -170,6 +170,8 @@ pub(crate) fn parse_entry(entry: &serde_json::Value) -> Option<(String, LearnedM
                         .map(str::to_string)
                         .collect()
                 }),
+            // Not in this listing: `GET /images/models` fills it afterwards.
+            image_formats: None,
         },
     ))
 }
