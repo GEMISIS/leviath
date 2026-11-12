@@ -6,8 +6,7 @@
 
 use crate::provider::{
     ContentBlock, InferenceRequest, InferenceResponse, MessageContent, ProviderError, Result,
-    StreamChunk, TokenUsage, ToolCall, ToolCallDelta, check_http_response,
-    parse_openai_finish_reason,
+    StreamChunk, ToolCall, ToolCallDelta, check_http_response, parse_openai_finish_reason,
 };
 use crate::rate_limit::RateLimiter;
 use futures_core::Stream;
@@ -711,7 +710,12 @@ pub fn merge_extra_params(
 /// upstream provider used, so it feeds [`UnavailableReason::classify`] exactly
 /// as a real status line would - which is what lets a 402 delivered this way
 /// still fail over and trip the circuit breaker instead of killing the run.
+///
+/// All three are inside a reply the provider had opened, buffered or
+/// streamed, and the call in flight is told so: the request was taken, and
+/// a status named after that is not an outright refusal that cost nothing.
 pub(crate) fn openai_error_envelope(err: &serde_json::Value) -> ProviderError {
+    crate::call_trace::note_began();
     let message = err
         .get("message")
         .and_then(|v| v.as_str())
@@ -874,44 +878,20 @@ pub fn parse_openai_response(body: &serde_json::Value) -> Result<InferenceRespon
     let content_is_reasoning = promoted.is_some();
     let content = promoted.unwrap_or(content);
 
-    let usage = body.get("usage");
-    let prompt_tokens = usage
-        .and_then(|u| u.get("prompt_tokens"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as usize;
-    let completion_tokens = usage
-        .and_then(|u| u.get("completion_tokens"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as usize;
-
     let finish_reason = choice
         .get("finish_reason")
         .and_then(|v| v.as_str())
         .unwrap_or("stop");
 
-    let cached_tokens = usage
-        .and_then(|u| u.get("prompt_tokens_details"))
-        .and_then(|d| d.get("cached_tokens"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as usize;
-    // Reported alongside `cached_tokens` by gateways that front a provider
-    // charging a write premium - OpenRouter does for Anthropic models. It was
-    // hardcoded to zero, so a run that paid the 1.25x write rate recorded none
-    // of it and its token accounting understated what it cost.
-    let cache_write_tokens = usage
-        .and_then(|u| u.get("prompt_tokens_details"))
-        .and_then(|d| d.get("cache_write_tokens"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as usize;
-    // What the gateway says this call actually cost. OpenRouter reports it in
-    // USD when usage accounting is on; plain OpenAI omits the field entirely,
-    // which is the `None` case and leaves the caller to fall back to rates.
-    //
-    // Taken verbatim and never recomputed: this is the figure that reflects
-    // whatever the account actually pays - negotiated rates, promotional
-    // pricing, the gateway's own margin, a model rerouted to a different
-    // backend mid-request - none of which is visible from a published rate card.
-    let reported_cost_usd = usage.and_then(|u| u.get("cost")).and_then(|v| v.as_f64());
+    // Everything the reply says of what the call used and how it is billed,
+    // read by the one reader a stream of the same call uses.
+    let tokens_used = crate::usage::with_envelope(
+        crate::usage::openai_chat(body.get("usage").unwrap_or(&serde_json::Value::Null)),
+        body,
+    );
+    // A reply that parsed is a call the provider finished: its usage stands
+    // whatever is made of the reply after this.
+    crate::call_trace::note_whole_usage(&tokens_used);
 
     Ok(InferenceResponse {
         // The same text, by the same precedence, that a stream shows as it
@@ -920,25 +900,7 @@ pub fn parse_openai_response(body: &serde_json::Value) -> Result<InferenceRespon
         content,
         tool_calls,
         parts: crate::mime_output::message_blobs(message),
-        // The OpenAI shape reports a `prompt_tokens` that INCLUDES its
-        // `prompt_tokens_details` breakdown, where Anthropic reports the three
-        // separately. `TokenUsage::prompt_tokens` is the fresh figure, so the
-        // breakdown comes back out here - otherwise cached tokens are counted
-        // once at the full input rate and again at the cache rate, and the same
-        // arithmetic cannot be right for both providers.
-        //
-        // Saturating: a gateway whose details exceed its own total is
-        // malformed, and clamping to zero is better than wrapping to a
-        // nonsensical figure.
-        tokens_used: TokenUsage::new(
-            prompt_tokens
-                .saturating_sub(cached_tokens)
-                .saturating_sub(cache_write_tokens),
-            cached_tokens,
-            cache_write_tokens,
-            completion_tokens,
-        )
-        .with_reported_cost(reported_cost_usd),
+        tokens_used,
         finish_reason: parse_openai_finish_reason(finish_reason),
         reasoning: None,
         content_is_reasoning,
@@ -1048,44 +1010,16 @@ pub(crate) fn parse_sse_event_keeping(
     // to render; anything else without a choice is skipped.
     let Some(choice) = choice else {
         if let Some(usage) = json.get("usage") {
-            let prompt_tokens = usage
-                .get("prompt_tokens")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize;
-            let completion_tokens = usage
-                .get("completion_tokens")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize;
-            let cached_tokens = usage
-                .get("prompt_tokens_details")
-                .and_then(|d| d.get("cached_tokens"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize;
-            let cache_write_tokens = usage
-                .get("prompt_tokens_details")
-                .and_then(|d| d.get("cache_write_tokens"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize;
             return Some(Some(Ok(StreamChunk {
                 reasoning_delta: None,
                 delta: String::new(),
                 tool_calls: Vec::new(),
-                // Same normalisation as the non-streaming path: the
-                // details come back out of `prompt_tokens` so the three
-                // input counts stay disjoint.
-                tokens: Some(
-                    TokenUsage::new(
-                        prompt_tokens
-                            .saturating_sub(cached_tokens)
-                            .saturating_sub(cache_write_tokens),
-                        cached_tokens,
-                        cache_write_tokens,
-                        completion_tokens,
-                    )
-                    // And the same cost passthrough: a choice-less usage
-                    // chunk is how OpenRouter reports what it charged.
-                    .with_reported_cost(usage.get("cost").and_then(|v| v.as_f64())),
-                ),
+                // A choice-less usage chunk is how OpenRouter reports what
+                // it charged; read as the buffered path reads it.
+                tokens: Some(crate::usage::with_envelope(
+                    crate::usage::openai_chat(usage),
+                    &json,
+                )),
                 finish_reason: None,
                 reasoning: None,
                 parts: Vec::new(),
@@ -1133,37 +1067,12 @@ pub(crate) fn parse_sse_event_keeping(
         .and_then(|v| v.as_str())
         .map(parse_openai_finish_reason);
 
-    // Check for usage in the chunk
-    let tokens = json.get("usage").map(|usage| {
-        let pt = usage
-            .get("prompt_tokens")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
-        let ct = usage
-            .get("completion_tokens")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
-        let cached = usage
-            .get("prompt_tokens_details")
-            .and_then(|d| d.get("cached_tokens"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
-        let written = usage
-            .get("prompt_tokens_details")
-            .and_then(|d| d.get("cache_write_tokens"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
-        // Same normalisation and the same cost passthrough as the
-        // buffered path, so streaming a request does not report it
-        // differently from buffering it.
-        TokenUsage::new(
-            pt.saturating_sub(cached).saturating_sub(written),
-            cached,
-            written,
-            ct,
-        )
-        .with_reported_cost(usage.get("cost").and_then(|v| v.as_f64()))
-    });
+    // Usage riding on a chunk that also carries a choice, read as the
+    // buffered path reads it. A `null` there is no usage, not a zero.
+    let tokens = json
+        .get("usage")
+        .filter(|usage| !usage.is_null())
+        .map(|usage| crate::usage::with_envelope(crate::usage::openai_chat(usage), &json));
 
     leviath_core::sync::lock(kept).absorb(&json, delta);
 
@@ -2004,6 +1913,32 @@ mod tests {
         // A bad model id is this request's problem, not the provider's, so it
         // must not fail over or count against the circuit breaker.
         assert!(err.unavailable_reason().is_none(), "{err}");
+    }
+
+    /// A buffered reply that carries an error was opened by the provider
+    /// before it said so: the call's trace knows the reply began, so the
+    /// status inside it is not read as a request that was never run.
+    #[tokio::test]
+    async fn an_error_inside_a_buffered_reply_says_the_reply_began() {
+        let trace = crate::call_trace::CallTrace::new();
+        let body = serde_json::json!({
+            "error": { "code": 429, "message": "upstream rate limited" }
+        });
+        let err = trace
+            .scope(async { parse_openai_response(&body).unwrap_err() })
+            .await;
+        assert!(err.refused_unrun(), "by its status alone it reads refused");
+        assert!(trace.seen().began, "and the trace says a reply had opened");
+
+        // A reply with no error in it leaves the trace as it was.
+        let plain = crate::call_trace::CallTrace::new();
+        let ok = serde_json::json!({
+            "choices": [{ "message": { "content": "hi" }, "finish_reason": "stop" }]
+        });
+        plain
+            .scope(async { parse_openai_response(&ok).unwrap() })
+            .await;
+        assert!(!plain.seen().began);
     }
 
     #[test]

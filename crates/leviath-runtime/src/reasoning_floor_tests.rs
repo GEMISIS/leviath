@@ -268,6 +268,7 @@ impl Provider for AlwaysThinks {
                 cached_tokens: 0,
                 cache_write_tokens: 0,
                 reported_cost_usd: None,
+                terms: Default::default(),
             },
             finish_reason: leviath_providers::FinishReason::Complete,
             reasoning: None,
@@ -309,6 +310,7 @@ async fn title_call(
             model: model.to_string(),
             request: request(model, extra),
             permit: pools.try_acquire("openrouter", model).expect("free"),
+            ticket: None,
         },
         // One attempt: the refusal is answered outside the retry budget, so
         // a title still lands on a schedule that would retry nothing.

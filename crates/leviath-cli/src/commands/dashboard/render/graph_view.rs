@@ -466,6 +466,7 @@ regions = []
             clock_now: 0,
             graph: Some(stage_graph()),
             accepts_messages: true,
+            cost: String::new(),
         }
     }
 

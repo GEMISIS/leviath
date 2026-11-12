@@ -21,6 +21,8 @@ fn called(id: &str, on: &str, finish: Option<&str>) -> RunEvent {
         kind: Default::default(),
         stage: None,
         iteration: 0,
+        ending: Default::default(),
+        provider_call_id: None,
     }
 }
 

@@ -119,6 +119,7 @@ type ContentSummaryQuery = (
     &'static PendingContentSummary,
     Option<&'static CompactionSettings>,
     Option<&'static StageInference>,
+    Option<&'static crate::open_calls::OpenCalls>,
 );
 
 /// Dispatch: for each child with queued [`PendingContentSummary`] regions, build
@@ -134,7 +135,7 @@ pub(crate) fn dispatch_content_summary(
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
-    for (entity, state, pending, settings, inference) in agents.iter() {
+    for (entity, state, pending, settings, inference, open_calls) in agents.iter() {
         crate::tick_scope::enter(entity);
         if state.status != AgentStatus::Active {
             continue; // paused / cancelled - don't start new work
@@ -165,7 +166,7 @@ pub(crate) fn dispatch_content_summary(
             &stage,
             &stage.content_summary_outcomes,
             "content-summary",
-            entity,
+            (entity, state, open_calls),
             routes,
             requests,
         ) {
@@ -584,6 +585,7 @@ mod tests {
                     cached_tokens: 0,
                     cache_write_tokens: 0,
                     reported_cost_usd: None,
+                    terms: Default::default(),
                 },
                 finish_reason: FinishReason::Complete,
                 reasoning: None,
@@ -661,6 +663,7 @@ mod tests {
             wake: Arc::new(Notify::new()),
             runtime: Handle::current(),
             stream_inference: true,
+            spend: crate::open_calls::tests::sink(),
         });
         (world, cs_rx)
     }
@@ -899,11 +902,7 @@ mod tests {
         // A successful summary replaces the region's content.
         tx.send(CompactionOutcome {
             entity: e,
-            usage: Vec::new(),
-            provider_name: "p".to_string(),
-            model: "m".to_string(),
             result: Ok(vec![("task".to_string(), "SHORT".to_string())]),
-            pricing: None,
         })
         .unwrap();
         run_collect(&mut world);
@@ -925,22 +924,14 @@ mod tests {
             .id();
         tx.send(CompactionOutcome {
             entity: e2,
-            usage: Vec::new(),
-            provider_name: "p".to_string(),
-            model: "m".to_string(),
             result: Err(leviath_providers::ProviderError::Other("x".to_string())),
-            pricing: None,
         })
         .unwrap();
         // A stale (despawned) entity is skipped without panic.
         tx.send(CompactionOutcome {
             entity: Entity::from_raw_u32(9999)
                 .expect("a small literal index is always a valid entity id"),
-            usage: Vec::new(),
-            provider_name: "p".to_string(),
-            model: "m".to_string(),
             result: Ok(vec![("task".to_string(), "ignored".to_string())]),
-            pricing: None,
         })
         .unwrap();
         run_collect(&mut world);

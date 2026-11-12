@@ -57,6 +57,7 @@ mod layout4;
 mod layout5;
 mod layout6;
 mod layout7;
+mod layout8;
 mod legacy;
 mod manifest;
 mod migrate;

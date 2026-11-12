@@ -347,6 +347,9 @@ pub(crate) struct InferenceStage {
     /// Where completed *content-summary transform* jobs are reported (the
     /// Summarize context-transform lane - see `context_transform`).
     pub content_summary_outcomes: UnboundedSender<crate::compaction_bridge::CompactionOutcome>,
+    /// Where every trip to a provider reports what its call cost, however the
+    /// call ended (see [`crate::open_calls`]).
+    pub spend: crate::open_calls::SpendSink,
     /// Signalled when an inference completes, to wake the tick loop.
     pub wake: Arc<Notify>,
     /// Runtime the worker tasks are spawned onto.

@@ -249,6 +249,7 @@ impl Provider for Cfg {
                 cached_tokens: 0,
                 cache_write_tokens: 0,
                 reported_cost_usd: None,
+                terms: Default::default(),
             },
             finish_reason: leviath_providers::FinishReason::Complete,
             reasoning: None,
@@ -1361,6 +1362,7 @@ fn build_world(pools: InferencePools) -> (World, mpsc::UnboundedReceiver<Inferen
         wake: Arc::new(Notify::new()),
         runtime: Handle::current(),
         stream_inference: true,
+        spend: crate::open_calls::tests::sink(),
     });
     (world, rx)
 }
@@ -1918,6 +1920,7 @@ fn resp(text: &str) -> leviath_providers::InferenceResponse {
             cached_tokens: 0,
             cache_write_tokens: 0,
             reported_cost_usd: None,
+            terms: Default::default(),
         },
         finish_reason: leviath_providers::FinishReason::Complete,
         reasoning: None,
@@ -3541,7 +3544,7 @@ fn collect_inference_logs_a_produced_part_the_run_dropped() {
 }
 
 #[test]
-fn collect_inference_buffers_output_token_line_and_stage_tokens() {
+fn collect_inference_buffers_output_and_its_token_line() {
     let (mut world, tx) = world_with_results();
     // The ledger is keyed by stage name, so the state has to name the stage the
     // cursor points at. In a real run `enter_stage` sets both together.
@@ -3575,10 +3578,10 @@ fn collect_inference_buffers_output_token_line_and_stage_tokens() {
     let buf = world.get::<StageIoBuffer>(e).unwrap();
     assert_eq!(buf.output, vec![(1, "the plan".to_string())]);
     assert_eq!(buf.logs, vec![(1, "[Tokens: 5 in, 3 out]".to_string())]);
+    // What the call cost is not this system's to record: the trip that made
+    // it reports that itself (see `open_calls`).
     let led = world.get::<StageLedger>(e).unwrap();
-    assert_eq!(led.0[1].prompt_tokens, 5);
-    assert_eq!(led.0[1].completion_tokens, 3);
-    assert_eq!(led.0[1].cached_tokens, 2);
+    assert_eq!(led.0[1].prompt_tokens, 0);
 }
 
 // ─── requests the runtime must never build ───────────────────────────
@@ -5227,6 +5230,7 @@ impl Provider for FixedWindow {
                 cached_tokens: 0,
                 cache_write_tokens: 0,
                 reported_cost_usd: None,
+                terms: Default::default(),
             },
             finish_reason: leviath_providers::FinishReason::Complete,
             reasoning: None,
@@ -5375,44 +5379,6 @@ fn collect_drops_outcome_for_non_awaiting_agent() {
     // Untouched - the stale outcome was dropped.
     assert_eq!(world.get::<AgentState>(e).unwrap().iteration, 0);
     assert!(world.get::<ProcessResponse>(e).is_none());
-}
-
-#[test]
-fn collect_inference_accumulates_token_totals() {
-    let (mut world, tx) = world_with_results();
-    let e = world
-        .spawn((
-            agent_state(),
-            AwaitingInference,
-            crate::persistence::TokenTotals::default(),
-        ))
-        .id();
-    let mut r = resp("hi");
-    r.tokens_used = leviath_providers::TokenUsage {
-        prompt_tokens: 10,
-        completion_tokens: 5,
-        total_tokens: 15,
-        cached_tokens: 2,
-        cache_write_tokens: 1,
-        reported_cost_usd: None,
-    };
-    tx.send(InferenceOutcome {
-        latency: std::time::Duration::ZERO,
-        entity: e,
-        attempt_id: String::new(),
-        result: Ok(r),
-        pricing: None,
-        attempt: None,
-    })
-    .unwrap();
-
-    run_collect(&mut world);
-
-    let t = world.get::<crate::persistence::TokenTotals>(e).unwrap();
-    assert_eq!(t.prompt_tokens, 10);
-    assert_eq!(t.completion_tokens, 5);
-    assert_eq!(t.cached_tokens, 2);
-    assert_eq!(t.cache_write_tokens, 1);
 }
 
 // ── process-response routing ──
@@ -16045,11 +16011,7 @@ fn collect_compaction_stores_summary_and_clears_source() {
     let e = world.spawn((compacting_window(), AwaitingCompaction)).id();
     tx.send(CompactionOutcome {
         entity: e,
-        usage: Vec::new(),
-        provider_name: "p".to_string(),
-        model: "m".to_string(),
         result: Ok(vec![("conv".to_string(), "the summary".to_string())]),
-        pricing: None,
     })
     .unwrap();
 
@@ -16095,11 +16057,7 @@ fn collect_compaction_names_the_stored_parts_a_summary_replaced() {
     let e = world.spawn((window, AwaitingCompaction)).id();
     tx.send(CompactionOutcome {
         entity: e,
-        usage: Vec::new(),
-        provider_name: "p".to_string(),
-        model: "m".to_string(),
         result: Ok(vec![("conv".to_string(), "the summary".to_string())]),
-        pricing: None,
     })
     .unwrap();
 
@@ -16127,11 +16085,7 @@ fn collect_compaction_keeps_the_region_when_the_summary_is_empty() {
             .current_tokens;
         tx.send(CompactionOutcome {
             entity: e,
-            usage: Vec::new(),
-            provider_name: "p".to_string(),
-            model: "m".to_string(),
             result: Ok(vec![("conv".to_string(), summary.to_string())]),
-            pricing: None,
         })
         .unwrap();
 
@@ -16153,145 +16107,6 @@ fn collect_compaction_keeps_the_region_when_the_summary_is_empty() {
     }
 }
 
-/// Compaction is the largest uncounted cost a run had: a summarize call sees
-/// a whole region, so it can be the most expensive request in the run, and its
-/// outcome channel carried only the summaries. A run that compacted reported a
-/// fraction of what it was billed.
-#[test]
-fn compaction_calls_are_counted_one_record_per_region() {
-    let (mut world, tx) = world_with_compaction_results();
-    // Carries a stage, so each record is attributed to the stage that paid for
-    // it. The failing-batch test below deliberately has none, which is the
-    // stage-less path.
-    let e = world
-        .spawn((
-            compacting_window(),
-            AwaitingCompaction,
-            crate::persistence::TokenTotals::default(),
-            AgentState {
-                current_stage: "analyze".to_string(),
-                iteration: 3,
-                ..agent_state()
-            },
-        ))
-        .id();
-    let usage = |prompt| leviath_providers::TokenUsage {
-        prompt_tokens: prompt,
-        completion_tokens: 10,
-        cached_tokens: 0,
-        cache_write_tokens: 0,
-        total_tokens: prompt + 10,
-        reported_cost_usd: None,
-    };
-    tx.send(CompactionOutcome {
-        entity: e,
-        // Two regions summarized: two calls, two costs.
-        usage: vec![usage(7000), usage(3000)],
-        provider_name: "p".to_string(),
-        model: "m".to_string(),
-        result: Ok(vec![("conv".to_string(), "the summary".to_string())]),
-        pricing: None,
-    })
-    .unwrap();
-
-    run_collect_compaction(&mut world);
-
-    let totals = world.get::<crate::persistence::TokenTotals>(e).unwrap();
-    assert_eq!(totals.prompt_tokens, 10_000);
-    assert_eq!(totals.completion_tokens, 20);
-}
-
-/// And it lands on the stage that paid for it, not only on the run.
-///
-/// A summarize call sees a whole region, so a stage that compacts twice can
-/// spend more on summarizing its context than on the work. A stage ledger that
-/// counted only the stage's own turns would answer "which stage cost me that"
-/// for the cheap half of the bill.
-#[test]
-fn a_compaction_call_is_billed_to_the_stage_that_needed_it() {
-    let (mut world, tx) = world_with_compaction_results();
-    let e = world
-        .spawn((
-            compacting_window(),
-            AwaitingCompaction,
-            crate::persistence::TokenTotals::default(),
-            StageLedger(vec![
-                leviath_core::run_meta::StageRecord::new("gather".to_string(), 0),
-                leviath_core::run_meta::StageRecord::new("analyze".to_string(), 1),
-            ]),
-            AgentState {
-                current_stage: "analyze".to_string(),
-                iteration: 3,
-                ..agent_state()
-            },
-        ))
-        .id();
-    tx.send(CompactionOutcome {
-        entity: e,
-        usage: vec![leviath_providers::TokenUsage::new(7000, 0, 0, 10)],
-        provider_name: "p".to_string(),
-        model: "m".to_string(),
-        result: Ok(vec![("conv".to_string(), "the summary".to_string())]),
-        // Priced, so the money half is exercised and not only the tokens.
-        pricing: Some(leviath_providers::ModelPricing::flat(1_000_000.0, 0.0)),
-    })
-    .unwrap();
-
-    run_collect_compaction(&mut world);
-
-    let led = world.get::<StageLedger>(e).unwrap();
-    assert_eq!(led.0[1].prompt_tokens, 7000, "billed to `analyze`");
-    assert_eq!(led.0[1].cost_usd, Some(7000.0));
-    assert!(!led.0[1].cost_is_exact, "rates, not the provider's figure");
-    // A lazily opened visit, because nothing entered the stage in this world -
-    // the money is not dropped for want of a boundary.
-    assert_eq!(led.0[1].visits.len(), 1);
-    assert_eq!(led.0[1].visits[0].prompt_tokens, 7000);
-    assert_eq!(led.0[0].prompt_tokens, 0, "and not to the stage before it");
-    assert_eq!(led.0[0].cost_usd, Some(0.0), "which really did spend zero");
-}
-
-/// A batch that failed partway still billed for the calls that ran before it
-/// gave up. Discarding the summaries is a decision about the window; it does
-/// not un-bill the requests.
-#[test]
-fn a_failed_compaction_batch_still_counts_the_calls_that_ran() {
-    let (mut world, tx) = world_with_compaction_results();
-    let e = world
-        .spawn((
-            compacting_window(),
-            AwaitingCompaction,
-            crate::persistence::TokenTotals::default(),
-        ))
-        .id();
-    tx.send(CompactionOutcome {
-        entity: e,
-        usage: vec![leviath_providers::TokenUsage {
-            prompt_tokens: 4000,
-            completion_tokens: 40,
-            cached_tokens: 0,
-            cache_write_tokens: 0,
-            total_tokens: 4040,
-            reported_cost_usd: None,
-        }],
-        provider_name: "p".to_string(),
-        model: "m".to_string(),
-        result: Err(leviath_providers::ProviderError::Other("boom".to_string())),
-        pricing: None,
-    })
-    .unwrap();
-
-    run_collect_compaction(&mut world);
-
-    assert_eq!(
-        world
-            .get::<crate::persistence::TokenTotals>(e)
-            .unwrap()
-            .prompt_tokens,
-        4000
-    );
-}
-
 #[test]
 fn collect_compaction_error_leaves_context_and_readies() {
     let (mut world, tx) = world_with_compaction_results();
@@ -16304,11 +16119,7 @@ fn collect_compaction_error_leaves_context_and_readies() {
         .current_tokens;
     tx.send(CompactionOutcome {
         entity: e,
-        usage: Vec::new(),
-        provider_name: "p".to_string(),
-        model: "m".to_string(),
         result: Err(leviath_providers::ProviderError::Other("boom".to_string())),
-        pricing: None,
     })
     .unwrap();
 
@@ -16333,11 +16144,7 @@ fn collect_compaction_drops_stale_outcome() {
     let ghost = world.spawn_empty().id();
     tx.send(CompactionOutcome {
         entity: ghost,
-        usage: Vec::new(),
-        provider_name: "p".to_string(),
-        model: "m".to_string(),
         result: Ok(vec![]),
-        pricing: None,
     })
     .unwrap();
     run_collect_compaction(&mut world); // no matching agent ⇒ dropped
@@ -16363,16 +16170,12 @@ fn collect_compaction_keeps_the_summary_of_an_unpaired_region_in_place() {
     let e = world.spawn((w, AwaitingCompaction)).id();
     tx.send(CompactionOutcome {
         entity: e,
-        usage: Vec::new(),
-        provider_name: "p".to_string(),
-        model: "m".to_string(),
         // "lone" exists but is unpaired (history None); "gone" doesn't exist
         // at all (get_region_mut None) - both no-op branches.
         result: Ok(vec![
             ("lone".to_string(), "s".to_string()),
             ("gone".to_string(), "s2".to_string()),
         ]),
-        pricing: None,
     })
     .unwrap();
 
@@ -17132,6 +16935,7 @@ impl Provider for EchoesExtras {
                 cached_tokens: 0,
                 cache_write_tokens: 0,
                 reported_cost_usd: None,
+                terms: Default::default(),
             },
             finish_reason: leviath_providers::FinishReason::Complete,
             reasoning: None,
@@ -17346,16 +17150,12 @@ fn run_collect_transition(world: &mut World) {
     s.run(world);
 }
 
-/// The routing call at a stage boundary is billed to the stage that asked the
-/// question, and the move to the next stage cuts the visit rather than
-/// backdating the answer into it.
-///
-/// One routing call fires at every boundary of every branching run, so a stage
-/// ledger that skips them is missing real money. Attributing it to the stage
-/// being entered would be worse than leaving it out: the run has not started
-/// that stage's work when it pays for the question.
+/// The move to the next stage cuts the visit of the stage being left, so a
+/// graph drawn from the ledger shows the run in the stage it entered with the
+/// one before it finished. What the routing call cost is recorded by the trip
+/// that made it, into the visit it was made in (see `open_calls`).
 #[test]
-fn a_routing_call_is_billed_to_the_stage_it_leaves_and_cuts_the_visit() {
+fn a_routing_answer_cuts_the_visit_of_the_stage_it_leaves() {
     let (mut world, tx) = world_with_transition_results();
     let bp = blueprint(vec![
         stage_named("a", None, false, None),
@@ -17390,15 +17190,11 @@ fn a_routing_call_is_billed_to_the_stage_it_leaves_and_cuts_the_visit() {
     run_collect_transition(&mut world);
 
     let led = world.get::<StageLedger>(e).unwrap();
-    assert_eq!(led.0[0].prompt_tokens, 120, "billed to the stage it left");
-    assert_eq!(led.0[0].cost_usd, Some(120.0));
-    assert_eq!(led.0[1].prompt_tokens, 0, "and not to the one it entered");
 
     // `a`'s visit is closed and `b`'s is open, so a graph drawn from this shows
     // the run in `b` with `a` finished, not both open at once.
     assert_eq!(led.0[0].visits.len(), 1);
     assert!(led.0[0].visits[0].left_at.is_some(), "a was left");
-    assert_eq!(led.0[0].visits[0].prompt_tokens, 120, "in a's own visit");
     assert_eq!(led.0[1].visits.len(), 1);
     assert_eq!(led.0[1].visits[0].left_at, None, "b is where it is now");
     assert_eq!(led.0[1].visit_count, 1);
@@ -17634,57 +17430,6 @@ fn collect_choice_enters_chosen_stage() {
     assert!(world.get::<ReadyToInfer>(e).is_some());
     assert!(world.get::<AwaitingTransitionResponse>(e).is_none());
     assert_eq!(world.get::<AgentState>(e).unwrap().current_stage, "b");
-}
-
-/// Routing calls are short but not free, and a branching run makes one at
-/// every stage boundary. The response was already in hand here with its usage
-/// on it; nothing read it, so the whole class went unbilled.
-#[test]
-fn a_routing_call_is_counted_against_the_run() {
-    let (mut world, tx) = world_with_transition_results();
-    let bp = blueprint(vec![
-        stage_named("a", None, false, None),
-        stage_named("b", None, false, None),
-    ]);
-    let e = spawn_responding_agent(
-        &mut world,
-        bp,
-        vec![si("m0"), si("m1")],
-        vec![plain_edge("b")],
-    );
-    world
-        .entity_mut(e)
-        .insert(crate::persistence::TokenTotals::default());
-    let mut response = resp("b");
-    response.tokens_used = leviath_providers::TokenUsage {
-        prompt_tokens: 300,
-        completion_tokens: 3,
-        cached_tokens: 1,
-        cache_write_tokens: 2,
-        total_tokens: 303,
-        reported_cost_usd: None,
-    };
-    tx.send(InferenceOutcome {
-        latency: std::time::Duration::ZERO,
-        entity: e,
-        attempt_id: String::new(),
-        result: Ok(response),
-        pricing: None,
-        attempt: None,
-    })
-    .unwrap();
-
-    run_collect_transition(&mut world);
-
-    let totals = world
-        .get::<crate::persistence::TokenTotals>(e)
-        .expect("totals");
-    assert_eq!(totals.prompt_tokens, 300);
-    assert_eq!(totals.completion_tokens, 3);
-    assert_eq!(totals.cached_tokens, 1);
-    assert_eq!(totals.cache_write_tokens, 2);
-    // The routing decision still lands - counting it changed nothing else.
-    assert_eq!(world.get::<StageCursor>(e).unwrap().index, 1);
 }
 
 /// A transition choice that lands after the run was cancelled is discarded.
@@ -18234,11 +17979,7 @@ fn collect_compaction_records_success_and_failure() {
         .id();
     tx.send(CompactionOutcome {
         entity: e,
-        usage: Vec::new(),
-        provider_name: "p".to_string(),
-        model: "m".to_string(),
         result: Ok(vec![("conv".to_string(), "summary".to_string())]),
-        pricing: None,
     })
     .unwrap();
     run_collect_compaction(&mut world);
@@ -18252,11 +17993,7 @@ fn collect_compaction_records_success_and_failure() {
         .id();
     tx.send(CompactionOutcome {
         entity: e2,
-        usage: Vec::new(),
-        provider_name: "p".to_string(),
-        model: "m".to_string(),
         result: Err(leviath_providers::ProviderError::Other("boom".to_string())),
-        pricing: None,
     })
     .unwrap();
     run_collect_compaction(&mut world);

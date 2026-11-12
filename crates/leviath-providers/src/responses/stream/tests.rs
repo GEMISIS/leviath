@@ -722,3 +722,107 @@ async fn a_refusal_survives_collection() {
         FinishReason::Unknown("refusal".into())
     );
 }
+
+/// A response's usage is its running total, and names what the token rates
+/// do not cover, the model that answered and the tier it was served on.
+#[test]
+fn a_completed_response_says_how_it_is_billed() {
+    let done = chunk(serde_json::json!({
+        "type": "response.completed",
+        "response": {
+            "model": "gpt-5.5-2026-04-23",
+            "service_tier": "priority",
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 9,
+                "input_tokens_details": {
+                    "cached_tokens": 20,
+                    "cache_write_tokens": 10,
+                    "cache_write_tokens_details": { "ttl_12h_tokens": 10, "ttl_30m_tokens": 0 },
+                    "audio_tokens": 4
+                },
+                "output_tokens_details": { "audio_tokens": 2, "image_tokens": 1 }
+            }
+        }
+    }));
+    let tokens = done.tokens.unwrap();
+    assert_eq!(
+        (
+            tokens.prompt_tokens,
+            tokens.cached_tokens,
+            tokens.cache_write_tokens
+        ),
+        (70, 20, 10)
+    );
+    assert!(tokens.terms.whole);
+    assert_eq!(
+        tokens.terms.extra_terms,
+        ["cache_write_ttl_12h", "audio_tokens", "image_tokens"]
+    );
+    assert_eq!(tokens.terms.model.as_deref(), Some("gpt-5.5-2026-04-23"));
+    assert_eq!(tokens.terms.service_tier.as_deref(), Some("priority"));
+}
+
+/// The response's id is in its first event, and is what the provider knows
+/// the call by; an event that carries none names nothing.
+#[tokio::test]
+async fn a_response_names_itself_in_its_first_event() {
+    let trace = crate::CallTrace::new();
+    let created = trace
+        .scope(async {
+            parse_one(serde_json::json!({
+                "type": "response.created", "response": { "id": "resp_abc" }
+            }))
+        })
+        .await;
+    assert!(created.is_none(), "the event carries no chunk");
+    assert_eq!(trace.seen().call_id.as_deref(), Some("resp_abc"));
+
+    let quiet = crate::CallTrace::new();
+    quiet
+        .scope(async {
+            parse_one(serde_json::json!({ "type": "response.created", "response": {} }))
+        })
+        .await;
+    assert_eq!(quiet.seen().call_id, None);
+}
+
+/// A response that fails after it began still says what it used, and that
+/// is kept for whoever accounts for the call.
+#[tokio::test]
+async fn a_failed_response_keeps_the_usage_it_reported() {
+    let trace = crate::CallTrace::new();
+    let failed = trace
+        .scope(async {
+            parse_one(serde_json::json!({
+                "type": "response.failed",
+                "response": {
+                    "error": { "message": "server_error" },
+                    "usage": { "input_tokens": 12, "output_tokens": 3 }
+                }
+            }))
+        })
+        .await;
+    assert!(failed.unwrap().unwrap().is_err());
+    let seen = trace.seen();
+    assert!(seen.whole);
+    assert_eq!(seen.usage.map(|u| u.completion_tokens), Some(3));
+
+    // One that carries no usage, or a null one, keeps nothing.
+    for response in [
+        serde_json::json!({ "error": { "message": "x" } }),
+        serde_json::json!({ "error": { "message": "x" }, "usage": null }),
+    ] {
+        let quiet = crate::CallTrace::new();
+        quiet
+            .scope(async {
+                parse_one(serde_json::json!({ "type": "response.failed", "response": response }))
+            })
+            .await;
+        assert_eq!(quiet.seen().usage, None);
+    }
+    let bare = crate::CallTrace::new();
+    bare.scope(async { parse_one(serde_json::json!({ "type": "error", "message": "boom" })) })
+        .await;
+    assert_eq!(bare.seen().usage, None);
+}

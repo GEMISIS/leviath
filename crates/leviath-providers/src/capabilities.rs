@@ -173,7 +173,7 @@ impl CatalogEntry {
             "bedrock" => {
                 configured().or_else(|| crate::bedrock::catalog::published_pricing(self.id))
             }
-            provider => configured().or_else(|| crate::pricing::published_rates(provider, self.id)),
+            provider => crate::pricing::rates_for(provider, self.id, configured(), true),
         }
     }
 }

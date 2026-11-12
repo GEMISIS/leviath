@@ -292,6 +292,8 @@ mod tests {
                         kind: Default::default(),
                         stage: None,
                         iteration: 0,
+                        ending: Default::default(),
+                        provider_call_id: None,
                     },
                     started("c1", serde_json::json!({ "path": "a.rs" })),
                     started("c2", serde_json::json!("not json at all")),

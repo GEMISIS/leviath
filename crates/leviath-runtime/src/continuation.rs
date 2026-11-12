@@ -386,7 +386,6 @@ fn reopen(state: &mut RunState) {
     state.files.final_output = None;
     state.visits.clear();
     state.point = Default::default();
-    state.remote_jobs.clear();
     state.last_progress_at = None;
     let flags = &mut state.flags;
     flags.empty_output = false;
@@ -412,6 +411,14 @@ pub fn place(
     } = prepared;
     let spec = run.spec.clone();
     let entity = crate::restore::resume(world, run, bindings);
+    // A job the segment that ended left running is not this segment's to
+    // pick up: its call asked for something else. The run holds it no
+    // longer, and the call that stood for it is recorded as given up.
+    world
+        .get::<crate::inference_call::RemoteJobs>(entity)
+        .expect("a placed run has its list of jobs")
+        .0
+        .clear();
     world.entity_mut(entity).insert(Reopened {
         spec,
         continued,
@@ -706,6 +713,11 @@ pub fn fork(
     state.grants = Default::default();
     state.written = 0;
     state.flags = Default::default();
+    // A call the source had out, and a job it submitted, are the source's:
+    // it sent them, and it is charged for them when they are settled. The
+    // fork starts with none.
+    state.open_calls.clear();
+    state.remote_jobs.clear();
     std::fs::create_dir_all(&dir).map_err(|e| unwritable(e.to_string()))?;
     for blob in &state.blobs {
         let from = crate::runfile::blob_path(source_dir, &blob.digest);

@@ -45,6 +45,7 @@ fn step(run_id: &str) -> Option<Box<RunFileStep>> {
         at: 1,
         events: Vec::new(),
         acks: Vec::new(),
+        settles: Vec::new(),
     }))
 }
 

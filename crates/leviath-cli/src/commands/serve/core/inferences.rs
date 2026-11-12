@@ -95,7 +95,9 @@ fn kept(a: &AttemptState, stage: &str, at: i64) -> AttemptRecord {
                 transient,
                 capacity,
                 next,
+                sent,
             } => AttemptOutcome::Failed {
+                sent: *sent,
                 kind: kind.clone(),
                 transient: *transient,
                 capacity: *capacity,
@@ -166,6 +168,9 @@ fn follow(attempts: &mut Vec<Attempt>, mut failover: FailoverRecord) {
                 provider: failover.from_provider.clone(),
                 model: failover.from_model.clone(),
                 outcome: AttemptOutcome::Failed {
+                    // A failover recorded with no attempt of its own says
+                    // nothing of whether its request went out.
+                    sent: None,
                     kind: String::new(),
                     transient: false,
                     capacity: false,

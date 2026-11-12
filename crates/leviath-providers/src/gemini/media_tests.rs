@@ -39,6 +39,8 @@ fn provider(url: &str) -> crate::gemini::GeminiProvider {
     let mut provider = crate::gemini::GeminiProvider::new(reqwest::Client::new(), "g-key".into())
         .with_base_url(Some(url.into()));
     provider.video_poll = Duration::from_millis(1);
+    // A mock stands in for Google's own endpoint, so its prices still apply.
+    provider.list_priced = true;
     provider
 }
 
@@ -115,8 +117,10 @@ fn a_prompted_model_is_sent_the_prompt_and_its_parts_alone() {
 
 #[tokio::test]
 async fn a_veo_video_is_started_polled_downloaded_and_priced_by_the_second() {
+    // Three seconds of video, whatever the request asked for.
+    let file = crate::media::tests::mp4(1_000, 3_000);
     let video =
-        spawn_mock_server_with_headers(200, "OK", "Content-Type: video/mp4\r\n", b"MP4".to_vec())
+        spawn_mock_server_with_headers(200, "OK", "Content-Type: video/mp4\r\n", file.clone())
             .await;
     let done = serde_json::json!({
         "name": "models/veo/operations/op1",
@@ -146,15 +150,20 @@ async fn a_veo_video_is_started_polled_downloaded_and_priced_by_the_second() {
         ))
         .await
         .expect("a video");
-    assert_eq!(response.parts[0].bytes, b"MP4");
+    assert_eq!(response.parts[0].bytes, file);
     assert_eq!(response.parts[0].name.as_deref(), Some("video.mp4"));
-    // The shipped table prices Veo 3.1 Lite by the second.
+    // The shipped table prices Veo 3.1 Lite by the second, and the seconds
+    // are the ones the file that came back plays for: three, not the four
+    // the request asked for.
     let per_second = crate::pricing::published_unit_rate("google", "veo-3.1-lite-generate-preview")
-        .map(|row| row.usd);
+        .map(|row| row.usd)
+        .expect("priced");
     assert_eq!(
-        response.tokens_used.reported_cost_usd,
-        per_second.map(|usd| usd * 4.0)
+        response.tokens_used.cost(None),
+        leviath_core::cost::CallCost::Computed(per_second * 3.0),
+        "computed here, never labelled as Google's own figure"
     );
+    assert_eq!(response.tokens_used.reported_cost_usd, None);
     let body: Value = serde_json::from_str(&bodies.lock().unwrap()[0]).unwrap();
     assert_eq!(body["instances"][0]["prompt"], "a paper boat");
     assert_eq!(body["instances"][0]["image"]["mimeType"], "image/png");
@@ -497,7 +506,7 @@ async fn a_clip_is_priced_by_the_clip() {
     let per_clip =
         crate::pricing::published_unit_rate("google", "lyria-3-clip-preview").map(|row| row.usd);
     assert!(per_clip.is_some(), "the shipped table prices Lyria");
-    assert_eq!(response.tokens_used.reported_cost_usd, per_clip);
+    assert_eq!(response.tokens_used.priced_cost(None), per_clip);
 }
 
 /// A call made again after a restart polls the operation it started before

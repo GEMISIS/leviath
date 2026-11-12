@@ -324,8 +324,12 @@ impl WorldHost {
     /// - it is a standalone root: no parent that might address it by entity,
     ///   no children whose links a page-in would have to rebuild;
     /// - no open interaction and no fan-out in flight (a pause that landed
-    ///   mid-prompt or mid-split keeps its live machinery).
-    fn parkable(&self, entity: Entity, status: &AgentStatus) -> bool {
+    ///   mid-prompt or mid-split keeps its live machinery);
+    /// - no call of its own in flight or finding out what it cost: a title
+    ///   or a summary still out reports to the run where it is, and a run
+    ///   paged out and back in the meantime would settle the same call a
+    ///   second time, as one a stopped daemon left out.
+    fn parkable(&self, entity: Entity, status: &AgentStatus, now: i64) -> bool {
         if !matches!(status, AgentStatus::Paused) {
             return false;
         }
@@ -381,6 +385,7 @@ impl WorldHost {
             && world
                 .get::<crate::pipeline::lane_batch::ResumedHold>(entity)
                 .is_none()
+            && !crate::open_calls::calls_owed(world, entity, now)
     }
 
     /// Whether a terminal agent is safe to unload: it has no **live** parent that

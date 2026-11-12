@@ -228,6 +228,14 @@ Every `tokens_used` field is optional, and the host normalizes what you send:
   and never recomputed: your script is the only thing that saw the invoice figure, and
   Leviath has no rate card for a model it has never heard of. Omit it and the call reports
   its cost as unknown rather than zero.
+- `cumulative = true` on a streamed chunk's `tokens` says the counts are the running total for
+  the whole call so far, not what this chunk added. Each such chunk replaces the one before
+  it. Leave it off when your endpoint sends each count once, and the chunks are added up.
+
+A call your script retries after its first send went out is two calls to the endpoint but one
+to Leviath, so its cost is recorded as unknown unless your `pricing` says the model is free:
+the reply Leviath sees is only the last one. Return the error and let Leviath retry if you want
+every send counted. See [Costs](/docs/costs) for how a call's cost is classed.
 
 ## Host functions
 

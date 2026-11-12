@@ -182,6 +182,7 @@ fn lane_world(status: crate::components::AgentStatus) -> LaneWorld {
         wake: Arc::new(Notify::new()),
         runtime: tokio::runtime::Handle::current(),
         stream_inference: false,
+        spend: crate::open_calls::tests::sink(),
     });
     let agent = world
         .spawn(crate::components::AgentState {
@@ -232,6 +233,8 @@ impl LaneWorld {
             stream: false,
             hydration: None,
             journal: None,
+            provider_name: String::new(),
+            ticket: None,
         };
         let stage = self.world.resource::<InferenceStage>();
         let (call, _cancel) = start_call(stage, job, policy, lane);

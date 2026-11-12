@@ -195,6 +195,7 @@ pub(crate) fn send(world: &mut World, happened: BTreeMap<String, Happened>) {
             at,
             events: run.events,
             acks: run.acks,
+            settles: Vec::new(),
         };
         match world.get_resource::<super::PersistenceStage>() {
             Some(lane) => {

@@ -376,16 +376,10 @@ work and that is a different decision from wanting to know what is happening. To
 rather than watch it, see `max_agents_per_run` below and
 [managing your costs](/docs/costs).
 
-A run whose models have no published price reports what it could price and marks the figure
-incomplete, rather than a confident number that is wrong. Completeness is a different question from
-whether the priced part came from the provider's own figures or was reconstructed from rate cards;
-the run record's `cost_is_exact` answers that one. See [providers](/docs/providers) for where
-prices come from and when they are a reconstruction rather than the invoice.
-
-**`max_concurrent_inferences_by_model`** and **`max_concurrent_inferences_by_provider`** are the
-two ways to say "not this one". The first replaces the global cap for one model id. The second adds
-a *separate*, coarser pool in front of it, bounding every model one provider serves together. A
-request needs a slot in both, and holds both until it finishes:
+A run with a call whose cost is unknown reports what the other calls came to and marks the
+figure incomplete, rather than a confident number that is wrong. See
+[managing your costs](/docs/costs#know-what-you-actually-paid) for what makes a cost unknown and
+[providers](/docs/providers) for where prices come from.
 
 ```toml
 [limits]

@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 
 use super::context::{ContextDiff, ToolCallState};
 use super::journal::{
-    ArtifactState, AttemptState, CallKind, ContextCommitState, ContextNoteState, SettledState,
-    ToolOutcomeState,
+    ArtifactState, AttemptState, CallEnding, CallKind, ContextCommitState, ContextNoteState,
+    OpenCallState, SettledState, ToolOutcomeState,
 };
 use super::*;
 use crate::spec::names::{EdgeName, ModelRef};
@@ -96,6 +96,8 @@ pub enum Change {
     LastProgressAt(Option<i64>),
     /// `remote_jobs`.
     RemoteJobs(BTreeMap<String, String>),
+    /// The model calls sent and not yet accounted for.
+    OpenCalls(Vec<OpenCallState>),
 }
 
 /// An edge a run took, and why.
@@ -136,14 +138,14 @@ pub enum TransitionReason {
 /// Something that happened during a step that the state does not keep.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub enum RunEvent {
-    /// A model request finished and was billed: one per call, whatever
-    /// kind of call it was.
+    /// A model request that was sent came to an end, and what it cost: one
+    /// per call, whatever kind of call it was and however it ended.
     Inference {
-        /// The id of the attempt that answered, when it was recorded.
+        /// The id of the attempt, when it was recorded.
         attempt: String,
-        /// The model that answered.
+        /// The model that was asked.
         model: ModelRef,
-        /// Its spend.
+        /// Its spend: one call, counted as reported, computed or unknown.
         spend: Spend,
         /// Why the model stopped, as the provider said it.
         finish_reason: Option<String>,
@@ -154,6 +156,10 @@ pub enum RunEvent {
         stage: Option<StageName>,
         /// The iteration it was made in.
         iteration: u32,
+        /// How it ended: answered, failed after it was sent, or cut off.
+        ending: CallEnding,
+        /// The provider's own id for the call, when it gave one.
+        provider_call_id: Option<String>,
     },
     /// The run took an edge. One per edge taken, so two moves inside one
     /// step are both kept; `last_transition` holds only the latest.
@@ -291,6 +297,7 @@ impl StateDelta {
             written => Written,
             last_progress_at => LastProgressAt,
             remote_jobs => RemoteJobs,
+            open_calls => OpenCalls,
         );
         Self {
             seq: prev.seq + 1,
@@ -358,6 +365,7 @@ impl StateDelta {
                 Change::Written(v) => state.written = v,
                 Change::LastProgressAt(v) => state.last_progress_at = v,
                 Change::RemoteJobs(v) => state.remote_jobs = v,
+                Change::OpenCalls(v) => state.open_calls = v,
             }
         }
         state.seq = self.seq;

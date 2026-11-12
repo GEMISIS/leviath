@@ -174,6 +174,8 @@ fn world(registry: ProviderRegistry) -> (World, mpsc::UnboundedReceiver<Compacti
     let (cstx, _csrx) = mpsc::unbounded_channel();
     let mut world = World::new();
     world.insert_resource(Providers(registry));
+    let (spend, spends) = crate::open_calls::SpendSink::channel(Arc::new(Notify::new()));
+    world.insert_resource(spends);
     world.insert_resource(InferenceStage {
         pools: Arc::new(InferencePools::new(InferencePoolConfig::new())),
         outcomes: tx,
@@ -183,6 +185,7 @@ fn world(registry: ProviderRegistry) -> (World, mpsc::UnboundedReceiver<Compacti
         wake: Arc::new(Notify::new()),
         runtime: Handle::current(),
         stream_inference: true,
+        spend,
     });
     (world, crx)
 }
@@ -210,7 +213,13 @@ async fn summarized_on(
     world.get::<AwaitingCompaction>(e)?;
     let outcome = outcomes.recv().await.expect("the job reports");
     assert!(outcome.result.is_ok(), "the summary was written");
-    Some((outcome.provider_name, outcome.model))
+    // The route the summary ran on is the one its call was billed to.
+    let spend = world
+        .resource_mut::<crate::open_calls::CallSpendResults>()
+        .0
+        .try_recv()
+        .expect("the call reported what it cost");
+    Some((spend.provider, spend.model))
 }
 
 /// The issue's case: the compaction model names no provider, and the only

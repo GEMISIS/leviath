@@ -142,8 +142,6 @@ fn dedupe_identical_blobs(blobs: Vec<leviath_core::mime::Blob>) -> Vec<leviath_c
 /// lifetimes: the borrow is bound when the query is fetched.
 type InferenceQuery = (
     &'static mut AgentState,
-    Option<&'static crate::persistence::RunMetadata>,
-    Option<&'static mut crate::persistence::TokenTotals>,
     Option<&'static StageCursor>,
     Option<&'static ContextWindow>,
     Option<&'static mut StageLedger>,
@@ -189,8 +187,6 @@ pub(crate) fn collect_inference(
     while let Ok(mut outcome) = results.0.try_recv() {
         let Ok((
             mut state,
-            md,
-            mut totals,
             cursor,
             window,
             mut ledger,
@@ -313,33 +309,17 @@ pub(crate) fn collect_inference(
         match outcome.result {
             Ok(response) => {
                 state.iteration += 1;
-                // This iteration's tokens and cost land on the run's totals, on
-                // the current stage's ledger record and on its open visit, all
-                // inside `record_call` - the one place that knows how a call is
-                // priced.
-                crate::inference_usage::record_call(
-                    totals.as_deref_mut(),
-                    ledger.as_deref_mut(),
-                    persist.as_deref(),
-                    md,
-                    &crate::inference_usage::CallUsage {
-                        kind: crate::runfile::record::InferenceKind::Stage,
-                        stage: &state.current_stage,
-                        iteration: state.iteration,
-                        provider: &called_provider,
-                        model: &called_model,
-                        usage: &response.tokens_used,
-                        pricing: outcome.pricing,
-                    },
-                );
+                // What the call cost is already the run's: the trip that made it
+                // reported it (see `open_calls`), whatever became of the reply.
                 // What is left is per-stage bookkeeping that has nothing to do
                 // with the invoice, and needs the window this call was built
                 // from.
                 //
-                // Found by name, the same key `record_call` above just used and
-                // the same one `restore_stage_ledger` matches on. Two lookups
-                // for one call have to agree, and only one of them can be
-                // written by index: the compaction lane has no cursor to offer.
+                // Found by name, the same key the call's cost is recorded under
+                // and the same one `restore_stage_ledger` matches on. Two
+                // lookups for one call have to agree, and only one of them can
+                // be written by index: the compaction lane has no cursor to
+                // offer.
                 if let Some(rec) = ledger
                     .as_deref_mut()
                     .and_then(|l| l.0.iter_mut().find(|r| r.name == state.current_stage))

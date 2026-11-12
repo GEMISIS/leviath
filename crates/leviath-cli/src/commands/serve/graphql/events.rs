@@ -439,10 +439,14 @@ frames! {
             threshold_usd: Decimal,
             /// What the run has spent so far, in dollars.
             total_usd: Decimal,
-            /// Whether every call behind that total could be priced. When
-            /// false the run has spent at least this and more by an unknown
-            /// amount, so it must not be shown as a final figure.
+            /// Whether that total is the run's whole cost so far: the cost
+            /// of every call is known and no call is out. When false the run
+            /// has spent at least this and more by an unknown amount, so it
+            /// must not be shown as a final figure.
             complete: bool,
+            /// Calls that are out and have not landed yet. They are not in
+            /// the total.
+            calls_in_flight: i32,
             /// The stage that was running when it crossed.
             stage: String,
         }
@@ -959,12 +963,19 @@ pub(crate) fn run_frame(stamped: Stamped) -> Option<RunEventFrame> {
             threshold_usd,
             total_usd,
             complete,
+            calls_in_flight,
             stage,
         } => SpendThresholdCrossedEvent::new(
             head,
             run_id,
             agent_id,
-            (Decimal(threshold_usd), Decimal(total_usd), complete, stage),
+            (
+                Decimal(threshold_usd),
+                Decimal(total_usd),
+                complete,
+                i32::try_from(calls_in_flight).unwrap_or(i32::MAX),
+                stage,
+            ),
         )
         .into(),
         ServerEvent::InteractionNeeded {

@@ -99,6 +99,10 @@ pub(crate) struct AttemptOutcome {
     pub(crate) capacity: Option<bool>,
     /// What the loop did next.
     pub(crate) retry: Option<RetryDecision>,
+    /// Whether a failed attempt's request went out. False for one that never
+    /// left this machine, which cost nothing; null for an attempt that
+    /// worked, and where nothing could say.
+    pub(crate) sent: Option<bool>,
 }
 
 impl From<&AttemptRecord> for AttemptOutcome {
@@ -116,12 +120,14 @@ impl From<&AttemptRecord> for AttemptOutcome {
                 transient: None,
                 capacity: None,
                 retry: None,
+                sent: None,
             },
             Core::Failed {
                 kind,
                 transient,
                 capacity,
                 next,
+                sent,
             } => Self {
                 kind: AttemptOutcomeKind::Failed,
                 finish_reason: None,
@@ -130,6 +136,7 @@ impl From<&AttemptRecord> for AttemptOutcome {
                 transient: Some(*transient),
                 capacity: Some(*capacity),
                 retry: Some(RetryDecision::from(*next)),
+                sent: *sent,
             },
         }
     }

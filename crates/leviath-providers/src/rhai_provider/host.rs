@@ -265,6 +265,9 @@ impl ReqwestExecutor {
                     if attempt >= TRANSPORT_RETRIES || !is_retryable_transport(&chain) {
                         return Err(transport_error(sent, &chain));
                     }
+                    // A request that went out and is sent again may be billed
+                    // twice, and only the second answers.
+                    crate::call_trace::note_resent(sent);
                     use_h1 = use_h1 || is_h2_protocol_error(&chain);
                     attempt += 1;
                     tracing::debug!(

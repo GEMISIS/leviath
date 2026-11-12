@@ -88,6 +88,13 @@
                     "$ref": "#/$defs/RetryState",
                     "description": "What happened next."
                   },
+                  "sent": {
+                    "description": "Whether the request went out before it failed: `Some(false)` for\none that never left this machine, `None` where nothing could say.",
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
                   "transient": {
                     "description": "Whether a retry could work.",
                     "type": "boolean"
@@ -314,6 +321,26 @@
           "name"
         ],
         "type": "object"
+      },
+      "CallEnding": {
+        "description": "How a model call that was sent ended.",
+        "oneOf": [
+          {
+            "const": "answered",
+            "description": "The provider answered.",
+            "type": "string"
+          },
+          {
+            "const": "failed",
+            "description": "The provider, or the way to it, failed the call after it was sent.",
+            "type": "string"
+          },
+          {
+            "const": "cut_off",
+            "description": "The run stopped waiting for it: a deadline, a cancel, a daemon that\nstopped while it was out.",
+            "type": "string"
+          }
+        ]
       },
       "CallKind": {
         "description": "Which kind of model call an inference was: the stage's own work, or one\nthe runtime made around it.",
@@ -934,6 +961,22 @@
             },
             "required": [
               "RemoteJobs"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The model calls sent and not yet accounted for.",
+            "properties": {
+              "OpenCalls": {
+                "items": {
+                  "$ref": "#/$defs/OpenCallState"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "OpenCalls"
             ],
             "type": "object"
           }
@@ -2238,6 +2281,61 @@
           }
         ]
       },
+      "OpenCallState": {
+        "description": "A model call that has been sent and is not yet accounted for.",
+        "properties": {
+          "attempt": {
+            "description": "The attempt's id, minted before the request went out.",
+            "type": "string"
+          },
+          "iteration": {
+            "description": "The iteration it was made in.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kind": {
+            "$ref": "#/$defs/CallKind",
+            "description": "Which kind of call it is."
+          },
+          "model": {
+            "$ref": "#/$defs/ModelRef",
+            "description": "The model it was sent to."
+          },
+          "opened_at": {
+            "description": "When it was sent, in unix seconds.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "provider_call_id": {
+            "description": "The provider's own id for it, once the provider has given one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stage": {
+            "description": "The stage it was made for. `None` for a call no stage owns.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "visit": {
+            "description": "The visit of that stage it was made in, by the visit's id. Empty for\na call no stage owns.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "attempt",
+          "kind",
+          "visit",
+          "iteration",
+          "model",
+          "opened_at"
+        ],
+        "type": "object"
+      },
       "OpenInteraction": {
         "description": "A question put to a person.",
         "properties": {
@@ -2791,13 +2889,17 @@
         "oneOf": [
           {
             "additionalProperties": false,
-            "description": "A model request finished and was billed: one per call, whatever\nkind of call it was.",
+            "description": "A model request that was sent came to an end, and what it cost: one\nper call, whatever kind of call it was and however it ended.",
             "properties": {
               "Inference": {
                 "properties": {
                   "attempt": {
-                    "description": "The id of the attempt that answered, when it was recorded.",
+                    "description": "The id of the attempt, when it was recorded.",
                     "type": "string"
+                  },
+                  "ending": {
+                    "$ref": "#/$defs/CallEnding",
+                    "description": "How it ended: answered, failed after it was sent, or cut off."
                   },
                   "finish_reason": {
                     "description": "Why the model stopped, as the provider said it.",
@@ -2818,11 +2920,18 @@
                   },
                   "model": {
                     "$ref": "#/$defs/ModelRef",
-                    "description": "The model that answered."
+                    "description": "The model that was asked."
+                  },
+                  "provider_call_id": {
+                    "description": "The provider's own id for the call, when it gave one.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   },
                   "spend": {
                     "$ref": "#/$defs/Spend",
-                    "description": "Its spend."
+                    "description": "Its spend: one call, counted as reported, computed or unknown."
                   },
                   "stage": {
                     "description": "The stage it was made for. `None` for a call no stage owns (the\ntitle call).",
@@ -2837,7 +2946,8 @@
                   "model",
                   "spend",
                   "kind",
-                  "iteration"
+                  "iteration",
+                  "ending"
                 ],
                 "type": "object"
               }
@@ -3490,10 +3600,6 @@
             "minimum": 0,
             "type": "integer"
           },
-          "cost_unknown": {
-            "description": "Whether its cost is not known though no call was counted as\nunpriced: a record from an earlier release that named no cost.",
-            "type": "boolean"
-          },
           "priced_usd": {
             "description": "Cost of the calls that could be priced, in US dollars.",
             "format": "double",
@@ -3511,11 +3617,9 @@
             "minimum": 0,
             "type": "integer"
           },
-          "unpriced_calls": {
-            "description": "Calls that could not be priced.",
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
+          "unknown": {
+            "$ref": "#/$defs/UnknownCalls",
+            "description": "Calls whose cost is unknown, by reason."
           }
         },
         "required": [
@@ -3526,8 +3630,7 @@
           "priced_usd",
           "reported_calls",
           "computed_calls",
-          "unpriced_calls",
-          "cost_unknown"
+          "unknown"
         ],
         "type": "object"
       },
@@ -4053,6 +4156,61 @@
           "reason",
           "visit"
         ],
+        "type": "object"
+      },
+      "UnknownCalls": {
+        "description": "How many calls have an unknown cost, by reason.",
+        "properties": {
+          "lookup_unanswered": {
+            "default": 0,
+            "description": "Calls that failed or were cut off, whose lookup did not answer.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "no_lookup": {
+            "default": 0,
+            "description": "Calls that failed or were cut off, on a provider with no lookup.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "no_price": {
+            "default": 0,
+            "description": "Calls to a model with no known price.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "no_usage": {
+            "default": 0,
+            "description": "Calls whose reply said nothing of what they used.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "not_recorded": {
+            "default": 0,
+            "description": "Calls an earlier release recorded without a cost.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "not_settled": {
+            "default": 0,
+            "description": "Calls still out on a run that has ended, whose cost is not settled\nyet.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "unmodelled_terms": {
+            "default": 0,
+            "description": "Calls billed on terms the rate table does not cover.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
         "type": "object"
       },
       "VisitRecord": {
@@ -9328,6 +9486,31 @@
         ],
         "type": "object"
       },
+      "CallKind": {
+        "description": "Which kind of model call an inference was: the stage's own work, or one\nthe runtime made around it.",
+        "oneOf": [
+          {
+            "const": "stage",
+            "description": "A turn of the stage's own work.",
+            "type": "string"
+          },
+          {
+            "const": "compaction",
+            "description": "A summary of a region, when the context filled or an edge compacted.",
+            "type": "string"
+          },
+          {
+            "const": "title",
+            "description": "The call that named the run.",
+            "type": "string"
+          },
+          {
+            "const": "routing",
+            "description": "A call asking the model which edge to take.",
+            "type": "string"
+          }
+        ]
+      },
       "Clock": {
         "description": "Time spent working, not counting time spent waiting.",
         "properties": {
@@ -10379,6 +10562,61 @@
         ],
         "type": "object"
       },
+      "OpenCallState": {
+        "description": "A model call that has been sent and is not yet accounted for.",
+        "properties": {
+          "attempt": {
+            "description": "The attempt's id, minted before the request went out.",
+            "type": "string"
+          },
+          "iteration": {
+            "description": "The iteration it was made in.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kind": {
+            "$ref": "#/$defs/CallKind",
+            "description": "Which kind of call it is."
+          },
+          "model": {
+            "$ref": "#/$defs/ModelRef",
+            "description": "The model it was sent to."
+          },
+          "opened_at": {
+            "description": "When it was sent, in unix seconds.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "provider_call_id": {
+            "description": "The provider's own id for it, once the provider has given one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stage": {
+            "description": "The stage it was made for. `None` for a call no stage owns.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "visit": {
+            "description": "The visit of that stage it was made in, by the visit's id. Empty for\na call no stage owns.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "attempt",
+          "kind",
+          "visit",
+          "iteration",
+          "model",
+          "opened_at"
+        ],
+        "type": "object"
+      },
       "OpenInteraction": {
         "description": "A question put to a person.",
         "properties": {
@@ -10971,10 +11209,6 @@
             "minimum": 0,
             "type": "integer"
           },
-          "cost_unknown": {
-            "description": "Whether its cost is not known though no call was counted as\nunpriced: a record from an earlier release that named no cost.",
-            "type": "boolean"
-          },
           "priced_usd": {
             "description": "Cost of the calls that could be priced, in US dollars.",
             "format": "double",
@@ -10992,11 +11226,9 @@
             "minimum": 0,
             "type": "integer"
           },
-          "unpriced_calls": {
-            "description": "Calls that could not be priced.",
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
+          "unknown": {
+            "$ref": "#/$defs/UnknownCalls",
+            "description": "Calls whose cost is unknown, by reason."
           }
         },
         "required": [
@@ -11007,8 +11239,7 @@
           "priced_usd",
           "reported_calls",
           "computed_calls",
-          "unpriced_calls",
-          "cost_unknown"
+          "unknown"
         ],
         "type": "object"
       },
@@ -11506,6 +11737,61 @@
         ],
         "type": "object"
       },
+      "UnknownCalls": {
+        "description": "How many calls have an unknown cost, by reason.",
+        "properties": {
+          "lookup_unanswered": {
+            "default": 0,
+            "description": "Calls that failed or were cut off, whose lookup did not answer.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "no_lookup": {
+            "default": 0,
+            "description": "Calls that failed or were cut off, on a provider with no lookup.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "no_price": {
+            "default": 0,
+            "description": "Calls to a model with no known price.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "no_usage": {
+            "default": 0,
+            "description": "Calls whose reply said nothing of what they used.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "not_recorded": {
+            "default": 0,
+            "description": "Calls an earlier release recorded without a cost.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "not_settled": {
+            "default": 0,
+            "description": "Calls still out on a run that has ended, whose cost is not settled\nyet.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "unmodelled_terms": {
+            "default": 0,
+            "description": "Calls billed on terms the rate table does not cover.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
       "VisitRecord": {
         "description": "One visit to a stage.",
         "properties": {
@@ -11831,6 +12117,13 @@
         },
         "type": "array"
       },
+      "open_calls": {
+        "description": "The model calls it has sent that are not yet accounted for: one in\nflight, or one cut off whose cost is still being looked up. A call\nstill listed when the run is read back after a restart was out when\nthe daemon stopped, and is settled then as a call of its own.",
+        "items": {
+          "$ref": "#/$defs/OpenCallState"
+        },
+        "type": "array"
+      },
       "pending": {
         "anyOf": [
           {
@@ -11948,7 +12241,8 @@
       "blobs",
       "grants",
       "written",
-      "remote_jobs"
+      "remote_jobs",
+      "open_calls"
     ],
     "title": "RunState",
     "type": "object"

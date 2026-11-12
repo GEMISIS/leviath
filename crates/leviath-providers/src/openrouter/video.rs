@@ -11,6 +11,7 @@
 //!   `completed` (with `usage.cost`, in USD) or `failed` (with `error`);
 //! - `GET /videos/{id}/content?index=0` with the key is the MP4.
 
+use leviath_core::cost::{CallCost, CostUnknown};
 use std::time::Duration;
 
 use serde_json::{Map, Value, json};
@@ -147,6 +148,17 @@ impl OpenRouterProvider {
             note,
         } = crate::jobs::submit_or_resume(&step, submit, wait).await?;
 
+        // The job is done and OpenRouter has charged for it, whatever becomes
+        // of the download: the finished job carries the amount. On the
+        // account's own upstream key that amount is OpenRouter's fee alone.
+        let own_key = done.pointer("/usage/is_byok").and_then(Value::as_bool) == Some(true);
+        let cost = match done.pointer("/usage/cost").and_then(Value::as_f64) {
+            Some(_) if own_key => CallCost::Unknown(CostUnknown::UnmodelledTerms),
+            Some(usd) => CallCost::Reported(usd),
+            None => CallCost::Unknown(CostUnknown::NoUsage),
+        };
+        media::job_done(cost);
+
         let content = crate::provider::with_extra_headers(
             self.client
                 .get(format!("{url}/{id}/content?index=0"))
@@ -162,7 +174,6 @@ impl OpenRouterProvider {
             Err(refused) => Err(refused),
         }?;
         let parts = vec![media::typed_blob("video/mp4", bytes, "video.mp4")];
-        let cost = done.pointer("/usage/cost").and_then(Value::as_f64);
         Ok(media::response(
             crate::jobs::noted(
                 media::summary(&format!("openrouter/{model}"), &parts),

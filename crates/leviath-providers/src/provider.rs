@@ -156,7 +156,7 @@ impl UnavailableReason {
 /// Anchored on the `HTTP ` marker that every provider in this crate formats,
 /// rather than the first number anywhere in the text: an error body quoting a
 /// token count must not be mistaken for a status.
-fn leading_http_status(message: &str) -> Option<u16> {
+pub(crate) fn leading_http_status(message: &str) -> Option<u16> {
     // Tags may sit in front of the status: the failure's kind, and whether
     // its request went out. Stepping over them keeps a message classifiable
     // whichever layer tagged it: a tag that hid the status here would silently
@@ -421,93 +421,8 @@ impl ProviderError {
     }
 }
 
-/// Information about a model offered by a provider.
-#[derive(Debug, Clone)]
-pub struct ModelInfo {
-    /// Model identifier used in API requests
-    pub id: String,
-
-    /// Human-readable name for the model
-    pub display_name: Option<String>,
-
-    /// Name of the provider that owns this model
-    pub provider: String,
-
-    /// Capabilities of this model
-    pub capabilities: ModelCapabilities,
-
-    /// When the provider released it, as Unix seconds, if its listing says.
-    pub released: Option<i64>,
-
-    /// When the provider will withdraw it, as published, if its listing says.
-    pub retires: Option<String>,
-
-    /// What it costs, when the provider's listing quotes a rate.
-    pub pricing: Option<crate::pricing::ModelPricing>,
-
-    /// Whether this entry came from the provider's own listing rather than a
-    /// table compiled into this build.
-    pub learned: bool,
-
-    /// What mime the model takes and can hand back. See [`Provider::mime`].
-    pub mime: crate::capabilities::ModelMime,
-}
-
-impl ModelInfo {
-    /// An entry from a compiled table: nothing learned, nothing dated, text
-    /// in and text out until [`Self::with_mime`] says otherwise.
-    pub fn new(
-        id: impl Into<String>,
-        provider: impl Into<String>,
-        caps: ModelCapabilities,
-    ) -> Self {
-        Self {
-            id: id.into(),
-            display_name: None,
-            provider: provider.into(),
-            capabilities: caps,
-            released: None,
-            retires: None,
-            pricing: None,
-            learned: false,
-            mime: crate::capabilities::ModelMime::text_only(),
-        }
-    }
-
-    /// The same entry, with what the model takes and produces filled in.
-    pub fn with_mime(mut self, mime: crate::capabilities::ModelMime) -> Self {
-        self.mime = mime;
-        self
-    }
-
-    /// This entry with a display name.
-    pub fn named(mut self, display_name: Option<String>) -> Self {
-        self.display_name = display_name;
-        self
-    }
-
-    /// This entry marked as read from the provider's own listing, for a
-    /// listing that reports rows directly (a script's `list_models`) rather
-    /// than through a [`crate::learned::LearnedModel`] record.
-    ///
-    /// Rows synthesized from configuration claims (`serves = [...]`,
-    /// `[model_capabilities]`) are someone describing a model, not the
-    /// provider answering for itself, and must not pass through here.
-    pub fn listed(mut self) -> Self {
-        self.learned = true;
-        self
-    }
-
-    /// This entry marked as read from the listing, carrying what it said.
-    pub fn learned_from(mut self, learned: &crate::learned::LearnedModel) -> Self {
-        self.display_name = learned.display_name.clone();
-        self.released = learned.released;
-        self.retires = learned.retires.clone();
-        self.pricing = learned.pricing;
-        self.learned = true;
-        self
-    }
-}
+mod model_info;
+pub use model_info::ModelInfo;
 
 mod content;
 mod conversation;
@@ -1162,6 +1077,41 @@ pub trait Provider: Send + Sync {
     /// anything computed here.
     fn pricing(&self, _model: &str) -> Option<crate::pricing::ModelPricing> {
         None
+    }
+
+    /// What this provider's own record says the call it knows as `call_id`
+    /// used and cost, for a call that failed or was cut off after it was
+    /// sent and so never said.
+    ///
+    /// `call_id` is the id the provider gave the call in its first header or
+    /// event (see [`crate::call_trace`]), and `model` the model the call
+    /// asked for. The answer is the call's whole usage, with the amount
+    /// billed where the provider states one.
+    ///
+    /// - `None`: this provider keeps no record of a call that the key in
+    ///   hand can read back. The default, and the call's cost stays unknown.
+    /// - `Some(Err(_))`: it keeps one, and it could not be read just now: the
+    ///   record is not written yet, or the lookup failed. The caller may ask
+    ///   again for a short while.
+    /// - `Some(Ok(usage))`: what the call used.
+    ///
+    /// One request and no waiting of its own: how long to keep asking is the
+    /// caller's to decide.
+    async fn call_usage(&self, call_id: &str, model: &str) -> Option<Result<TokenUsage>> {
+        let _ = (call_id, model);
+        None
+    }
+
+    /// Whether this provider says it bills nothing for a call it answered
+    /// with an error status, whatever the status.
+    ///
+    /// `false` by default: a provider that has not said so may charge for a
+    /// request it failed part way through. A provider whose own terms say a
+    /// failed request is not charged answers `true`, and a call it refused
+    /// outright then costs a known nothing (see
+    /// [`ProviderError::answered_status`]).
+    fn bills_no_error_answer(&self) -> bool {
+        false
     }
 }
 
@@ -2088,6 +2038,7 @@ mod tests {
             cached_tokens: 20,
             cache_write_tokens: 10,
             reported_cost_usd: None,
+            terms: Default::default(),
         };
         let json = serde_json::to_string(&usage).unwrap();
         let back: TokenUsage = serde_json::from_str(&json).unwrap();
@@ -2253,6 +2204,7 @@ mod tests {
                     cached_tokens: 0,
                     cache_write_tokens: 0,
                     reported_cost_usd: None,
+                    terms: Default::default(),
                 },
                 finish_reason: FinishReason::Complete,
                 reasoning: None,
@@ -2510,6 +2462,9 @@ mod tests {
             }
         }
         assert!(Ordinary.served_catalog().is_none());
+        // Nor does it keep a record of a call to read back, or say that a
+        // call it answered with an error is free.
+        assert!(!Ordinary.bills_no_error_answer());
         // The rest of the stub is part of the same contract; answering it here
         // keeps the impl honest rather than leaving unreachable bodies.
         assert_eq!(Ordinary.name(), "ordinary");
@@ -2519,6 +2474,7 @@ mod tests {
             .build()
             .expect("a runtime");
         assert_eq!(runtime.block_on(Ordinary.count_tokens("t", "m")), 0);
+        assert!(runtime.block_on(Ordinary.call_usage("id", "m")).is_none());
         let request = InferenceRequest {
             system: Vec::new(),
             messages: Vec::new(),

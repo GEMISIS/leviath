@@ -142,7 +142,7 @@ whose events carry a `Continued` record: the segment that starts, the stage it s
 region did, and how the segment before it ended, with a copy of that segment's answer at the record's
 `segments/<n>/` path. The run's state only ever holds the segment it is in, so the segments before
 it are read back from these records. The step is appended like any other, so the steps of earlier
-segments are never rewritten, and the file keeps layout 8.
+segments are never rewritten.
 
 Every reader finds these files through those names: `lev result`, the dashboard, the HTTP API,
 GraphQL, `lev rage` and the `run_history` tool. A name that leaves the run's directory is never
@@ -280,8 +280,10 @@ rewritten in this build's shape, and the rest is copied as it was, so the run re
 did. A layout-3 fan-out becomes one of its stage with its one worker, which takes every item. A
 layout-4 compaction model becomes the graph's `compaction.model`, so the run summarizes where it
 did. A run from before layout 7 has no write paths, as before, and a run from before layout 8
-counts no resubmissions on any stage. The file as it was stays in the
-run's `legacy/` folder as `run.v2.lvr` through `run.v7.lvr`, and the directory is saved in the
+counts no resubmissions on any stage. A run from before layout 9 recorded only the model calls
+that answered: each reads as answered, a call it counted as unpriced is unknown for want of a
+price, and it lists no call as out. The file as it was stays in the
+run's `legacy/` folder as `run.v2.lvr` through `run.v8.lvr`, and the directory is saved in the
 home's backup first. A run file in any other
 layout this build does not know is listed as failed, saying so, and left as it is.
 

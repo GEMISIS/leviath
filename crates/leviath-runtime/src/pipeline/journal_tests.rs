@@ -44,9 +44,12 @@ fn usage() -> RunRecord {
         completion_tokens: 2,
         cached_tokens: 0,
         cache_write_tokens: 0,
-        cost_usd: None,
-        cost_reported_by_provider: None,
+        cost: leviath_providers::CallCost::Unknown(leviath_providers::CostUnknown::NoPrice),
+        ending: crate::state::CallEnding::Answered,
+        attempt: String::new(),
+        provider_call_id: None,
         at: 1,
+        finish_reason: None,
     }
 }
 

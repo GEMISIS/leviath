@@ -138,6 +138,49 @@ fn a_start_reads_only_the_runs_that_have_not_finished() {
     assert!(unfinished(&home.path().join("gone")).is_empty());
 }
 
+/// A finished run whose file still lists a call as out is among what a
+/// start reads back, apart from the runs that have not finished: found from
+/// the index at a glance, and from the index read whole.
+#[test]
+fn a_start_finds_the_finished_runs_that_still_have_a_call_out() {
+    let home = runs();
+    let dir = home.path().join("runs");
+    let mut done = meta("done-run", "done", 300);
+    done.status = leviath_core::run_meta::RunStatus::Complete;
+    create_run_in(&dir.join("done-run"), &done).unwrap();
+    let mut owed = meta("owed-run", "owed", 400);
+    owed.status = leviath_core::run_meta::RunStatus::Cancelled;
+    create_run_in(&dir.join("owed-run"), &owed).unwrap();
+    leviath_runtime::runfile::RunFileWriter::open(
+        &runstate::run_file::path_in(&dir.join("owed-run")),
+        Default::default(),
+    )
+    .and_then(|mut writer| {
+        let mut state = writer.state().clone();
+        state.open_calls = vec![leviath_runtime::state::OpenCallState {
+            attempt: "cut".into(),
+            kind: Default::default(),
+            stage: None,
+            visit: String::new(),
+            iteration: 1,
+            model: leviath_runtime::spec::names::ModelRef::parse("mock/m").unwrap(),
+            provider_call_id: None,
+            opened_at: 1,
+        }];
+        writer.record(state, 2, Vec::new())
+    })
+    .unwrap();
+
+    // Read whole: the index has not seen these files.
+    let found = recoverable(&dir);
+    assert_eq!(names(&found.unfinished), ["new-run", "old-run"]);
+    assert_eq!(names(&found.unsettled), ["owed-run"]);
+    // And again at a glance, from the index that reading saved.
+    let found = recoverable(&dir);
+    assert_eq!(names(&found.unfinished), ["new-run", "old-run"]);
+    assert_eq!(names(&found.unsettled), ["owed-run"]);
+}
+
 /// Whether the saved index still has the run id of `name`'s summary: a start
 /// that answered from the index at a glance never rewrites it, and one that
 /// had to read the index whole writes it back complete.
@@ -200,7 +243,8 @@ fn a_start_reads_the_index_at_a_glance_while_it_is_up_to_date() {
 
     // An index beside a runs directory that is gone answers nothing.
     let gone = home.path().join("gone");
-    std::fs::write(path_for(&gone), br#"{"version":1,"runs":{}}"#).unwrap();
+    let empty = format!(r#"{{"version":{VERSION},"runs":{{}}}}"#);
+    std::fs::write(path_for(&gone), empty).unwrap();
     assert!(unfinished(&gone).is_empty());
 }
 

@@ -257,9 +257,12 @@ fn a_usage_record_happens_when_it_says() {
         completion_tokens: 1,
         cached_tokens: 0,
         cache_write_tokens: 0,
-        cost_usd: None,
-        cost_reported_by_provider: None,
+        cost: leviath_providers::CallCost::Unknown(leviath_providers::CostUnknown::NoPrice),
+        ending: Default::default(),
+        attempt: String::new(),
+        provider_call_id: None,
         at: 42,
+        finish_reason: None,
     };
     assert_eq!(at_of(&usage, 7), 42);
     // A move happens when the step before it did.

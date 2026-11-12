@@ -360,21 +360,27 @@ across stages, and per-stage models with different prices.
 
 ```
 STAGE                STATUS            PROMPT     OUTPUT   CACHE RD   CACHE WR        COST  RESUB
-ingest               complete           16832       2249          0          0    ~$0.0891      0
-report               complete           37644        493          0          0    ~$0.1932      0
-summary              complete          252848        648          0          0    ~$1.2812      2
-TOTAL                                  307324       3390          0          0    ~$1.5635      2
+ingest               complete           16832       2249          0          0    $0.0891      0
+report               complete           37644        493          0          0    $0.1932      0
+summary              complete          252848        648          0          0    $1.2812      2
+TOTAL                                  307324       3390          0          0    $1.5635      2
 ```
 
 `CACHE WR` is the write half of a cache decision. Without it a stage showing no reads might be
 paying to write a prefix nothing reuses, or might not be caching at all, and the ledger could not
 tell those apart.
 
-`COST` is what that stage spent, and it is deliberately not a number you can always get. A leading
-`~` means the figure was reconstructed from published rates rather than read off the provider's own
-answer. A bare `?` means at least one call in that stage could not be priced at all, by either
-route. A `?` is not a zero: a stage whose calls went unpriced has not been shown to be free, and one
-unpriced stage takes the `TOTAL` with it for the same reason.
+`COST` is what that stage spent, and it is deliberately not a number you can always get. A bare
+`?` means the cost of at least one call in that stage is unknown. A `?` is not a zero: a stage
+with such a call has not been shown to be free, and one such stage takes the `TOTAL` with it for
+the same reason. Under the table, `Run cost` gives the run's own figure and what it rests on
+(how many calls the provider reported and how many were computed from the rate table), or says
+it is unknown, for how many calls and why. While the run is going the line reads "so far" and
+says how many calls are in flight, which are not in the figure until they land. That figure is
+the run's own calls: a sub-agent or a
+fan-out worker is a run of its own. `--calls` lists every call the run sent, with how it ended
+(`answered`, `failed`, `cut_off`), whether its cost is `reported`, `computed` or `unknown`, and
+the cost.
 
 Every call a run bills counts against the stage it was made in, including the compaction calls that
 summarize a full window and the routing call a stage makes at its own boundary. The exception is the

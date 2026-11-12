@@ -6,6 +6,7 @@
 //! profile stage that had run away to 1.1M was. Read-only; sources everything
 //! from disk.
 
+use anyhow::Context as _;
 use clap::Args;
 use leviath_core::run_meta::StageRecord;
 
@@ -24,6 +25,10 @@ pub struct StagesArgs {
     /// rows rather than one sum.
     #[arg(long)]
     pub visits: bool,
+    /// List every model call the run sent, with how it ended, what it cost
+    /// and how that cost is known.
+    #[arg(long)]
+    pub calls: bool,
 }
 
 /// Execute `lev stages`.
@@ -35,30 +40,140 @@ pub(crate) async fn execute(args: StagesArgs) -> anyhow::Result<()> {
             args.run_id
         );
     }
-    match args.json {
-        true => println!(
+    match args.calls {
+        false => {
+            show(&args, &stages, None);
+            Ok(())
+        }
+        true => read_calls(&crate::runstate::run_dir(&args.run_id))
+            .map(|calls| show(&args, &stages, Some(&calls)))
+            .context(format!("the calls of run '{}' do not read", args.run_id)),
+    }
+}
+
+/// Print the ledger, and the run's calls when they were asked for.
+fn show(args: &StagesArgs, stages: &[StageRecord], calls: Option<&[CallLine]>) {
+    match (args.json, calls) {
+        (true, None) => println!(
             "{}",
             serde_json::to_string_pretty(&stages).expect("a stage ledger serializes")
         ),
-        false => print_ledger(&stages, args.regions, args.visits),
+        (true, Some(calls)) => println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({ "stages": stages, "calls": calls }))
+                .expect("a stage ledger and its calls serialize")
+        ),
+        (false, calls) => {
+            print_ledger(stages, args.regions, args.visits);
+            // The run's own figure, which the stages do not add up to: the
+            // title call belongs to no stage.
+            crate::runstate::read_meta(&args.run_id)
+                .iter()
+                .for_each(|meta| println!("{}", run_cost_lines(meta)));
+            print_calls(calls.unwrap_or_default());
+        }
     }
-    Ok(())
 }
 
-/// One cost cell.
-///
-/// `?` for unknown, never `$0.0000`: a stage whose calls could not be priced
-/// has not been shown to be free, and a zero in this column is a claim that it
-/// was. A leading `~` says the figure was reconstructed from published rates
-/// rather than read off the provider's own answer.
-///
-/// Four decimals throughout, so the column stays aligned and a cheap routing
-/// call still resolves to a hundredth of a cent.
-fn cost_cell(cost_usd: Option<f64>, is_exact: bool) -> String {
-    match cost_usd {
-        None => "?".to_string(),
-        Some(usd) if is_exact => format!("${usd:.4}"),
-        Some(usd) => format!("~${usd:.4}"),
+/// What the run as a whole cost, and whose calls that covers.
+fn run_cost_lines(meta: &leviath_core::run_meta::RunMeta) -> String {
+    let spent = crate::render::cost::Spent::of_run(meta);
+    format!(
+        "\nRun cost: {}\nThat is this run's own calls. A run it started as a sub-agent or a \
+         fan-out worker is a run of its own, with its own cost: `lev ps --tree` lists them.",
+        crate::render::cost::sentence(&spent)
+    )
+}
+
+/// One model call a run sent, as `lev stages --calls` lists it.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub(crate) struct CallLine {
+    /// `stage`, `routing`, `title` or `compaction`.
+    pub kind: String,
+    /// The stage it was made for; empty for the title call.
+    pub stage: String,
+    /// The iteration it was made in.
+    pub iteration: u32,
+    /// The model it was sent to, as `provider/model`.
+    pub model: String,
+    /// `answered`, `failed` or `cut_off`.
+    pub ending: String,
+    /// `reported`, `computed` or `unknown`.
+    pub cost_class: String,
+    /// What it cost, when that is known.
+    pub cost_usd: Option<f64>,
+    /// Why it is not, when it is not, in plain words.
+    pub unknown: Option<String>,
+    /// The provider's own id for the call, when it gave one.
+    pub provider_call_id: Option<String>,
+}
+
+/// Every call in the run file under `dir`, oldest first.
+fn read_calls(dir: &std::path::Path) -> anyhow::Result<Vec<CallLine>> {
+    let reader = crate::runstate::run_file::open_in(dir)?;
+    Ok(calls_of(&reader.deltas(1, reader.last_seq())?))
+}
+
+/// The calls `deltas` record.
+fn calls_of(deltas: &[leviath_runtime::state::StateDelta]) -> Vec<CallLine> {
+    use leviath_runtime::state::RunEvent;
+    deltas
+        .iter()
+        .flat_map(|delta| &delta.events)
+        .filter_map(|event| match event {
+            RunEvent::Inference {
+                model,
+                spend,
+                kind,
+                stage,
+                iteration,
+                ending,
+                provider_call_id,
+                ..
+            } => Some(CallLine {
+                kind: kind.label().to_string(),
+                stage: stage.as_ref().map(ToString::to_string).unwrap_or_default(),
+                iteration: *iteration,
+                model: model.to_string(),
+                ending: ending.label().to_string(),
+                cost_class: spend.class().label().to_string(),
+                cost_usd: spend.cost_usd(),
+                unknown: spend
+                    .unknown
+                    .reasons()
+                    .first()
+                    .map(|(reason, _)| reason.reason().to_string()),
+                provider_call_id: provider_call_id.clone(),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The table `lev stages --calls` adds: nothing for a run with no call to
+/// list.
+fn print_calls(calls: &[CallLine]) {
+    if calls.is_empty() {
+        return;
+    }
+    println!(
+        "\n{:<10} {:<18} {:>4} {:<34} {:<9} {:<9} {:>11}",
+        "KIND", "STAGE", "ITER", "MODEL", "ENDED", "COST IS", "COST"
+    );
+    for call in calls {
+        println!(
+            "{:<10} {:<18} {:>4} {:<34} {:<9} {:<9} {:>11}",
+            call.kind,
+            leviath_core::truncate_chars(&call.stage, 18),
+            call.iteration,
+            leviath_core::truncate_chars(&call.model, 34),
+            call.ending,
+            call.cost_class,
+            crate::render::cost::cell(call.cost_usd),
+        );
+        if let Some(why) = &call.unknown {
+            println!("  unknown: {why}");
+        }
     }
 }
 
@@ -88,7 +203,7 @@ fn print_ledger(stages: &[StageRecord], with_regions: bool, with_visits: bool) {
             stage.completion_tokens,
             stage.cached_tokens,
             stage.cache_write_tokens,
-            cost_cell(stage.cost_usd, stage.cost_is_exact),
+            crate::render::cost::cell(stage.cost_usd),
             stage.resubmissions,
         );
         if with_visits {
@@ -104,7 +219,7 @@ fn print_ledger(stages: &[StageRecord], with_regions: bool, with_visits: bool) {
                     visit.completion_tokens,
                     visit.cached_tokens,
                     visit.cache_write_tokens,
-                    cost_cell(visit.cost_usd, visit.cost_is_exact),
+                    crate::render::cost::cell(visit.cost_usd),
                 );
             }
             // Said rather than left to be inferred from a short list: the row
@@ -138,13 +253,12 @@ fn print_ledger(stages: &[StageRecord], with_regions: bool, with_visits: bool) {
     let output: usize = stages.iter().map(|s| s.completion_tokens).sum();
     let read: usize = stages.iter().map(|s| s.cached_tokens).sum();
     let written: usize = stages.iter().map(|s| s.cache_write_tokens).sum();
-    // One unpriced stage makes the whole total unknown, the same way one
-    // unpriced call makes a stage's. Summing the rest would print a figure that
-    // looks like the bill and is not.
+    // One stage with an unknown cost makes the whole total unknown, the same
+    // way one such call makes a stage's. Summing the rest would print a figure
+    // that looks like the bill and is not.
     let total_cost = stages
         .iter()
         .try_fold(0.0, |acc, s| Some(acc + s.cost_usd?));
-    let total_exact = stages.iter().all(|s| s.cost_is_exact);
     let resubmissions: usize = stages.iter().map(|s| s.resubmissions).sum();
     println!(
         "{:<20} {:<13} {:>10} {:>10} {:>10} {:>10} {:>11} {:>6}",
@@ -154,12 +268,15 @@ fn print_ledger(stages: &[StageRecord], with_regions: bool, with_visits: bool) {
         output,
         read,
         written,
-        cost_cell(total_cost, total_exact),
+        crate::render::cost::cell(total_cost),
         resubmissions,
     );
     // The title call is billed to the run and to no stage of it, so this column
-    // can legitimately sum to less than `lev ps` reports for the same run.
-    println!("\nStage costs exclude the run's title call, which belongs to no stage.");
+    // can legitimately sum to less than the run's own cost below it.
+    println!(
+        "\nA `?` is a cost that is unknown, never one that is nothing. Stage costs exclude \
+         the run's title call, which belongs to no stage."
+    );
 }
 
 /// `s` cut to `width` **characters**.
@@ -206,17 +323,6 @@ mod tests {
         print_ledger(&[record("ingest", 100)], false, false);
     }
 
-    /// An unknown cost prints as `?`, and a reconstructed one wears the `~` that
-    /// says it is arithmetic rather than an invoice. A zero here would read as
-    /// "this stage was free", which is the one thing it has not been shown to be.
-    #[test]
-    fn a_cost_cell_says_unknown_and_says_reconstructed() {
-        assert_eq!(cost_cell(None, false), "?");
-        assert_eq!(cost_cell(None, true), "?");
-        assert_eq!(cost_cell(Some(0.0421), true), "$0.0421");
-        assert_eq!(cost_cell(Some(0.0421), false), "~$0.0421");
-    }
-
     /// One unpriced stage takes the TOTAL with it: the priced remainder is not
     /// the bill, and printing it as though it were is how a partial total gets
     /// quoted onward.
@@ -228,8 +334,6 @@ mod tests {
             &leviath_core::run_meta::StageCall {
                 prompt_tokens: 40,
                 completion_tokens: 5,
-                cost_usd: Some(0.002),
-                cost_reported: true,
                 ..Default::default()
             },
             11,
@@ -281,6 +385,7 @@ mod tests {
                 json: false,
                 regions: true,
                 visits: true,
+                calls: false,
             })
             .await
             .expect("a ledger on disk is readable");
@@ -296,11 +401,125 @@ mod tests {
                 json: true,
                 regions: false,
                 visits: false,
+                calls: false,
             })
             .await
             .expect("json is the same read, printed differently");
         })
         .await;
+    }
+
+    /// One call a run sent, as its file's step records it.
+    fn inference(
+        usd: f64,
+        unknown: Option<leviath_core::cost::CostUnknown>,
+    ) -> leviath_runtime::state::RunEvent {
+        let mut reasons = leviath_core::cost::UnknownCalls::default();
+        if let Some(reason) = unknown {
+            reasons.add(reason);
+        }
+        leviath_runtime::state::RunEvent::Inference {
+            attempt: "a1".into(),
+            model: leviath_runtime::spec::names::ModelRef::parse("openrouter/openai/gpt-4.1-nano")
+                .expect("a model"),
+            spend: leviath_runtime::state::Spend {
+                prompt_tokens: 192,
+                completion_tokens: 1252,
+                priced_usd: usd,
+                reported_calls: u32::from(unknown.is_none()),
+                unknown: reasons,
+                ..Default::default()
+            },
+            finish_reason: None,
+            kind: leviath_runtime::state::journal::CallKind::Stage,
+            stage: Some(leviath_runtime::spec::names::StageName::new("work").expect("a name")),
+            iteration: 1,
+            ending: leviath_runtime::state::CallEnding::CutOff,
+            provider_call_id: Some("gen-1".into()),
+        }
+    }
+
+    /// `--calls` lists every call the run file records, with how it ended,
+    /// its class and its cost, and says why a cost is unknown. Any other
+    /// event is not a call.
+    #[test]
+    fn every_call_in_a_run_file_is_a_line() {
+        use leviath_core::cost::CostUnknown;
+        let delta = leviath_runtime::state::StateDelta {
+            seq: 1,
+            at: 2,
+            changes: Vec::new(),
+            events: vec![
+                inference(0.00052, None),
+                leviath_runtime::state::RunEvent::Log("not a call".into()),
+                inference(0.0, Some(CostUnknown::NoLookup)),
+            ],
+        };
+        let calls = calls_of(&[delta]);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls[0],
+            CallLine {
+                kind: "stage".into(),
+                stage: "work".into(),
+                iteration: 1,
+                model: "openrouter/openai/gpt-4.1-nano".into(),
+                ending: "cut_off".into(),
+                cost_class: "reported".into(),
+                cost_usd: Some(0.00052),
+                unknown: None,
+                provider_call_id: Some("gen-1".into()),
+            }
+        );
+        assert_eq!(calls[1].cost_class, "unknown");
+        assert_eq!(calls[1].cost_usd, None);
+        assert_eq!(
+            calls[1].unknown.as_deref(),
+            Some(CostUnknown::NoLookup.reason())
+        );
+        print_calls(&calls);
+        print_calls(&[]);
+    }
+
+    /// The calls are read off the run's own file: every step's, an error
+    /// for a run with no file, and an error for a file with a step that
+    /// does not decode, never a short list.
+    #[tokio::test]
+    async fn the_calls_are_read_off_the_run_file() {
+        use crate::runstate::run_file::tests::{recorded, step_with};
+        use leviath_runtime::runfile::codec::{FrameKind, encode};
+        let runs = tempfile::tempdir().expect("a temp dir");
+        let dir = recorded(runs.path());
+        step_with(&dir, 5, vec![inference(0.25, None)], |_| {});
+        let calls = read_calls(&dir).expect("the file reads");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].cost_usd, Some(0.25));
+
+        assert!(read_calls(&runs.path().join("no-such-run")).is_err());
+
+        let path = crate::runstate::run_file::path_in(&dir);
+        let mut bytes = std::fs::read(&path).expect("the file is there");
+        bytes.extend(encode(FrameKind::Delta, &1u64).expect("a frame encodes"));
+        std::fs::write(&path, &bytes).expect("the file is written");
+        assert!(read_calls(&dir).is_err());
+    }
+
+    #[tokio::test]
+    async fn the_calls_print_under_the_table_and_join_the_json() {
+        for json in [false, true] {
+            with_ledger("stages-calls", |run_id| async move {
+                execute(StagesArgs {
+                    run_id,
+                    json,
+                    regions: false,
+                    visits: false,
+                    calls: true,
+                })
+                .await
+                .expect("the calls of a readable run are listed");
+            })
+            .await;
+        }
     }
 
     #[tokio::test]
@@ -310,6 +529,7 @@ mod tests {
             json: false,
             regions: false,
             visits: false,
+            calls: false,
         })
         .await
         .expect_err("a missing ledger is worth saying");

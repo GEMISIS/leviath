@@ -462,6 +462,14 @@ input AttemptOutcomeInput {
 	What the loop did next.
 	"""
 	retry: RetryDecisionFilter
+	"""
+	Filter on `AttemptOutcomeOutput.sent`.
+	
+	Whether a failed attempt's request went out. False for one that never
+	left this machine, which cost nothing; null for an attempt that
+	worked, and where nothing could say.
+	"""
+	sent: BooleanFilter
 	"Every filter in this list has to hold."
 	and: [AttemptOutcomeInput!]
 	"At least one filter in this list has to hold."
@@ -541,6 +549,12 @@ type AttemptOutcomeOutput {
 	capacity: Boolean
 	"What the loop did next."
 	retry: RetryDecision
+	"""
+	Whether a failed attempt's request went out. False for one that never
+	left this machine, which cost nothing; null for an attempt that
+	worked, and where nothing could say.
+	"""
+	sent: Boolean
 }
 
 "A model call, in full."
@@ -1546,6 +1560,12 @@ type CallFailureOutput {
 	capacity: Boolean!
 	"What happened next."
 	next: RetryDecision!
+	"""
+	Whether the request went out before it failed. False for one that
+	never left this machine, which cost nothing; null where nothing could
+	say.
+	"""
+	sent: Boolean
 }
 
 """
@@ -3440,27 +3460,66 @@ input CostBreakdownInput {
 	"""
 	Filter on `CostBreakdownOutput.costUsd`.
 	
-	Null is unknown, never free: some call in the run went unpriced.
+	Null is unknown, never free: the cost of some call could not be
+	learned. `unknown` says why.
 	"""
 	costUsd: DecimalFilter
 	"""
 	Filter on `CostBreakdownOutput.costPricedUsd`.
 	
-	The priced subtotal, kept even while `costUsd` is null.
+	The subtotal of the calls with a figure, kept even while `costUsd` is
+	null.
 	"""
 	costPricedUsd: DecimalFilter
 	"""
 	Filter on `CostBreakdownOutput.costIsExact`.
 	
-	True when every priced call carried the provider's own figure.
+	True when `costUsd` is the whole cost: the cost of every call is
+	known, reported by the provider or computed from the rate table, and
+	no call is in flight.
 	"""
 	costIsExact: BooleanFilter
 	"""
-	Filter on `CostBreakdownOutput.unpricedCalls`.
+	Filter on `CostBreakdownOutput.callsInFlight`.
 	
-	Calls no provider priced.
+	Calls that are out and have not landed yet, on a run that is still
+	going. `costUsd` is what the calls that landed came to. A call still
+	out on a run that has ended is in `unknown` as `not_settled` instead.
+	Always 0 on a segment: calls in flight are counted on the run.
 	"""
-	unpricedCalls: IntFilter
+	callsInFlight: IntFilter
+	"""
+	Filter on `CostBreakdownOutput.reportedCalls`.
+	
+	Calls whose cost the provider reported.
+	"""
+	reportedCalls: IntFilter
+	"""
+	Filter on `CostBreakdownOutput.computedCalls`.
+	
+	Calls whose cost was computed from the rate table.
+	"""
+	computedCalls: IntFilter
+	"""
+	Filter on `CostBreakdownOutput.unknownCalls`.
+	
+	Calls whose cost is unknown.
+	"""
+	unknownCalls: IntFilter
+	"""
+	Filter on `CostBreakdownOutput.unknown`.
+	
+	Why, for each reason that has calls.
+	"""
+	unknown: UnknownCostListInput
+	"""
+	Filter on `CostBreakdownOutput.includesChildren`.
+	
+	Whether the figures cover the runs below this one too. False on a
+	run, a stage and a segment, which count their own calls; true on a
+	subtree roll-up.
+	"""
+	includesChildren: BooleanFilter
 	"Every filter in this list has to hold."
 	and: [CostBreakdownInput!]
 	"At least one filter in this list has to hold."
@@ -3475,16 +3534,53 @@ input CostBreakdownInput {
 	isNull: Boolean
 }
 
-"Spend for a run, a stage, or a subtree roll-up."
+"""
+Spend for a run, a stage, or a subtree roll-up.
+
+Every call that has landed is in one of three classes: the provider
+reported what it billed, the cost was computed from the call's whole
+usage and the rate table, or the cost is unknown. A total exists only
+while no call is unknown. A call still in flight is in none of them and
+in no figure: it is counted in `callsInFlight` until it lands.
+"""
 type CostBreakdownOutput {
-	"Null is unknown, never free: some call in the run went unpriced."
+	"""
+	Null is unknown, never free: the cost of some call could not be
+	learned. `unknown` says why.
+	"""
 	costUsd: Decimal
-	"The priced subtotal, kept even while `costUsd` is null."
+	"""
+	The subtotal of the calls with a figure, kept even while `costUsd` is
+	null.
+	"""
 	costPricedUsd: Decimal!
-	"True when every priced call carried the provider's own figure."
+	"""
+	True when `costUsd` is the whole cost: the cost of every call is
+	known, reported by the provider or computed from the rate table, and
+	no call is in flight.
+	"""
 	costIsExact: Boolean!
-	"Calls no provider priced."
-	unpricedCalls: Int!
+	"""
+	Calls that are out and have not landed yet, on a run that is still
+	going. `costUsd` is what the calls that landed came to. A call still
+	out on a run that has ended is in `unknown` as `not_settled` instead.
+	Always 0 on a segment: calls in flight are counted on the run.
+	"""
+	callsInFlight: Int!
+	"Calls whose cost the provider reported."
+	reportedCalls: Int!
+	"Calls whose cost was computed from the rate table."
+	computedCalls: Int!
+	"Calls whose cost is unknown."
+	unknownCalls: Int!
+	"Why, for each reason that has calls."
+	unknown: [UnknownCostOutput!]!
+	"""
+	Whether the figures cover the runs below this one too. False on a
+	run, a stage and a segment, which count their own calls; true on a
+	subtree roll-up.
+	"""
+	includesChildren: Boolean!
 }
 
 "A blueprint to install."
@@ -5938,6 +6034,18 @@ type InferenceStepOutput {
 	stage: String
 	"The iteration it was made in."
 	iteration: Int!
+	"""
+	How the call ended: `answered`, `failed` after it was sent, or
+	`cut_off` by a deadline, a cancel or a daemon that stopped.
+	"""
+	ending: String!
+	"""
+	How its cost is known: `reported` by the provider, `computed` from
+	the rate table, or `unknown`, in which case `spend.unknown` says why.
+	"""
+	costClass: String!
+	"The provider's own id for the call, when it gave one."
+	providerCallId: String
 }
 
 "An input a run graph declares: what a spawn of it may, or must, supply."
@@ -8473,7 +8581,7 @@ What one model costs: per million tokens, and per unit for a media model
 billed by the image, the second of video, the clip or the character.
 
 Absent where the price file has no entry for the model, which is why a run
-can report an unpriced call rather than a cost of zero.
+can report a call whose cost is unknown rather than a cost of zero.
 """
 type ModelPricingOutput {
 	"Input tokens, per million. Zero for a model billed by the unit alone."
@@ -9218,6 +9326,38 @@ input NudgePolicyFilter {
 	notIn: [NudgePolicy!]
 	"Match where there is no value at all."
 	isNull: Boolean
+}
+
+"A model call a run has sent that is not yet accounted for."
+type OpenCallOutput {
+	"The attempt's id."
+	attempt: String!
+	"Which kind of call it is: `stage`, `compaction`, `title` or `routing`."
+	kind: String!
+	"The stage it was made for. Null for a call no stage owns."
+	stage: String
+	"""
+	The visit of that stage it was made in, by the visit's id. Empty for
+	a call no stage owns.
+	"""
+	visit: String!
+	"The iteration it was made in."
+	iteration: Int!
+	"The model it was sent to, as `provider/model`."
+	model: String!
+	"The provider's own id for it, once it has given one."
+	providerCallId: String
+	"When it was sent."
+	openedAt: Timestamp!
+}
+
+"""
+The model calls the run has sent and not yet accounted for changed:
+one went out, the provider named one, or one was accounted for.
+"""
+type OpenCallsChangeOutput {
+	"The calls now."
+	openCalls: [OpenCallOutput!]!
 }
 
 "A question a run has open, waiting for an answer."
@@ -13785,6 +13925,11 @@ type RunStateOutput {
 	Empty between calls.
 	"""
 	remoteJobs: [RemoteJobOutput!]!
+	"""
+	The model calls it has sent that are not yet accounted for: one in
+	flight, or one cut off whose cost is still being looked up.
+	"""
+	openCalls: [OpenCallOutput!]!
 }
 
 "Where a run is in its life."
@@ -13911,7 +14056,8 @@ type RunTreeStatusOutput {
 	rollup: TokenUsageOutput!
 	"""
 	Spend over the whole subtree, this run included. `costUsd` is null
-	once any run in it has an unpriced call; the rest add up regardless.
+	once any run in it has a call whose cost is unknown; the rest add up
+	regardless.
 	"""
 	cost: CostBreakdownOutput!
 	"""
@@ -15742,11 +15888,17 @@ type SpendThresholdCrossedEvent implements Event & RunEvent {
 	"What the run has spent so far, in dollars."
 	totalUsd: Decimal!
 	"""
-	Whether every call behind that total could be priced. When
-	false the run has spent at least this and more by an unknown
-	amount, so it must not be shown as a final figure.
+	Whether that total is the run's whole cost so far: the cost
+	of every call is known and no call is out. When false the run
+	has spent at least this and more by an unknown amount, so it
+	must not be shown as a final figure.
 	"""
 	complete: Boolean!
+	"""
+	Calls that are out and have not landed yet. They are not in
+	the total.
+	"""
+	callsInFlight: Int!
 	"The stage that was running when it crossed."
 	stage: String!
 	"""
@@ -17217,7 +17369,7 @@ type StateBlobOutput {
 }
 
 "One part of a run's state that a step changed, with its new value."
-union StateChange = StatusChangeOutput | CursorChangeOutput | PhaseChangeOutput | AcceptsMessagesChangeOutput | VisitsChangeOutput | ProgressChangeOutput | LedgerRecordChangeOutput | LedgerTruncateChangeOutput | ContextDiffChangeOutput | PendingChangeOutput | FanOutChangeOutput | InboxChangeOutput | QuestionsChangeOutput | TotalsChangeOutput | ClockChangeOutput | FlagsChangeOutput | ChildrenChangeOutput | TitleChangeOutput | AnswerChangeOutput | WaitReasonChangeOutput | TransitionChangeOutput | TitleErrorChangeOutput | ReadPathsChangeOutput | CheckpointChangeOutput | HeldChangeOutput | FilesChangeOutput | BlobsChangeOutput | GrantsChangeOutput | WrittenChangeOutput | LastProgressAtChangeOutput | RemoteJobsChangeOutput
+union StateChange = StatusChangeOutput | CursorChangeOutput | PhaseChangeOutput | AcceptsMessagesChangeOutput | VisitsChangeOutput | ProgressChangeOutput | LedgerRecordChangeOutput | LedgerTruncateChangeOutput | ContextDiffChangeOutput | PendingChangeOutput | FanOutChangeOutput | InboxChangeOutput | QuestionsChangeOutput | TotalsChangeOutput | ClockChangeOutput | FlagsChangeOutput | ChildrenChangeOutput | TitleChangeOutput | AnswerChangeOutput | WaitReasonChangeOutput | TransitionChangeOutput | TitleErrorChangeOutput | ReadPathsChangeOutput | CheckpointChangeOutput | HeldChangeOutput | FilesChangeOutput | BlobsChangeOutput | GrantsChangeOutput | WrittenChangeOutput | LastProgressAtChangeOutput | RemoteJobsChangeOutput | OpenCallsChangeOutput
 
 "Working time: seconds banked, and when the running clock started."
 type StateClockOutput {
@@ -17360,13 +17512,10 @@ type StateSpendOutput {
 	reportedCalls: Int!
 	"Calls whose cost was computed from a price table."
 	computedCalls: Int!
-	"Calls nothing could price."
-	unpricedCalls: Int!
-	"""
-	Whether what it cost is not known though no call was counted as
-	unpriced: a record from an earlier release that named no cost.
-	"""
-	costUnknown: Boolean!
+	"Calls whose cost is unknown."
+	unknownCalls: Int!
+	"Why, for each reason that has calls."
+	unknown: [UnknownCostOutput!]!
 }
 
 "One tool call a model made."
@@ -19867,6 +20016,70 @@ type UnitPriceOutput {
 	`hr`, `M chr`, `clip`.
 	"""
 	label: String!
+}
+
+"""
+Filter on `UnknownCostOutput`. Every field here mirrors the same-named field there; set the ones that have to hold.
+
+`and`, `or` and `not` compose filters of this same type, and `isNull` asks about the value being absent rather than about its contents.
+"""
+input UnknownCostInput {
+	"""
+	Filter on `UnknownCostOutput.reason`.
+	
+	The reason's name: `no_usage`, `no_price`, `unmodelled_terms`,
+	`no_lookup`, `lookup_unanswered`, `not_recorded` or `not_settled`.
+	"""
+	reason: StringFilter
+	"""
+	Filter on `UnknownCostOutput.explanation`.
+	
+	The reason in plain words.
+	"""
+	explanation: StringFilter
+	"""
+	Filter on `UnknownCostOutput.calls`.
+	
+	How many calls.
+	"""
+	calls: IntFilter
+	"Every filter in this list has to hold."
+	and: [UnknownCostInput!]
+	"At least one filter in this list has to hold."
+	or: [UnknownCostInput!]
+	"This filter must not hold."
+	not: UnknownCostInput
+	"""
+	Match where the value itself is absent.
+	
+	`true` matches only where there is no value, `false` only where there is one.
+	"""
+	isNull: Boolean
+}
+
+"Quantified tests over a list of `UnknownCostOutput`."
+input UnknownCostListInput {
+	"At least one item matches."
+	some: UnknownCostInput
+	"Every item matches."
+	every: UnknownCostInput
+	"No item matches."
+	none: UnknownCostInput
+	"Match where there is no list at all."
+	isNull: Boolean
+}
+
+"Calls whose cost is unknown for one reason."
+type UnknownCostOutput {
+	"""
+	The reason's name: `no_usage`, `no_price`, `unmodelled_terms`,
+	`no_lookup`, `lookup_unanswered`, `not_recorded` or `not_settled`.
+	"""
+	reason: String!
+	"The reason in plain words."
+	explanation: String!
+	"How many calls."
+	calls: Int!
 }
 
 """

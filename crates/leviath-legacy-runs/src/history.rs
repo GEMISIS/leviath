@@ -282,8 +282,20 @@ fn shared(r: &JournalRecord) -> Option<(RunRecord, i64)> {
                 completion_tokens,
                 cached_tokens,
                 cache_write_tokens,
-                cost_usd,
-                cost_reported_by_provider,
+                // A journal recorded a call only when it answered, with the
+                // cost it named: the provider's own, one computed from rates,
+                // or none, for a call nothing priced.
+                cost: match (cost_usd, cost_reported_by_provider) {
+                    (Some(usd), Some(true)) => leviath_core::cost::CallCost::Reported(usd),
+                    (Some(usd), _) => leviath_core::cost::CallCost::Computed(usd),
+                    (None, _) => leviath_core::cost::CallCost::Unknown(
+                        leviath_core::cost::CostUnknown::NoPrice,
+                    ),
+                },
+                ending: leviath_runtime::state::CallEnding::Answered,
+                attempt: String::new(),
+                finish_reason: None,
+                provider_call_id: None,
                 at,
             },
             at,
@@ -382,19 +394,11 @@ fn shared(r: &JournalRecord) -> Option<(RunRecord, i64)> {
     })
 }
 
-/// What the log says of a model call's bill, or a move between models, that
-/// names a model no run file can: the world keeps no event for either.
+/// What the log says of a move between models that names a model no run
+/// file can: the world keeps no event for it. A model call's bill is always
+/// kept, under the nearest name a run file can hold.
 fn dropped(r: &JournalRecord) -> Option<String> {
     match r {
-        JournalRecord::InferenceUsage {
-            kind,
-            provider,
-            model,
-            ..
-        } => Some(format!(
-            "a {} call to {provider:?}/{model:?}, which are not valid names",
-            kind.label()
-        )),
         JournalRecord::InferenceFailover(f) => Some(format!(
             "failed over from {}/{} to {}/{}: {}",
             f.from_provider, f.from_model, f.to_provider, f.to_model, f.reason

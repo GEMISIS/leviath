@@ -77,10 +77,10 @@ Per run, labelled by agent, stage, provider, and model:
 | `leviath.runs.total` | counter | One per finished run, attributed by `leviath.status` and `leviath.empty_output` |
 
 `leviath.cost.total` carries the same figure the run's own record does. That is the provider's own
-cost when it reported one, and arithmetic from published rates when it did not. A call nothing can
-price contributes nothing rather than a zero, so the counter is a floor when some model has no
-known rate.
-Compare it against `unpriced_calls` on the run to know whether it is the whole story, and see
+cost when it reported one, and the reply's usage at published rates when it did not. A call whose
+cost is unknown contributes nothing rather than a zero, so the counter is a floor when a run has
+one.
+Compare it against `unknown_calls` on the run to know whether it is the whole story, and see
 [managing your costs](/docs/costs).
 
 Emitting it rather than leaving a dashboard to multiply tokens by rates is deliberate. Rates differ

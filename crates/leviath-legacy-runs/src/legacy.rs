@@ -260,7 +260,7 @@ fn listed(mut meta: RunMeta, journal: &RunMeta) -> RunMeta {
     meta.cost_usd = journal.cost_usd;
     meta.cost_priced_usd = journal.cost_priced_usd;
     meta.cost_is_exact = journal.cost_is_exact;
-    meta.unpriced_calls = journal.unpriced_calls;
+    meta.unknown_calls = journal.unknown_calls;
     meta
 }
 

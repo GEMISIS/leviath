@@ -168,6 +168,14 @@ pub(crate) fn parse_event(
                 ..text_chunk(String::new())
             })))
         }
+        // The interaction's own id, in the first event: what Google knows
+        // the call by, however the call ends.
+        "interaction.created" => {
+            if let Some(id) = json.pointer("/interaction/id").and_then(Value::as_str) {
+                crate::call_trace::note_call_id(id);
+            }
+            None
+        }
         "interaction.completed" => {
             let interaction = json.get("interaction");
             record_usage(turn, interaction.and_then(|i| i.get("usage")));
@@ -182,6 +190,11 @@ pub(crate) fn parse_event(
                 },
                 "incomplete" | "budget_exceeded" => FinishReason::TokenLimit,
                 "failed" | "cancelled" => {
+                    // The interaction is over, so what it reported using is
+                    // the whole of it, answer or no answer.
+                    if let Some(usage) = &turn.usage {
+                        crate::call_trace::note_whole_usage(usage);
+                    }
                     return Some(Some(Err(ProviderError::ApiError(format!(
                         "the interaction ended {status}: {}",
                         interaction.map(Value::to_string).unwrap_or_default()
@@ -189,12 +202,13 @@ pub(crate) fn parse_event(
                 }
                 other => FinishReason::Unknown(other.to_string()),
             };
+            let mut tokens = turn
+                .usage
+                .clone()
+                .unwrap_or_else(|| TokenUsage::new(0, 0, 0, 0));
+            tokens = crate::usage::with_envelope(tokens, interaction.unwrap_or(&Value::Null));
             Some(Some(Ok(StreamChunk {
-                tokens: Some(
-                    turn.usage
-                        .clone()
-                        .unwrap_or_else(|| TokenUsage::new(0, 0, 0, 0)),
-                ),
+                tokens: Some(tokens),
                 finish_reason: Some(finish_reason),
                 parts: turn.pcm.take().map(Pcm::into_wav).into_iter().collect(),
                 ..text_chunk(String::new())
@@ -244,17 +258,49 @@ fn merge_arguments(call: &mut Call, arguments: Option<&Value>) {
 /// Usage as the route reports it: input includes the cached tokens, and the
 /// thinking the model did is billed as output.
 fn record_usage(turn: &mut Turn, usage: Option<&Value>) {
-    let Some(usage) = usage else {
-        return;
-    };
-    let count = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0) as usize;
-    let cached = count("total_cached_tokens");
-    turn.usage = Some(TokenUsage::new(
-        count("total_input_tokens").saturating_sub(cached),
+    if let Some(usage) = usage {
+        turn.usage = Some(usage_of(usage));
+    }
+}
+
+/// An interaction's `usage` as the counts a call is billed by.
+///
+/// Thought tokens bill as output. Beside the counts: whatever the call was
+/// billed on that text token rates do not cover, which is a token of another
+/// modality (audio, image, video) and a grounding tool it ran.
+pub(crate) fn usage_of(usage: &Value) -> TokenUsage {
+    use crate::usage::count;
+    let cached = count(usage, "/total_cached_tokens");
+    let mut parsed = TokenUsage::new(
+        count(usage, "/total_input_tokens").saturating_sub(cached),
         cached,
         0,
-        count("total_output_tokens") + count("total_thought_tokens"),
-    ));
+        count(usage, "/total_output_tokens") + count(usage, "/total_thought_tokens"),
+    )
+    .whole();
+    for key in [
+        "input_tokens_by_modality",
+        "cached_tokens_by_modality",
+        "output_tokens_by_modality",
+        "tool_use_tokens_by_modality",
+    ] {
+        let rows = usage.get(key).and_then(Value::as_array);
+        for row in rows.into_iter().flatten() {
+            let modality = str_of(row, "modality").to_ascii_lowercase();
+            let term = format!("{modality}_tokens");
+            if !modality.is_empty()
+                && modality != "text"
+                && count(row, "/tokens") > 0
+                && !parsed.terms.extra_terms.contains(&term)
+            {
+                parsed.terms.extra_terms.push(term);
+            }
+        }
+    }
+    if count(usage, "/grounding_tool_count") > 0 {
+        parsed.terms.extra_terms.push("grounding_tool_count".into());
+    }
+    parsed
 }
 
 /// A thought's summary text as a chunk of `reasoning_delta`. The summary is a

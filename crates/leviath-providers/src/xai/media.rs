@@ -25,6 +25,8 @@ use crate::pricing::UnitPrice;
 use crate::provider::{InferenceRequest, InferenceResponse, ProviderError, Result};
 #[cfg(any(feature = "xai", feature = "xai-subscription"))]
 use crate::responses::client::Endpoint;
+#[cfg(any(feature = "xai", feature = "xai-subscription"))]
+use leviath_core::cost::CallCost;
 
 /// What a media model does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,17 +79,20 @@ pub(crate) struct Billing {
 
 #[cfg(any(feature = "xai", feature = "xai-subscription"))]
 impl Billing {
-    /// The cost from the reply's ticks, else `quantity` units, else unknown.
-    /// Nothing at all on a subscription.
-    fn cost(&self, reply: &Value, quantity: f64) -> Option<f64> {
+    /// What the call cost: the reply's ticks, which are the amount billed,
+    /// else `quantity` units at the per-unit price. On a subscription a call
+    /// has no price of its own, which is a known zero.
+    fn cost(&self, reply: &Value, quantity: Option<f64>) -> CallCost {
         if !self.reported {
-            return None;
+            return CallCost::Computed(0.0);
         }
-        reply
+        match reply
             .pointer("/usage/cost_in_usd_ticks")
             .and_then(Value::as_f64)
-            .map(|t| t / crate::responses::TICKS_PER_USD)
-            .or_else(|| self.unit.map(|u| u.cost(quantity)))
+        {
+            Some(ticks) => CallCost::Reported(ticks / crate::responses::TICKS_PER_USD),
+            None => media::unit_cost(self.unit, quantity),
+        }
     }
 }
 
@@ -209,6 +214,9 @@ async fn video(
     } = crate::jobs::submit_or_resume(&step, submit, wait).await?;
 
     let video = done.get("video").unwrap_or(&done);
+    // The task is done, so it is billed, whatever becomes of the download.
+    let cost = billing.cost(&done, video.get("duration").and_then(Value::as_f64));
+    media::job_done(cost);
     let url = video.get("url").and_then(Value::as_str).ok_or_else(|| {
         ProviderError::InvalidResponse("a finished video task carried no URL".into())
     })?;
@@ -216,13 +224,11 @@ async fn video(
         .await
         .map_err(ProviderError::after_send)?;
     let mime = mime.unwrap_or_else(|| "video/mp4".to_string());
-    let seconds = video.get("duration").and_then(Value::as_f64).unwrap_or(0.0);
     let parts = vec![media::blob(
         &mime,
         bytes,
         &format!("video.{}", media::extension(&mime)),
     )?];
-    let cost = billing.cost(&done, seconds);
     let summary = crate::jobs::noted(
         media::summary(&format!("{provider}/{}", request.model), &parts),
         [note],
@@ -289,7 +295,7 @@ async fn speech(
         &format!("speech.{}", media::extension(&mime)),
     )?];
     let chars = text.chars().count() as f64 / 1_000_000.0;
-    let cost = billing.cost(&Value::Null, chars);
+    let cost = billing.cost(&Value::Null, Some(chars));
     let summary = media::summary(&format!("{provider}/{}", request.model), &parts);
     Ok(media::response(summary, parts, cost))
 }
@@ -334,7 +340,10 @@ async fn transcribe(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
-    let hours = reply.get("duration").and_then(Value::as_f64).unwrap_or(0.0) / 3600.0;
+    let hours = reply
+        .get("duration")
+        .and_then(Value::as_f64)
+        .map(|seconds| seconds / 3600.0);
     let transcript = serde_json::to_vec_pretty(&reply).expect("a JSON value serialises");
     let parts = vec![media::json_blob(transcript, "transcript.json")];
     let cost = billing.cost(&reply, hours);

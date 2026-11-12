@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use super::ActiveClock;
 #[cfg(doc)]
 use super::RunMeta;
+use crate::cost::{CallCost, CostUnknown, UnknownCalls};
 
 /// Status of an individual stage within a run.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -75,7 +76,7 @@ impl std::fmt::Display for StageRunStatus {
 /// between the provider's own figure and a rate card is the runtime's job and
 /// is done in exactly one place; this type carries that answer, not the rule
 /// that produced it.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StageCall {
     /// Fresh input tokens, exclusive of both cache counts.
     pub prompt_tokens: usize,
@@ -85,15 +86,25 @@ pub struct StageCall {
     pub cached_tokens: usize,
     /// Input tokens written into the provider's cache.
     pub cache_write_tokens: usize,
-    /// What this call cost, or `None` when neither the provider nor a rate card
-    /// could price it.
+    /// What this call cost and how that is known: the provider's own figure,
+    /// one computed from the rate table, or no figure and why.
     ///
     /// Never a zero standing in for unknown: a zero is a claim that the call was
     /// free, which is true of local inference and false of everything else.
-    pub cost_usd: Option<f64>,
-    /// Whether [`cost_usd`](Self::cost_usd) is the provider's own figure rather
-    /// than one reconstructed from published rates.
-    pub cost_reported: bool,
+    pub cost: CallCost,
+}
+
+impl Default for StageCall {
+    /// A call that used nothing and whose cost nobody stated.
+    fn default() -> Self {
+        Self {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            cached_tokens: 0,
+            cache_write_tokens: 0,
+            cost: CallCost::Unknown(CostUnknown::NoPrice),
+        }
+    }
 }
 
 /// How many visits one [`StageRecord`] keeps in detail.
@@ -152,11 +163,15 @@ pub struct StageVisitRecord {
     /// `None` means unknown, never free - the same meaning it carries on
     /// [`RunMeta::cost_usd`].
     pub cost_usd: Option<f64>,
-    /// Calls in this visit that could not be priced at all. Non-zero forces
+    /// Calls in this visit whose cost is unknown. Non-zero forces
     /// [`cost_usd`](Self::cost_usd) to `None`.
-    pub unpriced_calls: usize,
-    /// Whether every priced call in this visit carried the provider's own cost
-    /// figure rather than one computed from published rates.
+    #[serde(default, alias = "unpriced_calls")]
+    pub unknown_calls: usize,
+    /// Why, for each of those calls.
+    #[serde(default)]
+    pub unknown: UnknownCalls,
+    /// Whether the cost of every call in this visit is known: reported by the
+    /// provider or computed from the rate table, with none unknown.
     pub cost_is_exact: bool,
     /// Priced calls in this visit whose cost the provider reported.
     #[serde(default)]
@@ -165,6 +180,10 @@ pub struct StageVisitRecord {
     /// rates.
     #[serde(default)]
     pub computed_calls: usize,
+    /// Calls made in this visit that are out and have not landed yet, on a
+    /// run that is still going. Counted by whoever reads the run.
+    #[serde(default)]
+    pub calls_in_flight: usize,
     /// The priced subtotal, kept even while `cost_usd` is `None` so a resumed
     /// run does not restart this visit's accounting from zero.
     pub cost_priced_usd: f64,
@@ -190,10 +209,12 @@ impl StageVisitRecord {
             // No calls is a genuine zero, and every call folded in from here can
             // only make the figure less certain. A fresh run starts the same way.
             cost_usd: Some(0.0),
-            unpriced_calls: 0,
+            unknown_calls: 0,
+            unknown: UnknownCalls::default(),
             cost_is_exact: true,
             reported_calls: 0,
             computed_calls: 0,
+            calls_in_flight: 0,
             cost_priced_usd: 0.0,
             active: None,
         }
@@ -206,24 +227,27 @@ impl StageVisitRecord {
         self.cached_tokens += call.cached_tokens;
         self.cache_write_tokens += call.cache_write_tokens;
         self.count_call(call);
-        // One call priced from a rate card makes the whole figure a
-        // reconstruction, and nothing later can turn it back into the invoice.
-        self.cost_is_exact &= call.cost_reported;
-        self.cost_usd = (self.unpriced_calls == 0).then_some(self.cost_priced_usd);
+        // One call with no figure leaves the whole visit without one, and
+        // nothing later can give it back.
+        self.cost_is_exact = self.unknown_calls == 0;
+        self.cost_usd = self.cost_is_exact.then_some(self.cost_priced_usd);
     }
 
-    /// Count `call` as priced (reported or computed) or unpriced.
+    /// Count `call` as reported, computed or unknown.
     fn count_call(&mut self, call: &StageCall) {
-        match (call.cost_usd, call.cost_reported) {
-            (Some(usd), true) => {
+        match call.cost {
+            CallCost::Reported(usd) => {
                 self.cost_priced_usd += usd;
                 self.reported_calls += 1;
             }
-            (Some(usd), false) => {
+            CallCost::Computed(usd) => {
                 self.cost_priced_usd += usd;
                 self.computed_calls += 1;
             }
-            (None, _) => self.unpriced_calls += 1,
+            CallCost::Unknown(reason) => {
+                self.unknown_calls += 1;
+                self.unknown.add(reason);
+            }
         }
     }
 
@@ -319,13 +343,15 @@ pub struct StageRecord {
     /// visit, read [`visits`](Self::visits).
     #[serde(default)]
     pub cost_usd: Option<f64>,
-    /// Calls in this stage that could not be priced at all. Non-zero forces
+    /// Calls in this stage whose cost is unknown. Non-zero forces
     /// [`cost_usd`](Self::cost_usd) to `None`.
+    #[serde(default, alias = "unpriced_calls")]
+    pub unknown_calls: usize,
+    /// Why, for each of those calls.
     #[serde(default)]
-    pub unpriced_calls: usize,
-    /// Whether every priced call in this stage carried the provider's own cost
-    /// figure rather than one computed from published rates. `false` means the
-    /// total is a reconstruction of the invoice, not the invoice.
+    pub unknown: UnknownCalls,
+    /// Whether the cost of every call in this stage is known: reported by the
+    /// provider or computed from the rate table, with none unknown.
     #[serde(default)]
     pub cost_is_exact: bool,
     /// Priced calls in this stage whose cost the provider reported.
@@ -335,6 +361,10 @@ pub struct StageRecord {
     /// rates.
     #[serde(default)]
     pub computed_calls: usize,
+    /// Calls made in this stage that are out and have not landed yet, on a
+    /// run that is still going. Counted by whoever reads the run.
+    #[serde(default)]
+    pub calls_in_flight: usize,
     /// The priced subtotal, kept even when `cost_usd` is `None` so a resumed run
     /// does not restart this stage's accounting from zero.
     #[serde(default)]
@@ -462,10 +492,12 @@ impl StageRecord {
             cached_tokens: 0,
             cache_write_tokens: 0,
             cost_usd: Some(0.0),
-            unpriced_calls: 0,
+            unknown_calls: 0,
+            unknown: UnknownCalls::default(),
             cost_is_exact: true,
             reported_calls: 0,
             computed_calls: 0,
+            calls_in_flight: 0,
             cost_priced_usd: 0.0,
             models: Vec::new(),
             visits: Vec::new(),
@@ -481,8 +513,38 @@ impl StageRecord {
         }
     }
 
-    /// Fold one provider call into this stage, and into the visit that was open
-    /// when it was made.
+    /// Count one call made in this stage, in the visit named `visit`, that
+    /// is still out, so neither the stage's cost nor that visit's is exact
+    /// until it lands. On a run that is going the call is in flight, and the
+    /// figures stay what the calls that landed came to. On a run that has
+    /// `ended` nothing waits on the call but its settling, and until then
+    /// its cost is unknown. For whoever reads a run with a call on its list
+    /// of calls out; nothing a run records.
+    pub fn count_out(&mut self, visit: &str, ended: bool) {
+        let reason = CostUnknown::NotSettled;
+        self.cost_is_exact = false;
+        match ended {
+            true => {
+                self.unknown_calls += 1;
+                self.unknown.add(reason);
+                self.cost_usd = None;
+            }
+            false => self.calls_in_flight += 1,
+        }
+        for visit in self.visits.iter_mut().filter(|v| v.id == visit) {
+            visit.cost_is_exact = false;
+            match ended {
+                true => {
+                    visit.unknown_calls += 1;
+                    visit.unknown.add(reason);
+                    visit.cost_usd = None;
+                }
+                false => visit.calls_in_flight += 1,
+            }
+        }
+    }
+
+    /// Fold one provider call into this stage, and into the visit that is open.
     ///
     /// Every call a run bills is a call made *somewhere*, so a compaction or a
     /// routing call counts against the stage it happened in exactly as a stage
@@ -494,24 +556,46 @@ impl StageRecord {
     /// was in the stage, and dropping the money because the bookkeeping was
     /// late would be the one failure this ledger exists to prevent.
     pub fn record_call(&mut self, call: &StageCall, at: i64) {
+        self.record_call_in(call, "", at);
+    }
+
+    /// Fold one provider call into this stage, and into the visit it was made
+    /// in, named by the id that visit was entered under.
+    ///
+    /// What a call cost can be learned after the run has left the stage: a
+    /// call that was cut off is looked up, and one a stopped daemon left out
+    /// is settled when the run comes back. The money still belongs to the
+    /// stay that spent it, so it is folded into that visit, open or closed,
+    /// and no new visit is opened for it. A visit this record does not hold
+    /// (past [`MAX_STAGE_VISITS`]) leaves the call in the stage's own figures
+    /// alone, and an empty `visit` means the visit that is open, as
+    /// [`Self::record_call`] has it.
+    pub fn record_call_in(&mut self, call: &StageCall, visit: &str, at: i64) {
         self.prompt_tokens += call.prompt_tokens;
         self.completion_tokens += call.completion_tokens;
         self.cached_tokens += call.cached_tokens;
         self.cache_write_tokens += call.cache_write_tokens;
-        match (call.cost_usd, call.cost_reported) {
-            (Some(usd), true) => {
+        match call.cost {
+            CallCost::Reported(usd) => {
                 self.cost_priced_usd += usd;
                 self.reported_calls += 1;
             }
-            (Some(usd), false) => {
+            CallCost::Computed(usd) => {
                 self.cost_priced_usd += usd;
                 self.computed_calls += 1;
             }
-            (None, _) => self.unpriced_calls += 1,
+            CallCost::Unknown(reason) => {
+                self.unknown_calls += 1;
+                self.unknown.add(reason);
+            }
         }
-        self.cost_is_exact &= call.cost_reported;
-        self.cost_usd = (self.unpriced_calls == 0).then_some(self.cost_priced_usd);
-        if let Some(visit) = self.open_visit(at) {
+        self.cost_is_exact = self.unknown_calls == 0;
+        self.cost_usd = self.cost_is_exact.then_some(self.cost_priced_usd);
+        let made_in = match visit.is_empty() {
+            true => self.open_visit(at),
+            false => self.visits.iter_mut().find(|v| v.id == visit),
+        };
+        if let Some(visit) = made_in {
             visit.record_call(call);
         }
     }
@@ -642,16 +726,14 @@ mod tests {
         assert_eq!(back.status, StageRunStatus::Pending);
     }
 
-    /// A call priced from a rate card. `cost_reported: false` is the half that
-    /// decides `cost_is_exact`, and it is not derivable from the amount.
+    /// A call priced from the rate table.
     fn computed(cost_usd: f64) -> StageCall {
         StageCall {
             prompt_tokens: 10,
             completion_tokens: 2,
             cached_tokens: 1,
             cache_write_tokens: 3,
-            cost_usd: Some(cost_usd),
-            cost_reported: false,
+            cost: CallCost::Computed(cost_usd),
         }
     }
 
@@ -668,64 +750,95 @@ mod tests {
         assert_eq!(rec.completion_tokens, 4);
         assert_eq!(rec.cached_tokens, 2);
         assert_eq!(rec.cache_write_tokens, 6);
-        assert_eq!(rec.unpriced_calls, 0);
-        assert!(!rec.cost_is_exact, "rates, not an invoice");
+        assert_eq!(rec.unknown_calls, 0);
+        assert!(rec.cost_is_exact, "every call has a figure");
     }
 
-    /// One call nobody could price takes the whole stage's figure with it. The
+    /// One call with no figure takes the whole stage's figure with it. The
     /// priced part is kept so a resumed run does not start over, and it is not
     /// what `cost_usd` reports: a partial total looks authoritative and
     /// understates by however much it skipped.
     #[test]
-    fn one_unpriced_call_makes_the_stage_unknown_rather_than_cheap() {
+    fn one_unknown_call_makes_the_stage_unknown_rather_than_cheap() {
         let mut rec = StageRecord::new("gather".to_string(), 0);
         rec.record_call(&computed(4.0), 100);
         assert_eq!(rec.cost_usd, Some(4.0));
 
         rec.record_call(
             &StageCall {
-                cost_usd: None,
+                cost: CallCost::Unknown(CostUnknown::NoLookup),
                 ..Default::default()
             },
             110,
         );
         assert_eq!(rec.cost_usd, None, "unknown, not 4.0 and not 0.0");
-        assert_eq!(rec.unpriced_calls, 1);
+        assert_eq!(rec.unknown_calls, 1);
+        assert_eq!(rec.unknown.no_lookup, 1, "with its reason");
+        assert!(!rec.cost_is_exact);
         assert_eq!(rec.cost_priced_usd, 4.0, "the priced part survives");
     }
 
-    /// Exactness only ever goes one way. A stage whose first call carried the
-    /// provider's own figure and whose second was reconstructed holds a
-    /// reconstruction, and no later reported call turns it back into the invoice.
+    /// A stage is exact while every call in it has a figure, whoever worked
+    /// it out, and stops being exact at the first call that has none.
     #[test]
-    fn exactness_is_lost_and_never_regained() {
+    fn a_stage_is_exact_until_a_call_has_no_figure() {
         let mut rec = StageRecord::new("gather".to_string(), 0);
         let reported = StageCall {
-            cost_usd: Some(0.5),
-            cost_reported: true,
+            cost: CallCost::Reported(0.5),
             ..Default::default()
         };
         rec.record_call(&reported, 100);
         assert!(rec.cost_is_exact);
         rec.record_call(&computed(0.5), 110);
-        assert!(!rec.cost_is_exact);
+        assert!(rec.cost_is_exact, "a computed call is a known cost");
         rec.record_call(&reported, 120);
-        assert!(!rec.cost_is_exact, "one reconstruction taints the total");
         // How each call was priced is kept, for the stage and its visit.
         rec.record_call(&StageCall::default(), 130);
+        assert!(!rec.cost_is_exact, "one unknown call leaves no total");
+        rec.record_call(&reported, 140);
+        assert!(!rec.cost_is_exact, "and no later call gives it back");
         assert_eq!(
-            (rec.reported_calls, rec.computed_calls, rec.unpriced_calls),
-            (2, 1, 1)
+            (rec.reported_calls, rec.computed_calls, rec.unknown_calls),
+            (3, 1, 1)
         );
+        assert_eq!(rec.unknown.no_price, 1);
         let visit = &rec.visits[0];
         assert_eq!(
             (
                 visit.reported_calls,
                 visit.computed_calls,
-                visit.unpriced_calls
+                visit.unknown_calls
             ),
-            (2, 1, 1)
+            (3, 1, 1)
         );
+        assert_eq!(visit.unknown.no_price, 1);
+        assert!(!visit.cost_is_exact);
+    }
+
+    /// A call whose cost is learned after its stay ended is folded into that
+    /// stay, by its id, and opens no visit of its own.
+    #[test]
+    fn a_call_is_folded_into_the_visit_it_was_made_in_however_late() {
+        let mut rec = StageRecord::new("gather".to_string(), 0);
+        rec.begin_visit(100, "v1".to_string());
+        rec.close_visit(110);
+        rec.begin_visit(200, "v2".to_string());
+
+        rec.record_call_in(&computed(0.25), "v1", 300);
+        assert_eq!(rec.visits.len(), 2, "no visit is opened for it");
+        assert_eq!(rec.visits[0].cost_usd, Some(0.25), "the stay that spent it");
+        assert_eq!(rec.visits[0].left_at, Some(110), "and it stays closed");
+        assert_eq!(rec.visits[1].cost_usd, Some(0.0));
+        assert_eq!(rec.cost_usd, Some(0.25));
+
+        // A visit the record does not hold: the stage's own figures alone.
+        rec.record_call_in(&computed(0.5), "gone", 301);
+        assert_eq!(rec.cost_usd, Some(0.75));
+        assert_eq!(rec.visits[1].cost_usd, Some(0.0));
+
+        // No visit named: the one that is open.
+        rec.record_call_in(&computed(1.0), "", 302);
+        assert_eq!(rec.visits[1].cost_usd, Some(1.0));
     }
 
     /// Each stay gets its own line. The accumulated record is the sum, which is
@@ -749,6 +862,44 @@ mod tests {
         assert_eq!(rec.visits[1].cost_usd, Some(0.75));
         assert_eq!(rec.visits[1].left_at, None, "still in it");
         assert_eq!(rec.visits[1].prompt_tokens, 10, "not the stage's 20");
+    }
+
+    /// A call still out leaves its stage, and the visit it was made in,
+    /// without an exact cost: what it will come to is not settled. Another
+    /// visit of the same stage is as exact as it was.
+    #[test]
+    fn a_call_still_out_leaves_its_stage_and_visit_inexact() {
+        let mut rec = StageRecord::new("gather".to_string(), 0);
+        rec.begin_visit(100, "v1".to_string());
+        rec.record_call(&computed(0.25), 101);
+        rec.close_visit(110);
+        rec.begin_visit(200, "v2".to_string());
+        rec.record_call(&computed(0.75), 201);
+        assert!(rec.cost_is_exact);
+
+        // In flight on a run that is going: the figures stand, inexact.
+        let mut going = rec.clone();
+        going.count_out("v2", false);
+        assert_eq!(going.cost_usd, Some(1.0));
+        assert!(!going.cost_is_exact);
+        assert_eq!((going.calls_in_flight, going.unknown_calls), (1, 0));
+        assert_eq!(going.visits[1].cost_usd, Some(0.75));
+        assert!(!going.visits[1].cost_is_exact);
+        assert_eq!(going.visits[1].calls_in_flight, 1);
+        assert!(going.visits[0].cost_is_exact, "the other visit stands");
+
+        // Still out on a run that has ended: not settled, so unknown.
+        rec.count_out("v2", true);
+        assert_eq!(rec.calls_in_flight, 0);
+        assert_eq!(rec.cost_usd, None);
+        assert!(!rec.cost_is_exact);
+        assert_eq!((rec.unknown_calls, rec.unknown.not_settled), (1, 1));
+        assert_eq!(rec.cost_priced_usd, 1.0, "what the settled calls came to");
+        assert_eq!(rec.visits[0].cost_usd, Some(0.25), "the other visit stands");
+        assert!(rec.visits[0].cost_is_exact);
+        assert_eq!(rec.visits[1].cost_usd, None);
+        assert!(!rec.visits[1].cost_is_exact);
+        assert_eq!(rec.visits[1].unknown.not_settled, 1);
     }
 
     /// Closing twice is what a persist tick does to every stage the run is not

@@ -14,7 +14,7 @@ use {
     crate::learned::LearnedModels,
     crate::provider::{
         FinishReason, InferenceRequest, InferenceResponse, ModelCapabilityOverride, ModelInfo,
-        Provider, ProviderError, Result, StreamChunk, TokenUsage, ToolCall,
+        Provider, ProviderError, Result, StreamChunk, ToolCall,
     },
     crate::rate_limit::RateLimiter,
     async_trait::async_trait,
@@ -293,6 +293,9 @@ pub enum CacheTtl {
     Ephemeral1h,
 }
 
+/// Anthropic's own endpoint, which the published prices are for.
+pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com/v1";
+
 /// Anthropic Claude provider.
 #[cfg(feature = "anthropic")]
 pub struct AnthropicProvider {
@@ -304,6 +307,9 @@ pub struct AnthropicProvider {
 
     /// API base URL
     base_url: String,
+    /// Whether the published price table applies: true while the provider
+    /// talks to Anthropic's own endpoint.
+    list_priced: bool,
 
     /// Rate limiter
     rate_limiter: Option<RateLimiter>,
@@ -443,7 +449,8 @@ impl AnthropicProvider {
         Self {
             client,
             api_key,
-            base_url: "https://api.anthropic.com/v1".to_string(),
+            base_url: DEFAULT_BASE_URL.to_string(),
+            list_priced: true,
             rate_limiter: None,
             capability_overrides: HashMap::new(),
             cache_ttl: CacheTtl::default(),
@@ -462,7 +469,8 @@ impl AnthropicProvider {
         Self {
             client,
             api_key,
-            base_url: "https://api.anthropic.com/v1".to_string(),
+            base_url: DEFAULT_BASE_URL.to_string(),
+            list_priced: true,
             rate_limiter: rate_limit.map(crate::rate_limit::RateLimiter::new),
             capability_overrides: overrides,
             cache_ttl: CacheTtl::default(),
@@ -501,6 +509,9 @@ impl AnthropicProvider {
     /// byte-for-byte the request it was before.
     pub fn with_base_url(mut self, base_url: Option<String>) -> Self {
         if let Some(url) = base_url {
+            // Anthropic's list prices are for Anthropic's own endpoint. What
+            // any other host charges is its own business.
+            self.list_priced = url.trim_end_matches('/') == DEFAULT_BASE_URL;
             self.base_url = url;
         }
         self
@@ -835,43 +846,26 @@ impl AnthropicProvider {
             }
         }
 
-        let usage = body.get("usage");
-        let prompt_tokens = usage
-            .and_then(|u| u.get("input_tokens"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
-        let completion_tokens = usage
-            .and_then(|u| u.get("output_tokens"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
-
         let stop_reason = body
             .get("stop_reason")
             .and_then(|v| v.as_str())
             .unwrap_or("end_turn");
 
-        let cached_tokens = usage
-            .and_then(|u| u.get("cache_read_input_tokens"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
-        let cache_write_tokens = usage
-            .and_then(|u| u.get("cache_creation_input_tokens"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
+        let mut tokens_used =
+            stream::usage_of(body.get("usage").unwrap_or(&serde_json::Value::Null));
+        tokens_used.terms.model = body
+            .get("model")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        // A reply that parsed is a call Anthropic finished: its usage stands
+        // whatever is made of the reply after this.
+        crate::call_trace::note_whole_usage(&tokens_used);
 
         Ok(InferenceResponse {
             reasoning_summary: (!thinking.trim().is_empty()).then_some(thinking),
             content,
             tool_calls,
-            // `input_tokens` is already exclusive of both cache counts here, so
-            // it is the fresh figure `TokenUsage` wants. The old total omitted
-            // the cache counts entirely and under-reported every cached call.
-            tokens_used: TokenUsage::new(
-                prompt_tokens,
-                cached_tokens,
-                cache_write_tokens,
-                completion_tokens,
-            ),
+            tokens_used,
             finish_reason: Self::parse_stop_reason(stop_reason),
             reasoning: None,
             parts: Vec::new(),
@@ -1025,10 +1019,14 @@ impl Provider for AnthropicProvider {
         // Config first: it is the only source that can know a negotiated rate,
         // and the shipped table is a transcription of a public page that may
         // have moved since this build.
-        self.capability_overrides
-            .get(model)
-            .and_then(|o| o.pricing())
-            .or_else(|| crate::pricing::published_rates("anthropic", model))
+        crate::pricing::rates_for(
+            "anthropic",
+            model,
+            self.capability_overrides
+                .get(model)
+                .and_then(|o| o.pricing()),
+            self.list_priced,
+        )
     }
 
     fn learned_models(&self) -> Option<&crate::learned::LearnedModels> {
@@ -1221,15 +1219,39 @@ mod tests {
         assert_eq!(configured.input_per_mtok, 1.0);
         assert_eq!(configured.output_per_mtok, 2.0);
 
-        // Not configured: the published rate.
-        let listed = crate::pricing::published_rates("anthropic", "claude-sonnet-5");
-        assert!(listed.is_some(), "in the table");
-        assert_eq!(provider.pricing("claude-sonnet-5"), listed);
+        // Not configured: the published rate, with Anthropic's own price for
+        // a cache write made to last an hour, twice the input rate.
+        let listed =
+            crate::pricing::published_rates("anthropic", "claude-sonnet-5").expect("in the table");
+        let priced = provider.pricing("claude-sonnet-5").expect("priced");
+        assert_eq!(priced.input_per_mtok, listed.input_per_mtok);
+        assert_eq!(priced.output_per_mtok, listed.output_per_mtok);
+        assert_eq!(
+            priced.cache_write_1h_per_mtok,
+            Some(2.0 * listed.input_per_mtok)
+        );
+
+        // Pointed at another host, the list price is not that host's: only a
+        // declared rate prices a call there.
+        let elsewhere = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "k".to_string(),
+        )
+        .with_base_url(Some("https://proxy.example.com/v1".to_string()));
+        assert_eq!(elsewhere.pricing("claude-sonnet-5"), None);
+        // Named as itself, Anthropic's endpoint keeps its prices.
+        let named = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "k".to_string(),
+        )
+        .with_base_url(Some(DEFAULT_BASE_URL.to_string()));
+        assert!(named.pricing("claude-sonnet-5").is_some());
 
         // Neither: unpriced, so the run reports its cost unavailable.
         assert_eq!(provider.pricing("no-such-model-9"), None);
     }
     use super::*;
+    use crate::TokenUsage;
     use crate::provider::LimitsSource;
 
     // ─── A breakpoint on a tool turn is not thrown away ─────────────────────
@@ -2329,6 +2351,7 @@ mod tests {
             cached_tokens: 0,
             cache_write_tokens: 0,
             reported_cost_usd: None,
+            terms: Default::default(),
         };
         assert_eq!(usage.cached_tokens, 0);
         assert_eq!(usage.cache_write_tokens, 0);
@@ -2349,6 +2372,7 @@ mod tests {
             cache_ttl: CacheTtl::default(),
             learned: Default::default(),
             extra_headers: Vec::new(),
+            list_priced: true,
         }
     }
 
@@ -2391,6 +2415,7 @@ mod tests {
             cache_ttl: CacheTtl::default(),
             learned: Default::default(),
             extra_headers: Vec::new(),
+            list_priced: true,
         };
         let tokens = provider.count_tokens("anything", "claude-sonnet-4-6").await;
         assert_eq!(tokens, 42);
@@ -2421,6 +2446,7 @@ mod tests {
             cache_ttl: CacheTtl::default(),
             learned: Default::default(),
             extra_headers: Vec::new(),
+            list_priced: true,
         };
         assert_eq!(provider.count_tokens("first", "claude-sonnet-4-6").await, 7);
         let held = tokio::time::timeout(
@@ -2447,6 +2473,7 @@ mod tests {
             cache_ttl: CacheTtl::default(),
             learned: Default::default(),
             extra_headers: Vec::new(),
+            list_priced: true,
         };
         let tokens = provider.count_tokens("1234567", "claude-sonnet-4-6").await;
         assert_eq!(tokens, 2);
@@ -2465,6 +2492,7 @@ mod tests {
             cache_ttl: CacheTtl::default(),
             learned: Default::default(),
             extra_headers: Vec::new(),
+            list_priced: true,
         };
         let tokens = provider.count_tokens("1234567", "claude-sonnet-4-6").await;
         assert_eq!(tokens, 2);
@@ -2483,6 +2511,7 @@ mod tests {
             cache_ttl: CacheTtl::default(),
             learned: Default::default(),
             extra_headers: Vec::new(),
+            list_priced: true,
         };
         let tokens = provider.count_tokens("1234567", "claude-sonnet-4-6").await;
         assert_eq!(tokens, 2);
@@ -3356,6 +3385,7 @@ mod tests {
             cache_ttl: CacheTtl::default(),
             learned: Default::default(),
             extra_headers: Vec::new(),
+            list_priced: true,
         };
         let request = InferenceRequest {
             system: vec![],
@@ -3393,6 +3423,7 @@ mod tests {
             cache_ttl: CacheTtl::default(),
             learned: Default::default(),
             extra_headers: Vec::new(),
+            list_priced: true,
         };
         let request = InferenceRequest {
             system: vec![],
@@ -3423,6 +3454,7 @@ mod tests {
             cache_ttl: CacheTtl::default(),
             learned: Default::default(),
             extra_headers: Vec::new(),
+            list_priced: true,
         };
         let result = provider.list_models().await;
         assert!(result.is_err());
@@ -4036,6 +4068,7 @@ mod tests {
             cache_ttl: CacheTtl::Ephemeral1h,
             learned: Default::default(),
             extra_headers: Vec::new(),
+            list_priced: true,
         };
         assert_eq!(
             provider.cache_control_value(),
@@ -4505,5 +4538,223 @@ mod learned_tests {
                 .effort_extra("claude-haiku-4-5", Effort::Low)
                 .is_null()
         );
+    }
+}
+
+#[cfg(test)]
+mod billing_tests {
+    use super::stream::{parse_sse_event, usage_of};
+    use super::*;
+    use crate::TokenUsage;
+    use leviath_core::cost::{CallCost, CostUnknown};
+    use serde_json::json;
+
+    #[test]
+    fn a_usage_object_says_how_the_call_is_billed() {
+        let usage = usage_of(&json!({
+            "input_tokens": 100,
+            "cache_read_input_tokens": 30,
+            "cache_creation_input_tokens": 20,
+            "output_tokens": 7,
+            "cache_creation": { "ephemeral_5m_input_tokens": 5, "ephemeral_1h_input_tokens": 15 },
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "speed": "standard"
+        }));
+        assert_eq!(
+            (
+                usage.prompt_tokens,
+                usage.cached_tokens,
+                usage.cache_write_tokens,
+                usage.completion_tokens
+            ),
+            (100, 30, 20, 7)
+        );
+        assert_eq!(usage.terms.cache_write_1h_tokens, 15);
+        assert_eq!(usage.terms.service_tier.as_deref(), Some("standard"));
+        assert!(usage.terms.extra_terms.is_empty());
+        assert!(!usage.terms.whole);
+    }
+
+    #[test]
+    fn a_server_tool_a_region_or_a_speed_is_a_term_the_rates_do_not_cover() {
+        let usage = usage_of(&json!({
+            "input_tokens": 10,
+            "output_tokens": 2,
+            "server_tool_use": { "web_search_requests": 2, "web_fetch_requests": 1 },
+            "inference_geo": "us",
+            "speed": "fast"
+        }));
+        assert_eq!(
+            usage.terms.extra_terms,
+            [
+                "web_search_requests",
+                "web_fetch_requests",
+                "inference_geo:us",
+                "speed:fast"
+            ]
+        );
+        let rates = crate::ModelPricing::flat(1.0, 1.0);
+        assert_eq!(
+            usage.cost(Some(&rates)),
+            CallCost::Unknown(CostUnknown::UnmodelledTerms)
+        );
+        // No searches made, and a region the reply could not name: ordinary.
+        let plain = usage_of(&json!({
+            "input_tokens": 10,
+            "server_tool_use": { "web_search_requests": 0 },
+            "inference_geo": "not_available"
+        }));
+        assert!(plain.terms.extra_terms.is_empty());
+    }
+
+    #[test]
+    fn the_closing_event_is_the_running_total_once_it_repeats_the_input() {
+        let mut tool_index: Option<usize> = None;
+        // The output count alone: the slice `message_start` left out.
+        let mut buffer = "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":42}}\n\n".to_string();
+        let slice = parse_sse_event(&mut buffer, &mut tool_index)
+            .unwrap()
+            .unwrap()
+            .tokens
+            .unwrap();
+        assert!(!slice.terms.whole);
+        // With the input counts repeated, it replaces what came before.
+        let mut buffer = "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":90,\"cache_read_input_tokens\":10,\"output_tokens\":42}}\n\n".to_string();
+        let total = parse_sse_event(&mut buffer, &mut tool_index)
+            .unwrap()
+            .unwrap()
+            .tokens
+            .unwrap();
+        assert!(total.terms.whole);
+        let started = TokenUsage::new(80, 10, 0, 0);
+        let call = started.merged(total);
+        assert_eq!(
+            (
+                call.prompt_tokens,
+                call.cached_tokens,
+                call.completion_tokens
+            ),
+            (90, 10, 42)
+        );
+    }
+
+    /// The closing event may repeat the input count and leave the cache
+    /// counts out, or send them as `null`. What it leaves out stands as the
+    /// message opened with it: a cache read that was billed stays billed.
+    #[test]
+    fn the_closing_event_replaces_only_the_counts_it_carries() {
+        use super::stream::{Turn, parse_turn_event};
+        let opening = "event: message_start\ndata: {\"message\":{\"id\":\"msg_1\",\"usage\":{\"input_tokens\":80,\"cache_read_input_tokens\":1000,\"cache_creation_input_tokens\":200,\"output_tokens\":1,\"cache_creation\":{\"ephemeral_1h_input_tokens\":200}}}}\n\n";
+        for closing in [
+            "{\"input_tokens\":95,\"output_tokens\":42}",
+            "{\"input_tokens\":95,\"cache_read_input_tokens\":null,\"cache_creation_input_tokens\":null,\"output_tokens\":42}",
+        ] {
+            let mut turn = Turn::default();
+            let mut buffer = opening.to_string();
+            let started = parse_turn_event(&mut buffer, &mut turn)
+                .unwrap()
+                .unwrap()
+                .tokens
+                .unwrap();
+            let mut buffer = format!(
+                "event: message_delta\ndata: {{\"delta\":{{\"stop_reason\":\"end_turn\"}},\"usage\":{closing}}}\n\n"
+            );
+            let total = parse_turn_event(&mut buffer, &mut turn)
+                .unwrap()
+                .unwrap()
+                .tokens
+                .unwrap();
+            let call = started.merged(total);
+            assert_eq!(
+                (
+                    call.prompt_tokens,
+                    call.cached_tokens,
+                    call.cache_write_tokens,
+                    call.completion_tokens,
+                    call.terms.cache_write_1h_tokens,
+                ),
+                (95, 1000, 200, 42, 200),
+                "{closing}"
+            );
+        }
+        // A closing event whose input count is `null` repeats nothing.
+        let mut turn = Turn::default();
+        let mut buffer = "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":null,\"output_tokens\":7}}\n\n".to_string();
+        let slice = parse_turn_event(&mut buffer, &mut turn)
+            .unwrap()
+            .unwrap()
+            .tokens
+            .unwrap();
+        assert!(!slice.terms.whole);
+        assert_eq!(slice.completion_tokens, 7);
+    }
+
+    /// A trailing slash on the base URL names the same endpoint, so
+    /// Anthropic's list prices still apply.
+    #[test]
+    fn a_trailing_slash_on_the_base_url_is_still_anthropics_endpoint() {
+        let client = crate::provider::build_http_client(None).expect("a test client builds");
+        let slashed = AnthropicProvider::new(client.clone(), "k".to_string())
+            .with_base_url(Some(format!("{DEFAULT_BASE_URL}/")));
+        assert!(slashed.list_priced);
+        let proxied = AnthropicProvider::new(client, "k".to_string())
+            .with_base_url(Some("https://gw.corp/v1".to_string()));
+        assert!(!proxied.list_priced);
+    }
+
+    #[tokio::test]
+    async fn the_opening_event_names_the_call_and_the_model_and_drops_its_output_count() {
+        let trace = crate::CallTrace::new();
+        let chunk = trace
+            .scope(async {
+                let mut tool_index: Option<usize> = None;
+                let mut buffer = "event: message_start\ndata: {\"message\":{\"id\":\"msg_1\",\"model\":\"claude-sonnet-5-20260115\",\"usage\":{\"input_tokens\":25,\"cache_creation_input_tokens\":5,\"output_tokens\":3,\"cache_creation\":{\"ephemeral_1h_input_tokens\":5}}}}\n\n".to_string();
+                parse_sse_event(&mut buffer, &mut tool_index)
+                    .unwrap()
+                    .unwrap()
+            })
+            .await;
+        assert_eq!(trace.seen().call_id.as_deref(), Some("msg_1"));
+        let tokens = chunk.tokens.unwrap();
+        assert_eq!(tokens.completion_tokens, 0, "the call's own comes later");
+        assert_eq!((tokens.prompt_tokens, tokens.cache_write_tokens), (25, 5));
+        assert_eq!(tokens.terms.cache_write_1h_tokens, 5);
+        assert_eq!(
+            tokens.terms.model.as_deref(),
+            Some("claude-sonnet-5-20260115")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reply_that_parsed_keeps_its_usage_whatever_comes_of_it() {
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "k".to_string(),
+        );
+        let trace = crate::CallTrace::new();
+        let response = trace
+            .scope(async {
+                provider
+                    .parse_response(&json!({
+                        "model": "claude-sonnet-5-20260115",
+                        "content": [{ "type": "text", "text": "hi" }],
+                        "stop_reason": "end_turn",
+                        "usage": { "input_tokens": 9, "output_tokens": 4, "service_tier": "priority" }
+                    }))
+                    .unwrap()
+            })
+            .await;
+        assert_eq!(
+            response.tokens_used.terms.model.as_deref(),
+            Some("claude-sonnet-5-20260115")
+        );
+        assert_eq!(
+            response.tokens_used.terms.service_tier.as_deref(),
+            Some("priority")
+        );
+        let seen = trace.seen();
+        assert!(seen.whole);
+        assert_eq!(seen.usage.map(|u| u.prompt_tokens), Some(9));
     }
 }

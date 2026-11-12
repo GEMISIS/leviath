@@ -344,6 +344,13 @@ pub fn resume(
 ) -> Entity {
     run.state.held = None;
     let entity = crate::insert::insert(world, run.spec, bindings, &run.state);
+    // A call written to the run's file after the file was read is settled
+    // there already: the run takes what it cost, and does not ask again.
+    crate::open_calls::take_late(world, entity);
+    // A call the run's file still lists as out was sent by a daemon that
+    // stopped before it ended. Nothing waits on it now, and the run sends
+    // its turn again as a new call, so the old one is accounted for here.
+    crate::open_calls::settle_orphaned(world, entity);
     if let (Some(content), Some(mut out)) = (
         run.answer,
         world.get_mut::<crate::persistence::FinalOutput>(entity),

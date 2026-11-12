@@ -61,6 +61,9 @@ impl WorldHost {
             let agent_id = state.agent_id.clone();
             let status = status_str(&state.status);
             let terminal = crate::pipeline::is_terminal_status(&state.status);
+            // The calls the run has out. Read beside the snapshot and not
+            // into it: a call going out is not the run moving.
+            let calls_out = crate::open_calls::calls_out(self.world.world(), entity);
             let cur = {
                 let totals = self
                     .world
@@ -206,7 +209,13 @@ impl WorldHost {
                         agent_id: agent_id.clone(),
                         threshold_usd: *threshold,
                         total_usd: cur.cost_micros as f64 / 1_000_000.0,
-                        complete: cur.cost_complete,
+                        // A call still out is behind no total yet, whether
+                        // it is in flight or waiting to be settled.
+                        complete: cur.cost_complete && calls_out == 0,
+                        calls_in_flight: match terminal {
+                            true => 0,
+                            false => calls_out,
+                        },
                         stage: cur.stage.clone(),
                     });
                 }
@@ -247,7 +256,18 @@ impl WorldHost {
             // `TITLE_HOLD_SECS` from the run's start, and `expire_title_hold`
             // ends the wait out loud rather than letting it lapse in silence.
             let title_owed = crate::title::title_outstanding(self.world.world(), entity, now);
-            if cur.terminal && was_terminal && !title_owed && self.no_live_parent(entity) {
+            // And a run with a call still out stays resident for the same
+            // reason: the call its ending cut off is finding out what it cost,
+            // and that report needs the run to land on. Held while a call is
+            // in flight, which its own deadline ends, and for
+            // `SETTLE_HOLD_SECS` from the moment each call began to settle.
+            let calls_owed = crate::open_calls::calls_owed(self.world.world(), entity, now);
+            if cur.terminal
+                && was_terminal
+                && !title_owed
+                && !calls_owed
+                && self.no_live_parent(entity)
+            {
                 let entry = self.entry_for(&run_id, entity, state);
                 to_reap.push((run_id.clone(), entity, entry));
             }
@@ -259,7 +279,7 @@ impl WorldHost {
             // `host::paging`), exactly as a daemon restart would. Scoped
             // to standalone roots: a run with tree links or an open prompt
             // keeps the restart-equivalence question open and stays resident.
-            if self.parkable(entity, &state.status) {
+            if self.parkable(entity, &state.status, now) {
                 let entry = self.entry_for(&run_id, entity, state);
                 to_park.push((run_id.clone(), entity, entry));
             }

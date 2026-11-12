@@ -160,11 +160,15 @@ impl super::BedrockProvider {
             .await?;
         let reply: Value = crate::provider::decode_json(response).await?;
         let parts = images(&request.model, &reply)?;
-        let cost = crate::pricing::published_unit_rate(
+        let unit = crate::pricing::published_unit_rate(
             super::PROVIDER_NAME,
             super::catalog::bare_id(&request.model),
         )
-        .map(|row| row.usd * parts.len() as f64);
+        .map(|row| crate::pricing::UnitPrice {
+            usd: row.usd,
+            unit: row.unit,
+        });
+        let cost = media::unit_cost(unit, Some(parts.len() as f64));
         Ok(media::response(
             media::summary(&format!("bedrock/{}", request.model), &parts),
             parts,

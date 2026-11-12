@@ -431,7 +431,10 @@ type PersistenceQuery = (
         // hosts) still persists; those runs simply keep no working clock and
         // fall back to wall-clock age when read.
         Option<&'static mut crate::persistence::RunClock>,
-        Option<&'static crate::inference_call::RemoteJobs>,
+        (
+            Option<&'static crate::inference_call::RemoteJobs>,
+            Option<&'static crate::open_calls::OpenCalls>,
+        ),
         Option<&'static super::AwaitingMessage>,
     ),
 );
@@ -483,6 +486,7 @@ fn run_file_step(
         at,
         events: Vec::new(),
         acks: Vec::new(),
+        settles: Vec::new(),
     }))
 }
 
@@ -522,7 +526,7 @@ fn build_snapshots(
             point_cursor,
             point_rounds,
             clock,
-            remote_jobs,
+            (remote_jobs, open_calls),
             awaiting_message,
         ),
     ) in agents.iter_mut()
@@ -613,7 +617,16 @@ fn build_snapshots(
             awaiting_point.is_some(),
         );
         let point_changed = watermark.last_point != Some(point_now);
-        let jobs_now = remote_jobs.map(|j| j.0.version());
+        // The remote jobs a call has submitted, and the calls that are out:
+        // both are lists the run's file holds, kept by the trips themselves,
+        // and a change to either is recorded at once.
+        let jobs_now = match (remote_jobs, open_calls) {
+            (None, None) => None,
+            (jobs, calls) => Some(
+                jobs.map_or(0, |j| j.0.version())
+                    .wrapping_add(calls.map_or(0, |c| c.version())),
+            ),
+        };
         let jobs_changed = watermark.last_jobs != jobs_now;
         // Beat even when nothing changed, so `updated_at` distinguishes a run
         // that is slow from one that nothing is driving.
@@ -710,6 +723,7 @@ fn build_snapshots(
                 final_output,
                 stage_models,
                 parked,
+                calls_out: open_calls.map_or(0, crate::open_calls::OpenCalls::count),
             },
             crate::persistence::RunPosition {
                 stage_index: cursor.index,

@@ -5,42 +5,59 @@
 //! summary, a title, a stage name), so the usage is accounted here, in one
 //! place, rather than per lane.
 //!
-//! Two things follow. The cumulative [`TokenTotals`] cover every call, so a
-//! run's reported spend is what the provider actually billed. And each call
-//! sends a [`RunRecord::InferenceUsage`] as it lands, which cumulative counters
-//! cannot do: two calls between two steps would arrive as their sum, and a chart
-//! of that sum shows a spike no single call ever made.
+//! Every call that was sent is recorded, however it ended: one that answered
+//! by the lane that reads the answer, and one that failed or was cut off by
+//! [`crate::open_calls`], which learns what it cost first. So the cumulative
+//! [`TokenTotals`] cover every call, and each call sends a
+//! [`RunRecord::InferenceUsage`] as it lands, which cumulative counters cannot
+//! do: two calls between two steps would arrive as their sum, and a chart of
+//! that sum shows a spike no single call ever made.
+
+use leviath_providers::CallCost;
 
 use crate::runfile::record::{InferenceKind, RunRecord};
+use crate::state::journal::CallEnding;
 
 use crate::persistence::{RunMetadata, TokenTotals};
 use crate::pipeline::JournalSender;
 
 /// Everything one call needs to report itself.
 ///
-/// Passed as a struct rather than eight arguments because the four token counts
-/// are trivially transposable at a call site and the compiler would not catch
-/// it.
+/// Passed as a struct rather than a dozen arguments because the four token
+/// counts are trivially transposable at a call site and the compiler would not
+/// catch it.
 pub(crate) struct CallUsage<'a> {
     /// Which kind of call this was.
     pub kind: InferenceKind,
     /// The stage the run was in; empty for the title call, which has none.
     pub stage: &'a str,
+    /// The visit of that stage the call was made in, by its id; empty where
+    /// none is known, which means the visit that is open.
+    pub visit: &'a str,
     /// The stage-local iteration index.
     pub iteration: usize,
     /// The provider that served the call.
     pub provider: &'a str,
     /// The model the call targeted.
     pub model: &'a str,
-    /// What the provider billed.
+    /// What the call used, as far as anything said.
     pub usage: &'a leviath_providers::TokenUsage,
-    /// This model's published rates, when the provider knows them.
-    ///
-    /// Only consulted when the provider did not report the call's cost itself
-    /// (`usage.reported_cost_usd`), which is always the better figure. `None`
-    /// with no reported cost makes the call unpriced, so the run reports its
-    /// cost as unknown rather than as a total quietly missing this call.
-    pub pricing: Option<leviath_providers::ModelPricing>,
+    /// What the call cost and how that is known: the provider's own figure,
+    /// one computed from the model's rates, or no figure and why. Decided
+    /// before it reaches here, so the journal record, the run totals and the
+    /// stage ledger cannot describe the same call three ways.
+    pub cost: CallCost,
+    /// How the call ended.
+    pub ending: CallEnding,
+    /// The attempt this is the cost of, as the trip that made the call
+    /// minted it. Empty where no trip named one, and the attempt's own record
+    /// is paired with this one when both have landed.
+    pub attempt: &'a str,
+    /// Why the model stopped, for a call that answered, where the trip that
+    /// made it said.
+    pub finish_reason: Option<&'a str>,
+    /// The provider's own id for the call, when it gave one.
+    pub provider_call_id: Option<&'a str>,
 }
 
 /// Fold one call into the run's cumulative totals and the stage ledger, and
@@ -64,26 +81,20 @@ pub(crate) fn record_call(
     metadata: Option<&RunMetadata>,
     call: &CallUsage<'_>,
 ) {
-    // The provider's own figure when it gave one, else this model's rates
-    // applied to the counts, else nothing at all. Decided once here so the
-    // journal record, the run totals and the stage ledger cannot end up
-    // describing the same call three different ways.
-    let cost_usd = call.usage.priced_cost(call.pricing.as_ref());
-    let cost_reported = call.usage.reported_cost_usd.is_some();
     let at = chrono::Utc::now().timestamp();
     if let Some(totals) = totals {
-        totals.add_usage_priced(call.usage, call.pricing.as_ref());
+        totals.add_call(call.usage, call.cost);
     }
     if let Some(rec) = ledger.and_then(|l| l.0.iter_mut().find(|r| r.name == call.stage)) {
-        rec.record_call(
+        rec.record_call_in(
             &leviath_core::run_meta::StageCall {
                 prompt_tokens: call.usage.prompt_tokens,
                 completion_tokens: call.usage.completion_tokens,
                 cached_tokens: call.usage.cached_tokens,
                 cache_write_tokens: call.usage.cache_write_tokens,
-                cost_usd,
-                cost_reported,
+                cost: call.cost,
             },
+            call.visit,
             at,
         );
         // Beside the money, and for the same reason: this is where a call that
@@ -96,7 +107,15 @@ pub(crate) fn record_call(
     let (Some(persist), Some(md)) = (persist, metadata) else {
         return;
     };
-    let record = RunRecord::InferenceUsage {
+    // No ack: a usage record is telemetry, and nothing downstream waits on it
+    // the way the tool lane waits on its batch record being durable before
+    // anything can run.
+    persist.record(&md.run_id, usage_record(call, at));
+}
+
+/// The record of what `call` used and cost, stamped `at`.
+pub(crate) fn usage_record(call: &CallUsage<'_>, at: i64) -> RunRecord {
+    RunRecord::InferenceUsage {
         kind: call.kind,
         stage: call.stage.to_string(),
         iteration: call.iteration,
@@ -106,34 +125,27 @@ pub(crate) fn record_call(
         completion_tokens: call.usage.completion_tokens,
         cached_tokens: call.usage.cached_tokens,
         cache_write_tokens: call.usage.cache_write_tokens,
-        cost_usd,
-        cost_reported_by_provider: cost_reported
-            .then_some(true)
-            .or_else(|| call.pricing.as_ref().map(|_| false)),
+        cost: call.cost,
+        ending: call.ending,
+        attempt: call.attempt.to_string(),
+        finish_reason: call.finish_reason.map(str::to_string),
+        provider_call_id: call.provider_call_id.map(str::to_string),
         at,
-    };
-    // No ack: a usage record is telemetry, and nothing downstream waits on it
-    // the way the tool lane waits on its batch record being durable before
-    // anything can run.
-    persist.record(&md.run_id, record);
+    }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use leviath_providers::{CostUnknown, ModelPricing, TokenUsage};
 
-    fn usage() -> leviath_providers::TokenUsage {
-        leviath_providers::TokenUsage {
-            prompt_tokens: 100,
-            completion_tokens: 20,
-            cached_tokens: 3,
-            cache_write_tokens: 4,
-            total_tokens: 120,
-            reported_cost_usd: None,
-        }
+    fn usage() -> TokenUsage {
+        let mut u = TokenUsage::new(100, 3, 4, 20);
+        u.total_tokens = 120;
+        u
     }
 
-    fn metadata() -> RunMetadata {
+    pub(crate) fn metadata() -> RunMetadata {
         RunMetadata {
             run_id: "run-u".to_string(),
             agent_name: "a".to_string(),
@@ -156,15 +168,25 @@ mod tests {
         }
     }
 
-    fn call(kind: InferenceKind, u: &leviath_providers::TokenUsage) -> CallUsage<'_> {
+    /// A call that answered with `u`, priced at `pricing`.
+    fn call<'a>(
+        kind: InferenceKind,
+        u: &'a TokenUsage,
+        pricing: Option<ModelPricing>,
+    ) -> CallUsage<'a> {
         CallUsage {
             kind,
             stage: "plan",
+            visit: "",
             iteration: 2,
             provider: "anthropic",
             model: "claude-sonnet-5",
             usage: u,
-            pricing: None,
+            cost: u.cost(pricing.as_ref()),
+            ending: CallEnding::Answered,
+            attempt: "",
+            provider_call_id: None,
+            finish_reason: None,
         }
     }
 
@@ -179,99 +201,100 @@ mod tests {
         out
     }
 
+    /// One call recorded into fresh totals, with what the journal got.
+    fn recorded(call: &CallUsage<'_>) -> (TokenTotals, Vec<RunRecord>) {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut totals = TokenTotals::default();
+        record_call(
+            Some(&mut totals),
+            None,
+            Some(&JournalSender::new(tx, None)),
+            Some(&metadata()),
+            call,
+        );
+        (totals, appended(&mut rx))
+    }
+
     /// A provider that reports its own cost has that figure journaled verbatim
-    /// and flagged as reported, so a later reader can tell the invoice from a
-    /// reconstruction of it.
+    /// and counted as reported, whatever rates are at hand.
     #[test]
     fn a_reported_cost_is_journaled_as_reported() {
-        let u = leviath_providers::TokenUsage::new(100, 0, 0, 20).with_reported_cost(Some(0.0042));
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut totals = TokenTotals::default();
-        record_call(
-            Some(&mut totals),
-            None,
-            Some(&JournalSender::new(tx, None)),
-            Some(&metadata()),
-            &CallUsage {
-                kind: InferenceKind::Stage,
-                stage: "plan",
-                iteration: 1,
-                provider: "openrouter",
-                model: "x-ai/grok-4.6",
-                usage: &u,
-                // Rates are present AND ignored: the reported figure wins.
-                pricing: Some(leviath_providers::ModelPricing::flat(999.0, 999.0)),
-            },
-        );
+        let u = TokenUsage::new(100, 0, 0, 20).with_reported_cost(Some(0.0042));
+        // Rates are present AND ignored: the reported figure wins.
+        let (totals, records) = recorded(&call(
+            InferenceKind::Stage,
+            &u,
+            Some(ModelPricing::flat(999.0, 999.0)),
+        ));
         assert_eq!(totals.cost.total_usd(), Some(0.0042));
-        assert!(totals.cost.is_exact());
-
-        let records = appended(&mut rx);
+        assert_eq!(totals.cost.reported_calls, 1);
         assert_eq!(records.len(), 1, "one call, one record");
-        let shown = format!("{:?}", records[0]);
-        assert!(shown.contains("cost_usd: Some(0.0042), cost_reported_by_provider: Some(true)"));
+        assert!(format!("{:?}", records[0]).contains("cost: Reported(0.0042)"));
     }
 
-    /// With no reported cost, the model's rates are applied and the record says
-    /// so, because that number is this process's arithmetic rather than a bill.
+    /// With no reported cost, the model's rates are applied and the record
+    /// says so: the figure is this process's arithmetic, never labelled as
+    /// the provider's.
     #[test]
     fn a_computed_cost_is_journaled_as_computed() {
-        let u = leviath_providers::TokenUsage::new(1_000_000, 0, 0, 1_000_000);
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut totals = TokenTotals::default();
-        record_call(
-            Some(&mut totals),
-            None,
-            Some(&JournalSender::new(tx, None)),
-            Some(&metadata()),
-            &CallUsage {
-                kind: InferenceKind::Stage,
-                stage: "plan",
-                iteration: 1,
-                provider: "anthropic",
-                model: "claude-opus-5",
-                usage: &u,
-                pricing: Some(leviath_providers::ModelPricing::flat(5.0, 25.0)),
-            },
-        );
+        let u = TokenUsage::new(1_000_000, 0, 0, 1_000_000);
+        let (totals, records) = recorded(&call(
+            InferenceKind::Stage,
+            &u,
+            Some(ModelPricing::flat(5.0, 25.0)),
+        ));
         assert_eq!(totals.cost.total_usd(), Some(30.0));
-        assert!(!totals.cost.is_exact(), "arithmetic, not an invoice");
-
-        let records = appended(&mut rx);
-        assert_eq!(records.len(), 1, "one call, one record");
-        let shown = format!("{:?}", records[0]);
-        assert!(shown.contains("cost_usd: Some(30.0), cost_reported_by_provider: Some(false)"));
+        assert_eq!(
+            (totals.cost.reported_calls, totals.cost.computed_calls),
+            (0, 1)
+        );
+        assert!(totals.cost.is_exact(), "a computed cost is a known cost");
+        assert!(format!("{:?}", records[0]).contains("cost: Computed(30.0)"));
     }
 
-    /// Neither route available: the call is journaled with no cost at all
-    /// rather than with a zero, which would read as "this was free".
+    /// Neither route available: the call is journaled with no figure and the
+    /// reason for it, rather than with a zero, which would read as "this was
+    /// free".
     #[test]
-    fn an_unpriced_call_journals_no_cost_rather_than_zero() {
-        let u = leviath_providers::TokenUsage::new(10, 0, 0, 5);
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut totals = TokenTotals::default();
-        record_call(
-            Some(&mut totals),
-            None,
-            Some(&JournalSender::new(tx, None)),
-            Some(&metadata()),
-            &call(InferenceKind::Stage, &u),
-        );
+    fn an_unknown_cost_is_journaled_with_its_reason_rather_than_zero() {
+        let u = TokenUsage::new(10, 0, 0, 5);
+        let (totals, records) = recorded(&call(InferenceKind::Stage, &u, None));
         assert_eq!(totals.cost.total_usd(), None, "unknown, not zero");
-        assert_eq!(totals.cost.unpriced_calls, 1);
+        assert_eq!(totals.cost.unknown.no_price, 1);
+        assert!(format!("{:?}", records[0]).contains("cost: Unknown(NoPrice)"));
+    }
 
-        let records = appended(&mut rx);
-        assert_eq!(records.len(), 1, "one call, one record");
+    /// A call that did not answer is recorded like any other: its tokens as
+    /// far as anything said, how it ended, the attempt it was and the
+    /// provider's own id for it.
+    #[test]
+    fn a_call_that_did_not_answer_is_recorded_with_how_it_ended() {
+        let u = TokenUsage::new(7, 0, 0, 0);
+        let (totals, records) = recorded(&CallUsage {
+            cost: leviath_providers::CallCost::Unknown(CostUnknown::NoLookup),
+            ending: CallEnding::CutOff,
+            attempt: "att-9",
+            provider_call_id: Some("gen-9"),
+            ..call(InferenceKind::Stage, &u, None)
+        });
+        assert_eq!(totals.prompt_tokens, 7);
+        assert_eq!(totals.cost.unknown.no_lookup, 1);
         let shown = format!("{:?}", records[0]);
         assert!(
-            shown.contains("cost_usd: None, cost_reported_by_provider: None"),
-            "absent, not 0.0"
+            shown.contains("cost: Unknown(NoLookup), ending: CutOff"),
+            "{shown}"
+        );
+        assert!(
+            shown.contains(
+                "attempt: \"att-9\", finish_reason: None, provider_call_id: Some(\"gen-9\")"
+            ),
+            "{shown}"
         );
     }
 
-    /// The two halves are independent by design, so the four combinations of
-    /// "has totals" and "has a journal" all have to behave. A world missing
-    /// either is ordinary - tests and unpersisted agents run that way - and an
+    /// The halves are independent by design, so the combinations of "has
+    /// totals" and "has a journal" all have to behave. A world missing either
+    /// is ordinary - tests and unpersisted agents run that way - and an
     /// absence must not cost the half that is present.
     #[test]
     fn counting_and_journaling_are_independent() {
@@ -285,7 +308,7 @@ mod tests {
             None,
             Some(&JournalSender::new(tx, None)),
             Some(&metadata()),
-            &call(InferenceKind::Compaction, &u),
+            &call(InferenceKind::Compaction, &u, None),
         );
         assert_eq!(totals.prompt_tokens, 100);
         let mut appended: Vec<(String, RunRecord)> = Vec::new();
@@ -298,12 +321,16 @@ mod tests {
         // Every field but the wall-clock stamp, the one value that cannot be
         // known ahead of time.
         let shown = format!("{record:?}");
-        assert!(shown.starts_with(
-            "InferenceUsage { kind: Compaction, stage: \"plan\", iteration: 2, \
+        assert!(
+            shown.starts_with(
+                "InferenceUsage { kind: Compaction, stage: \"plan\", iteration: 2, \
                  provider: \"anthropic\", model: \"claude-sonnet-5\", prompt_tokens: 100, \
                  completion_tokens: 20, cached_tokens: 3, cache_write_tokens: 4, \
-                 cost_usd: None, cost_reported_by_provider: None, at: "
-        ));
+                 cost: Unknown(NoPrice), ending: Answered, attempt: \"\", \
+                 finish_reason: None, provider_call_id: None, at: "
+            ),
+            "{shown}"
+        );
 
         // No journal: still counted.
         let mut totals = TokenTotals::default();
@@ -312,7 +339,7 @@ mod tests {
             None,
             None,
             Some(&metadata()),
-            &call(InferenceKind::Stage, &u),
+            &call(InferenceKind::Stage, &u, None),
         );
         assert_eq!(totals.prompt_tokens, 100);
 
@@ -325,13 +352,19 @@ mod tests {
             None,
             Some(&JournalSender::new(tx, None)),
             None,
-            &call(InferenceKind::Title, &u),
+            &call(InferenceKind::Title, &u, None),
         );
         assert_eq!(totals.prompt_tokens, 100);
         assert!(rx.try_recv().is_err());
 
         // Neither: a no-op that must not panic.
-        record_call(None, None, None, None, &call(InferenceKind::Routing, &u));
+        record_call(
+            None,
+            None,
+            None,
+            None,
+            &call(InferenceKind::Routing, &u, None),
+        );
     }
 
     /// The stage the call was billed to records what served it, and a stage
@@ -360,13 +393,11 @@ mod tests {
                 None,
                 None,
                 &CallUsage {
-                    kind: InferenceKind::Stage,
                     stage,
-                    iteration: 1,
                     provider,
                     model,
-                    usage: &u,
-                    pricing: None,
+                    iteration: 1,
+                    ..call(InferenceKind::Stage, &u, None)
                 },
             );
         }
@@ -383,6 +414,7 @@ mod tests {
                 },
             ],
         );
+        assert_eq!(ledger.0[0].unknown_calls, 3, "each call, with no price");
         assert!(
             ledger.0[1].models.is_empty(),
             "a stage the run has not run in has nothing to report"
@@ -402,7 +434,7 @@ mod tests {
                 None,
                 None,
                 None,
-                &call(InferenceKind::Stage, &u),
+                &call(InferenceKind::Stage, &u, None),
             );
         }
         assert_eq!(totals.prompt_tokens, 300);

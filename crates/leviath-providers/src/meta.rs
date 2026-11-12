@@ -402,10 +402,14 @@ impl Provider for MetaProvider {
         let model = self
             .serves_model(model)
             .unwrap_or_else(|| model.to_string());
-        self.capability_overrides
-            .get(&model)
-            .and_then(ModelCapabilityOverride::pricing)
-            .or_else(|| crate::pricing::published_rates(PROVIDER_NAME, &model))
+        crate::pricing::rates_for(
+            PROVIDER_NAME,
+            &model,
+            self.capability_overrides
+                .get(&model)
+                .and_then(ModelCapabilityOverride::pricing),
+            self.endpoint.list_priced,
+        )
     }
 }
 

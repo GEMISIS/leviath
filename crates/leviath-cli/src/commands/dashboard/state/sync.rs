@@ -205,6 +205,7 @@ impl Dashboard {
                 agent.iteration = run.iteration;
                 agent.tokens_in = run.prompt_tokens;
                 agent.tokens_out = run.completion_tokens;
+                agent.cost = run_cost(run);
                 agent.cached_tokens = run.cached_tokens;
                 agent.title = run.title.clone();
                 agent.clock_now = clock_now;
@@ -296,6 +297,7 @@ impl Dashboard {
                     tokens_in: run.prompt_tokens,
                     tokens_out: run.completion_tokens,
                     cached_tokens: run.cached_tokens,
+                    cost: run_cost(run),
                     iteration: run.iteration,
                     broken_scripts: run.flags.broken_scripts.clone(),
                     waiting_prompt,
@@ -324,5 +326,17 @@ impl Dashboard {
             self.update_display_indices();
         }
         self.initial_sync_done = true;
+    }
+}
+
+/// What a run's own calls have cost, as its row shows it: nothing before it
+/// has sent a call, then the figure, or `$?` with how many calls are unknown,
+/// and how many calls are in flight while any is.
+fn run_cost(run: &leviath_core::run_meta::RunMeta) -> String {
+    let spent = crate::render::cost::Spent::of_run(run);
+    let unknown = spent.unknown.total() as usize;
+    match spent.reported_calls + spent.computed_calls + unknown + spent.calls_in_flight {
+        0 => String::new(),
+        _ => crate::render::cost::brief_of(&spent),
     }
 }

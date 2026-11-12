@@ -660,6 +660,7 @@ impl OllamaProvider {
                 cached_tokens: 0,
                 cache_write_tokens: 0,
                 reported_cost_usd: None,
+                terms: Default::default(),
             },
             finish_reason,
             reasoning: None,
@@ -1007,6 +1008,7 @@ fn ollama_chunk(json: &serde_json::Value) -> StreamChunk {
             cached_tokens: 0,
             cache_write_tokens: 0,
             reported_cost_usd: None,
+            terms: Default::default(),
         }),
         finish_reason: Some(finish_reason),
         reasoning: None,
@@ -1074,13 +1076,9 @@ mod tests {
         let mut totals = crate::CostTotals::default();
         totals.add(&crate::TokenUsage::new(1_000, 0, 0, 500), Some(&p));
         assert_eq!(totals.total_usd(), Some(0.0));
-        assert_eq!(totals.unpriced_calls, 0);
-        // `is_exact` stays false because the figure came from a rate rather
-        // than from the provider quoting a cost. That reads oddly for a zero
-        // that cannot be wrong, but the flag answers "reported or computed",
-        // not "trustworthy", and widening it would blur the one distinction it
-        // exists to draw.
-        assert!(!totals.is_exact());
+        assert_eq!(totals.unknown_calls(), 0);
+        // A known zero is a known cost: computed, and exact.
+        assert!(totals.is_exact());
         assert_eq!(totals.computed_calls, 1);
     }
     use super::*;

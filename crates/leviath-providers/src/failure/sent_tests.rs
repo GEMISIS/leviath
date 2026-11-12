@@ -484,3 +484,55 @@ async fn a_redirect_that_fails_was_sent() {
     assert!(e.is_redirect());
     assert_eq!(reqwest_request_sent(&e), Some(true));
 }
+
+/// The status the provider answered with, where the error is such an answer.
+#[test]
+fn an_error_says_the_status_the_provider_answered_with() {
+    use crate::provider::UnavailableReason;
+    let rate_limited = ProviderError::RateLimitExceeded {
+        retry_after_secs: None,
+    };
+    assert_eq!(rate_limited.answered_status(), Some(429));
+    assert!(rate_limited.refused_unrun());
+
+    let overflowed = |sent| ProviderError::TokenLimitExceeded {
+        used: 1,
+        reply_budget: 1,
+        max: 1,
+        sent,
+    };
+    assert_eq!(overflowed(true).answered_status(), Some(400));
+    assert_eq!(overflowed(false).answered_status(), None);
+    assert!(!overflowed(true).refused_unrun(), "a 400 leaves it open");
+
+    for (status, unrun) in [
+        (401, true),
+        (402, true),
+        (404, true),
+        (400, false),
+        (500, false),
+    ] {
+        let error = ProviderError::ApiError(format!("HTTP {status} something"));
+        assert_eq!(error.answered_status(), Some(status));
+        assert_eq!(error.refused_unrun(), unrun, "{status}");
+    }
+    let out_of_credits = ProviderError::Unavailable {
+        reason: UnavailableReason::CreditsExhausted,
+        detail: "HTTP 402 Payment Required".into(),
+    };
+    assert_eq!(out_of_credits.answered_status(), Some(402));
+
+    // An error that came inside a reply already under way names no status,
+    // and neither does anything that is not the provider's answer.
+    for error in [
+        ProviderError::ApiError("the model provider reported: overloaded".into()),
+        ProviderError::RequestFailed("[timeout] reading: slow".into()),
+        ProviderError::ClientBuild("no certs".into()),
+        ProviderError::InvalidResponse("not json".into()),
+        ProviderError::RetentionRefused("zdr".into()),
+        ProviderError::Other("x".into()),
+    ] {
+        assert_eq!(error.answered_status(), None, "{error}");
+        assert!(!error.refused_unrun());
+    }
+}

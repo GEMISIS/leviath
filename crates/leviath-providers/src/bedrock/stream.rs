@@ -330,7 +330,10 @@ fn map_event(event: &str, json: &Value, state: &mut EventState) -> Option<Stream
             })
         }
         "metadata" => Some(StreamChunk {
-            tokens: Some(parse_usage(json.get("usage"))),
+            tokens: Some(super::convert::served_on(
+                parse_usage(json.get("usage")),
+                json,
+            )),
             ..chunk()
         }),
         "messageStart" | "contentBlockStop" => None,

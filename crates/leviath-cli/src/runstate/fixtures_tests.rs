@@ -235,9 +235,12 @@ fn state_of(meta: &RunMeta, spec: &RunSpec, base: Option<RunState>) -> RunState 
     state.cursor.stage = stage;
     state.cursor.iteration = u32::try_from(meta.iteration).unwrap_or(u32::MAX);
     let n = |x: usize| x as u64;
-    let (priced_usd, unpriced_calls) = match meta.cost_usd {
-        Some(usd) => (usd, 0),
-        None => (meta.cost_priced_usd, meta.unpriced_calls.max(1)),
+    let (priced_usd, unknown) = match meta.cost_usd {
+        Some(usd) => (usd, leviath_core::cost::UnknownCalls::default()),
+        None => (
+            meta.cost_priced_usd,
+            meta.unknown.reconciled(meta.unknown_calls.max(1), true),
+        ),
     };
     state.totals = Totals {
         spend: Spend {
@@ -246,10 +249,9 @@ fn state_of(meta: &RunMeta, spec: &RunSpec, base: Option<RunState>) -> RunState 
             cached_tokens: n(meta.cached_tokens),
             cache_write_tokens: n(meta.cache_write_tokens),
             priced_usd,
-            reported_calls: 0,
-            computed_calls: u32::from(!meta.cost_is_exact),
-            unpriced_calls: unpriced_calls as u32,
-            cost_unknown: false,
+            unknown,
+            reported_calls: meta.reported_calls as u32,
+            computed_calls: meta.computed_calls as u32,
         },
         tool_calls: n(meta.tool_calls),
     };
@@ -554,10 +556,12 @@ pub(crate) fn write_stages_index(run_id: &str, stages: &[StageRecord]) -> anyhow
         cached_tokens: tokens[2] as u64,
         cache_write_tokens: tokens[3] as u64,
         priced_usd: usd,
+        unknown: leviath_core::cost::UnknownCalls {
+            no_price: calls[2] as u32,
+            ..Default::default()
+        },
         reported_calls: calls[0] as u32,
         computed_calls: calls[1] as u32,
-        unpriced_calls: calls[2] as u32,
-        cost_unknown: false,
     };
     state.ledger = stages
         .iter()
@@ -585,7 +589,7 @@ pub(crate) fn write_stages_index(run_id: &str, stages: &[StageRecord]) -> anyhow
                 [
                     r.reported_calls,
                     r.computed_calls.max(usize::from(!r.cost_is_exact)),
-                    r.unpriced_calls.max(usize::from(r.cost_usd.is_none())),
+                    r.unknown_calls.max(usize::from(r.cost_usd.is_none())),
                 ],
             ),
             models: r
@@ -616,7 +620,7 @@ pub(crate) fn write_stages_index(run_id: &str, stages: &[StageRecord]) -> anyhow
                         [
                             v.reported_calls,
                             v.computed_calls.max(usize::from(!v.cost_is_exact)),
-                            v.unpriced_calls.max(usize::from(v.cost_usd.is_none())),
+                            v.unknown_calls.max(usize::from(v.cost_usd.is_none())),
                         ],
                     ),
                     clock: v.active.map_or(Clock::default(), |a| Clock {

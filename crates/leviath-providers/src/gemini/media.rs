@@ -269,7 +269,7 @@ pub(crate) fn priced_by_unit(
                 chunk.tokens = chunk
                     .tokens
                     .take()
-                    .map(|usage| usage.with_reported_cost(Some(unit.cost(files as f64))));
+                    .map(|usage| usage.with_computed_cost(unit.cost(files as f64)));
             }
             chunk
         })
@@ -374,18 +374,9 @@ impl super::GeminiProvider {
             parts.push(leviath_core::mime::Blob::new(mime_type, bytes).named(&name));
         }
 
-        let count = |key: &str| {
-            reply
-                .pointer(&format!("/usage/{key}"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0) as usize
-        };
-        let cached = count("total_cached_tokens");
-        let usage = crate::provider::TokenUsage::new(
-            count("total_input_tokens").saturating_sub(cached),
-            cached,
-            0,
-            count("total_output_tokens") + count("total_thought_tokens"),
+        let usage = crate::usage::with_envelope(
+            super::stream::usage_of(reply.get("usage").unwrap_or(&Value::Null)),
+            &reply,
         );
         let content = match text.trim().is_empty() && !parts.is_empty() {
             true => media::summary(&format!("google/{}", request.model), &parts),
@@ -393,7 +384,11 @@ impl super::GeminiProvider {
         };
         Ok(InferenceResponse {
             tokens_used: usage,
-            ..media::response(content, parts, None)
+            ..media::response(
+                content,
+                parts,
+                leviath_core::cost::CallCost::Unknown(leviath_core::cost::CostUnknown::NoUsage),
+            )
         })
     }
 
@@ -511,12 +506,12 @@ impl super::GeminiProvider {
             .await
             .map_err(ProviderError::after_send)?;
         let parts = vec![media::typed_blob("video/mp4", bytes, "video.mp4")];
-        // Veo 3.1 makes eight seconds unless asked otherwise.
-        let length = seconds.unwrap_or(8) as f64;
-        let cost = self
-            .pricing(&request.model)
-            .and_then(|p| p.unit)
-            .map(|u| u.cost(length));
+        // Billed by the second made, which the operation does not say, so it
+        // is read off the file that came back.
+        let cost = media::unit_cost(
+            self.pricing(&request.model).and_then(|p| p.unit),
+            media::video_seconds(&parts[0].bytes),
+        );
         Ok(media::response(
             crate::jobs::noted(
                 media::summary(&format!("google/{}", request.model), &parts),

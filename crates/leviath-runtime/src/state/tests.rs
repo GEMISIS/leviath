@@ -292,6 +292,16 @@ pub(crate) fn busy() -> RunState {
         granted: 1,
     });
     s.remote_jobs = [("job-1".to_string(), "c4".to_string())].into();
+    s.open_calls = vec![crate::state::OpenCallState {
+        attempt: "a7".into(),
+        kind: crate::state::journal::CallKind::Routing,
+        stage: Some(StageName::new("build").unwrap()),
+        iteration: 3,
+        model: crate::spec::names::ModelRef::parse("mock/m").expect("a model"),
+        provider_call_id: Some("gen-7".into()),
+        opened_at: 12,
+        visit: String::new(),
+    }];
     s
 }
 
@@ -427,6 +437,8 @@ fn deltas_and_events_survive_the_binary_codec() {
                 kind: Default::default(),
                 stage: None,
                 iteration: 0,
+                ending: Default::default(),
+                provider_call_id: None,
             },
             RunEvent::Failover {
                 from: model.clone(),
@@ -574,4 +586,101 @@ fn a_settled_ledger_leaves_an_unentered_cursor_stage_unreached() {
     s.ledger[1].entered = false;
     s.settle_ledger();
     assert_eq!(s.ledger[1].status, StageStatus::Skipped);
+}
+
+/// A call taken off the list of calls out adds what it cost to the run, to
+/// its stage and to the visit it was made in, and names its model on the
+/// stage once. A call the list does not hold changes nothing.
+#[test]
+fn a_settled_call_leaves_the_list_and_joins_what_was_spent() {
+    use crate::state::journal::CallKind;
+    let mut s = busy();
+    let model = crate::spec::names::ModelRef::parse("mock/m").expect("a model");
+    let stage = s.ledger[0].stage.clone();
+    s.ledger[0].visits = vec![super::VisitRecord {
+        id: "v1".into(),
+        entered_at: 1,
+        left_at: None,
+        spend: Default::default(),
+        clock: Default::default(),
+    }];
+    s.ledger[0].models = vec![model.clone()];
+    let out = |attempt: &str, stage, visit: &str| crate::state::OpenCallState {
+        attempt: attempt.into(),
+        kind: CallKind::Stage,
+        stage,
+        visit: visit.into(),
+        iteration: 1,
+        model: model.clone(),
+        provider_call_id: None,
+        opened_at: 1,
+    };
+    s.open_calls = vec![
+        out("in-visit", Some(stage.clone()), "v1"),
+        out("other-visit", Some(stage), "v9"),
+        out(
+            "no-such-stage",
+            Some(StageName::new("nowhere").unwrap()),
+            "v1",
+        ),
+    ];
+    let before = (s.totals.spend.priced_usd, s.ledger[0].spend.priced_usd);
+    let spend = super::Spend {
+        priced_usd: 1.0,
+        computed_calls: 1,
+        ..Default::default()
+    };
+    assert!(!s.clone().settle_call("never-listed", &spend, &model));
+    for attempt in ["in-visit", "other-visit", "no-such-stage"] {
+        assert!(s.settle_call(attempt, &spend, &model), "{attempt}");
+    }
+    assert!(s.open_calls.is_empty());
+    assert_eq!(s.totals.spend.priced_usd, before.0 + 3.0);
+    assert_eq!(s.ledger[0].spend.priced_usd, before.1 + 2.0);
+    assert_eq!(s.ledger[0].visits[0].spend.priced_usd, 1.0);
+    assert_eq!(s.ledger[0].models, vec![model.clone()]);
+
+    // A call that stood for a job is the job's account: settled, the run
+    // holds that job no longer, and keeps any other.
+    s.remote_jobs = [
+        ("p/m/video".to_string(), "job-1".to_string()),
+        ("p/n/video".to_string(), "job-2".to_string()),
+    ]
+    .into();
+    s.open_calls = vec![crate::state::OpenCallState {
+        provider_call_id: Some("job-1".into()),
+        ..out("stood", None, "")
+    }];
+    assert!(s.settle_call("stood", &spend, &model));
+    assert_eq!(
+        s.remote_jobs,
+        [("p/n/video".to_string(), "job-2".to_string())].into()
+    );
+
+    // Two calls a dead daemon saved on one job are one account: settling
+    // the one that stands for the job takes the other off the list with it,
+    // and leaves a call that names something else.
+    let on = |attempt: &str, id: &str| crate::state::OpenCallState {
+        provider_call_id: Some(id.into()),
+        ..out(attempt, None, "")
+    };
+    s.open_calls = vec![
+        on("stood", "job-2"),
+        on("picking-up", "job-2"),
+        on("text", "gen-1"),
+        out("no-id", None, ""),
+    ];
+    let before = s.totals.spend.priced_usd;
+    assert!(s.settle_call("stood", &spend, &model));
+    let left: Vec<&str> = s.open_calls.iter().map(|c| c.attempt.as_str()).collect();
+    assert_eq!(left, ["text", "no-id"]);
+    assert_eq!(s.totals.spend.priced_usd, before + 1.0, "counted once");
+    assert!(s.remote_jobs.is_empty());
+    assert!(
+        !s.settle_call("picking-up", &spend, &model),
+        "already settled"
+    );
+    // A call that names no job takes nothing else with it.
+    assert!(s.settle_call("no-id", &spend, &model));
+    assert_eq!(s.open_calls.len(), 1);
 }

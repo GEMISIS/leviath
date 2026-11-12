@@ -104,7 +104,7 @@ async fn a_run_carries_its_identity_counters_and_spend() {
         meta(),
         r#"{ run { id blueprintName task status startedAt updatedAt ageSecs workingSecs
                    usage { promptTokens completionTokens cachedTokens cacheWriteTokens }
-                   cost { costUsd costPricedUsd costIsExact unpricedCalls }
+                   cost { costUsd costPricedUsd costIsExact unknownCalls }
                    workdir } }"#,
     )
     .await;
@@ -120,7 +120,7 @@ async fn a_run_carries_its_identity_counters_and_spend() {
     // Money crosses the wire as a string, so no JSON parser re-rounds it.
     assert_eq!(run["cost"]["costUsd"], "0.0425");
     assert_eq!(run["cost"]["costIsExact"], true);
-    assert_eq!(run["cost"]["unpricedCalls"], 0);
+    assert_eq!(run["cost"]["unknownCalls"], 0);
     assert_eq!(run["workdir"], "/work");
 }
 
@@ -267,9 +267,21 @@ async fn every_mirrored_function_runs() {
         cost_usd: Some(Decimal(1.0)),
         cost_priced_usd: Decimal(1.0),
         cost_is_exact: true,
-        unpriced_calls: 0,
+        computed_calls: 0,
+        calls_in_flight: 0,
+        includes_children: false,
+        reported_calls: 0,
+        unknown: Default::default(),
+        unknown_calls: 0,
     }])
     .await;
+    let unknown = [super::UnknownCost {
+        reason: "no_lookup".to_string(),
+        explanation: "no way to look it up".to_string(),
+        calls: 2,
+    }];
+    exercise(&unknown).await;
+    exercise_list(&unknown).await;
     exercise(&[WorkingClock {
         banked_secs: 1,
         since: Some(Timestamp(2)),

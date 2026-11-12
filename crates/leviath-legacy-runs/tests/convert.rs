@@ -36,6 +36,8 @@ mod upgrade_layout5;
 mod upgrade_layout6;
 #[path = "convert/upgrade_layout7.rs"]
 mod upgrade_layout7;
+#[path = "convert/upgrade_layout8.rs"]
+mod upgrade_layout8;
 
 use common::{FIXTURES, Run, RunFile};
 use leviath_legacy_runs::{BlueprintSource, ConvertError, is_legacy, meta};

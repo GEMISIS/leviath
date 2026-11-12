@@ -41,14 +41,15 @@ pub(crate) enum ServerEvent {
         threshold_usd: f64,
         /// What the run has spent so far, in dollars.
         total_usd: f64,
-        /// Whether every call behind that total could be priced. When false the
-        /// run has spent at least this, and more by an unknown amount, so it
-        /// must not be shown as a final figure.
-        ///
-        /// A complete total can still be a reconstruction from published rates
-        /// rather than the provider's own figure; that is a separate question,
-        /// and `cost_is_exact` on the run record is what answers it.
+        /// Whether that total is the run's whole cost so far: the cost of
+        /// every call is known and no call is out. When false the run has
+        /// spent at least this, and more by an unknown amount, so it must not
+        /// be shown as a final figure. The same answer as `cost_is_exact` on
+        /// the run record.
         complete: bool,
+        /// Calls that are out and have not landed yet. They are not in the
+        /// total. The same count as `calls_in_flight` on the run record.
+        calls_in_flight: usize,
         /// The stage that was running when it crossed. The full per-stage
         /// breakdown is in the run's stage ledger.
         stage: String,
@@ -955,6 +956,7 @@ mod tests {
                     threshold_usd: 25.0,
                     total_usd: 27.5,
                     complete: true,
+                    calls_in_flight: 0,
                     stage: "analyze".to_string(),
                 },
                 "r11",

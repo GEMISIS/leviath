@@ -575,10 +575,14 @@ impl Provider for OpenAIProvider {
         // Config first: it is the only source that can know a negotiated rate,
         // and the shipped table is a transcription of a public page that may
         // have moved since this build.
-        self.capability_overrides
-            .get(model)
-            .and_then(|o| o.pricing())
-            .or_else(|| crate::pricing::published_rates(PROVIDER_NAME, model))
+        crate::pricing::rates_for(
+            PROVIDER_NAME,
+            model,
+            self.capability_overrides
+                .get(model)
+                .and_then(|o| o.pricing()),
+            self.endpoint.list_priced,
+        )
     }
 
     fn learned_models(&self) -> Option<&crate::learned::LearnedModels> {

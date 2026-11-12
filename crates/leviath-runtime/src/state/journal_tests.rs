@@ -17,11 +17,24 @@ pub(crate) fn every_event() -> Vec<RunEvent> {
         RunEvent::Inference {
             attempt: "a1".into(),
             model: model.clone(),
-            spend: crate::state::Spend::default(),
+            spend: crate::state::Spend {
+                unknown: leviath_core::cost::UnknownCalls {
+                    no_usage: 1,
+                    no_price: 2,
+                    unmodelled_terms: 3,
+                    no_lookup: 4,
+                    lookup_unanswered: 5,
+                    not_recorded: 6,
+                    not_settled: 0,
+                },
+                ..Default::default()
+            },
             finish_reason: Some("stop".into()),
             kind: Default::default(),
             stage: None,
             iteration: 0,
+            ending: crate::state::CallEnding::CutOff,
+            provider_call_id: Some("gen-1".into()),
         },
         RunEvent::Failover {
             from: model.clone(),
@@ -64,6 +77,7 @@ fn kept_facts() -> Vec<RunEvent> {
             transient: true,
             capacity: false,
             next: RetryState::SameModel,
+            sent: Some(true),
         },
         finish_reason: Some("stop".into()),
         stopped_for: None,
@@ -163,4 +177,38 @@ fn every_kept_fact_survives_the_binary_codec() {
         serde_json::from_str::<StateDelta>(&json).expect("it reads back"),
         delta
     );
+}
+
+/// How a call ended reads as one lowercase word.
+#[test]
+fn an_ending_has_a_word() {
+    assert_eq!(CallEnding::Answered.label(), "answered");
+    assert_eq!(CallEnding::Failed.label(), "failed");
+    assert_eq!(CallEnding::CutOff.label(), "cut_off");
+}
+
+/// One call's spend is in exactly one class: unknown when it has no figure,
+/// reported when the provider gave one, computed otherwise.
+#[test]
+fn one_calls_spend_is_in_one_class() {
+    use crate::state::Spend;
+    use leviath_core::cost::{CostClass, CostUnknown, UnknownCalls};
+    let reported = Spend {
+        reported_calls: 1,
+        ..Spend::default()
+    };
+    assert_eq!(reported.class(), CostClass::Reported);
+    let computed = Spend {
+        computed_calls: 1,
+        ..Spend::default()
+    };
+    assert_eq!(computed.class(), CostClass::Computed);
+    let mut unknown = UnknownCalls::default();
+    unknown.add(CostUnknown::NoLookup);
+    let lost = Spend {
+        reported_calls: 1,
+        unknown,
+        ..Spend::default()
+    };
+    assert_eq!(lost.class(), CostClass::Unknown);
 }

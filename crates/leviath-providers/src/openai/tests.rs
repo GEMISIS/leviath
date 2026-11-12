@@ -11,8 +11,12 @@ fn client() -> reqwest::Client {
     crate::provider::build_http_client(None).expect("a test client builds")
 }
 
+/// OpenAI, answering at `url`: a mock stands in for OpenAI's own endpoint,
+/// so OpenAI's published prices still apply to it.
 fn provider_with_url(url: String) -> OpenAIProvider {
-    OpenAIProvider::new(client(), "test-key".to_string()).with_base_url(Some(url))
+    let mut openai = OpenAIProvider::new(client(), "test-key".to_string()).with_base_url(Some(url));
+    openai.endpoint.list_priced = true;
+    openai
 }
 
 fn simple_request() -> InferenceRequest {
@@ -756,7 +760,7 @@ async fn a_media_model_runs_on_its_own_route_through_the_provider() {
     let made = provider.infer(&request).await.expect("an image");
     assert_eq!(made.parts.len(), 1);
     assert!(
-        made.tokens_used.reported_cost_usd.is_some(),
+        made.tokens_used.priced_cost(None).is_some(),
         "the shipped table prices gpt-image-1 by its tokens"
     );
     let streamed = provider.infer_stream(&request).await.expect("a stream");

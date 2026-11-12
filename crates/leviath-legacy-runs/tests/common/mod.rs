@@ -319,7 +319,56 @@ pub fn as_layout_6_reads(spec: &mut serde_json::Value) {
 pub fn as_layout_8_reads(mut value: serde_json::Value) -> serde_json::Value {
     count_no_resubmissions(&mut value);
     with_no_continue_settings(&mut value);
+    accounting_for_every_call(&mut value);
     value
+}
+
+/// `value` with what this build keeps about a model call's cost, which no
+/// older layout kept: every spend's unpriced calls unknown for want of a
+/// price (and a cost its record never named as one call recorded without
+/// one), every billed call answered with no id of the provider's, every
+/// failed attempt not saying whether its request went out, and every state
+/// listing no call as out.
+pub fn accounting_for_every_call(value: &mut serde_json::Value) {
+    use serde_json::{Value, json};
+    match value {
+        Value::Object(map) => {
+            if let (Some(unpriced), Some(never_named)) = (
+                map.get("unpriced_calls").and_then(Value::as_u64),
+                map.get("cost_unknown").and_then(Value::as_bool),
+            ) {
+                map.remove("unpriced_calls");
+                map.remove("cost_unknown");
+                map.insert(
+                    "unknown".into(),
+                    json!({
+                        "no_usage": 0,
+                        "no_price": unpriced,
+                        "unmodelled_terms": 0,
+                        "no_lookup": 0,
+                        "lookup_unanswered": 0,
+                        "not_recorded": u64::from(never_named && unpriced == 0),
+                        "not_settled": 0,
+                    }),
+                );
+            }
+            if let Some(Value::Object(call)) = map.get_mut("Inference") {
+                call.insert("ending".into(), json!("answered"));
+                call.insert("provider_call_id".into(), Value::Null);
+            }
+            if let Some(Value::Object(failed)) = map.get_mut("Failed")
+                && failed.contains_key("transient")
+            {
+                failed.insert("sent".into(), Value::Null);
+            }
+            if map.contains_key("remote_jobs") && map.contains_key("ledger") {
+                map.insert("open_calls".into(), json!([]));
+            }
+            map.values_mut().for_each(accounting_for_every_call);
+        }
+        Value::Array(items) => items.iter_mut().for_each(accounting_for_every_call),
+        _ => {}
+    }
 }
 
 /// `value` with `continue_at` unset on every graph in it, and `on_continue` and

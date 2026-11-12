@@ -28,11 +28,18 @@ pub(super) struct Rollup {
     pub(super) cost_usd: Option<f64>,
     /// The priced part, kept while `cost_usd` is `None`.
     pub(super) cost_priced_usd: f64,
-    /// True only when every run in the subtree carried the provider's own
-    /// figures.
+    /// True only when the cost of every call in the subtree is known and
+    /// none is in flight.
     pub(super) cost_is_exact: bool,
-    /// Calls in the subtree no provider priced.
-    pub(super) unpriced_calls: usize,
+    /// Calls in the subtree that are out and have not landed yet. They are
+    /// in no figure here until they land.
+    pub(super) calls_in_flight: usize,
+    /// Calls in the subtree whose cost the provider reported.
+    pub(super) reported_calls: usize,
+    /// Calls in the subtree whose cost was computed from the rate table.
+    pub(super) computed_calls: usize,
+    /// Calls in the subtree whose cost is unknown, by reason.
+    pub(super) unknown: leviath_core::cost::UnknownCalls,
     /// Each run's working time added up. Agent-seconds, so two workers busy
     /// for a minute side by side count two minutes.
     pub(super) working_secs: u64,
@@ -52,10 +59,15 @@ impl Rollup {
             completion_tokens: meta.completion_tokens,
             cached_tokens: meta.cached_tokens,
             cache_write_tokens: meta.cache_write_tokens,
-            cost_usd: meta.cost_usd.filter(|_| meta.unpriced_calls == 0),
+            cost_usd: meta.cost_usd.filter(|_| meta.unknown_calls == 0),
             cost_priced_usd: meta.cost_priced_usd,
             cost_is_exact: meta.cost_is_exact,
-            unpriced_calls: meta.unpriced_calls,
+            calls_in_flight: meta.calls_in_flight,
+            reported_calls: meta.reported_calls,
+            computed_calls: meta.computed_calls,
+            unknown: meta
+                .unknown
+                .reconciled(meta.unknown_calls, meta.cost_usd.is_some()),
             working_secs: meta.active_runtime_secs(now),
             working_now: usize::from(meta.active.is_some_and(|clock| clock.since.is_some())),
             depth: 0,
@@ -75,7 +87,10 @@ impl Rollup {
         self.cost_usd = self.cost_usd.zip(below.cost_usd).map(|(a, b)| a + b);
         self.cost_priced_usd += below.cost_priced_usd;
         self.cost_is_exact &= below.cost_is_exact;
-        self.unpriced_calls += below.unpriced_calls;
+        self.calls_in_flight += below.calls_in_flight;
+        self.reported_calls += below.reported_calls;
+        self.computed_calls += below.computed_calls;
+        self.unknown.merge(&below.unknown);
         self.working_secs += below.working_secs;
         self.working_now += below.working_now;
         self.depth = self.depth.max(below.depth + 1);
@@ -138,6 +153,7 @@ pub(super) fn build_tree(
         completion_tokens: r.completion_tokens,
         cost_usd: r.cost_usd,
         subtree_cost_usd: rollup.cost_usd,
+        subtree_calls_in_flight: rollup.calls_in_flight,
         children,
     };
     snapshot
@@ -163,7 +179,10 @@ pub(super) fn build_tree_status(
         subtree_completion_tokens: rollup.completion_tokens,
         cost_usd: r.cost_usd,
         subtree_cost_usd: rollup.cost_usd,
-        subtree_unpriced_calls: rollup.unpriced_calls,
+        subtree_unknown_calls: rollup.unknown.total() as usize,
+        subtree_unknown: rollup.unknown,
+        calls_in_flight: r.calls_in_flight,
+        subtree_calls_in_flight: rollup.calls_in_flight,
         subtree_working_secs: rollup.working_secs,
         children,
     };
@@ -375,12 +394,12 @@ mod tests {
         priced.cost_usd = Some(0.25);
         let mut unpriced = make_meta("u", "c", Some("r"));
         unpriced.cost_usd = None;
-        unpriced.unpriced_calls = 1;
+        unpriced.unknown_calls = 1;
         let runs = snap(vec![root, priced, unpriced]);
 
         let node = status_of(&runs, "r");
         assert_eq!(node.subtree_cost_usd, None);
-        assert_eq!(node.subtree_unpriced_calls, 1);
+        assert_eq!(node.subtree_unknown_calls, 1);
         let beside = node.children.iter().find(|c| c.run_id == "p").unwrap();
         assert_eq!(beside.subtree_cost_usd, Some(0.25));
 
@@ -404,7 +423,7 @@ mod tests {
 
         let mut stale_figure = make_meta("b", "a", None);
         stale_figure.cost_usd = Some(1.0);
-        stale_figure.unpriced_calls = 1;
+        stale_figure.unknown_calls = 1;
         assert_eq!(
             status_of(&snap(vec![stale_figure]), "b").subtree_cost_usd,
             None

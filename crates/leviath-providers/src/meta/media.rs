@@ -192,7 +192,7 @@ async fn transcribe(
         .map_or(header.seconds, |ms| ms / 1000.0);
     let transcript = serde_json::to_vec_pretty(&reply).expect("a JSON value serialises");
     let parts = vec![media::json_blob(transcript, "transcript.json")];
-    let cost = unit.map(|u| u.cost(seconds / 3600.0));
+    let cost = media::unit_cost(unit, Some(seconds / 3600.0));
     Ok(media::response(text, parts, cost))
 }
 
@@ -329,7 +329,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(response.content, "hello");
-        assert!((response.tokens_used.reported_cost_usd.unwrap() - 0.09).abs() < 1e-9);
+        assert!((response.tokens_used.priced_cost(None).unwrap() - 0.09).abs() < 1e-9);
         let raw = seen.lock().unwrap().join("");
         assert!(raw.contains("POST /asr/transcribe"), "{raw}");
         assert!(raw.contains("name=\"request\""), "{raw}");
@@ -350,7 +350,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(priced.tokens_used.reported_cost_usd.unwrap() > 0.0);
+        assert!(priced.tokens_used.priced_cost(None).unwrap() > 0.0);
     }
 
     #[tokio::test]
@@ -403,7 +403,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(response.parts[0].mime_type.as_str(), "image/png");
-        assert_eq!(response.tokens_used.reported_cost_usd, Some(0.01));
+        assert_eq!(response.tokens_used.priced_cost(None), Some(0.01));
     }
 
     /// Meta names `output_format: "webp"`, its default, on a reply whatever

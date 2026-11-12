@@ -171,7 +171,7 @@ fn a_stage_record_carries_its_ledger() {
     core.cost_usd = Some(0.02);
     core.cost_priced_usd = 0.02;
     core.cost_is_exact = true;
-    core.unpriced_calls = 0;
+    core.unknown_calls = 0;
     core.visit_count = 2;
     core.runaway_warned = true;
     core.started_at = Some(100);
@@ -394,7 +394,12 @@ async fn every_mirrored_function_runs() {
         cost_usd: Some(Decimal(0.01)),
         cost_priced_usd: Decimal(0.01),
         cost_is_exact: true,
-        unpriced_calls: 0,
+        computed_calls: 0,
+        calls_in_flight: 0,
+        includes_children: false,
+        reported_calls: 0,
+        unknown: Default::default(),
+        unknown_calls: 0,
     };
     let visit = StageVisit {
         id: Some(async_graphql::ID::from("v-one")),

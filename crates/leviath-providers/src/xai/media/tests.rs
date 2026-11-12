@@ -97,7 +97,7 @@ async fn a_video_is_submitted_polled_downloaded_and_priced_by_the_second() {
     .expect("a video");
     assert_eq!(response.parts[0].bytes, b"MP4");
     assert_eq!(response.parts[0].name.as_deref(), Some("video.mp4"));
-    assert!((response.tokens_used.reported_cost_usd.unwrap() - 0.4).abs() < 1e-9);
+    assert!((response.tokens_used.priced_cost(None).unwrap() - 0.4).abs() < 1e-9);
     let body: Value = serde_json::from_str(&bodies.lock().unwrap()[0]).unwrap();
     assert_eq!(body["duration"], 8, "\"8s\" is eight seconds");
     assert_eq!(body["resolution"], "720p");
@@ -180,7 +180,7 @@ async fn a_video_edit_or_extension_goes_to_its_own_route_and_a_url_may_sit_at_th
         "no type sent means mp4"
     );
     assert_eq!(
-        response.tokens_used.reported_cost_usd,
+        response.tokens_used.priced_cost(None),
         Some(0.05),
         "the ticks win"
     );
@@ -240,7 +240,7 @@ async fn speech_is_the_audio_bytes_typed_by_the_reply_and_priced_by_the_characte
     // The mock sends a JSON content type, which is not audio: the default holds.
     assert_eq!(response.parts[0].mime_type.as_str(), "audio/mpeg");
     assert_eq!(response.parts[0].name.as_deref(), Some("speech.mp3"));
-    assert!((response.tokens_used.reported_cost_usd.unwrap() - 11.0 * 15.0 / 1e6).abs() < 1e-12);
+    assert!((response.tokens_used.priced_cost(None).unwrap() - 11.0 * 15.0 / 1e6).abs() < 1e-12);
     let raw = seen.lock().unwrap().join("");
     assert!(raw.contains("\"language\":\"auto\""), "{raw}");
     assert!(
@@ -271,8 +271,9 @@ async fn speech_is_the_audio_bytes_typed_by_the_reply_and_priced_by_the_characte
     .unwrap();
     assert_eq!(spoken.parts[0].name.as_deref(), Some("speech.wav"));
     assert_eq!(
-        spoken.tokens_used.reported_cost_usd, None,
-        "a subscription reports no cost"
+        spoken.tokens_used.priced_cost(None),
+        Some(0.0),
+        "a call on a subscription has no price of its own"
     );
 
     let silent = run(
@@ -309,7 +310,7 @@ async fn a_transcription_uploads_the_audio_and_keeps_the_word_timings() {
     .unwrap();
     assert_eq!(response.content, "hello world");
     assert_eq!(response.parts[0].name.as_deref(), Some("transcript.json"));
-    assert!((response.tokens_used.reported_cost_usd.unwrap() - 0.2).abs() < 1e-9);
+    assert!((response.tokens_used.priced_cost(None).unwrap() - 0.2).abs() < 1e-9);
     let raw = seen.lock().unwrap().join("");
     assert!(raw.contains("multipart/form-data"), "{raw}");
     assert!(raw.contains("name=\"diarization\""), "{raw}");
@@ -342,7 +343,7 @@ async fn an_image_model_goes_through_the_shared_images_route() {
     )
     .await
     .unwrap();
-    assert_eq!(response.tokens_used.reported_cost_usd, Some(0.02));
+    assert_eq!(response.tokens_used.priced_cost(None), Some(0.02));
 }
 
 #[tokio::test]

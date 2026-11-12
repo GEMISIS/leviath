@@ -172,9 +172,10 @@ fn an_attempts_outcomes_and_follow_ups_keep_their_wire_names() {
                 transient: true,
                 capacity: false,
                 next: Retry::Reported,
+                sent: None,
             },
             "{\"failed\":{\"kind\":\"timeout\",\"transient\":true,\"capacity\":false,\
-             \"next\":\"reported\"}}"
+             \"next\":\"reported\",\"sent\":null}}"
                 .to_string(),
         ),
     ] {

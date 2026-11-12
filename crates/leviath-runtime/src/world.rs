@@ -390,7 +390,10 @@ impl PipelineWorld {
             wake.clone(),
         ));
         world.insert_resource(crate::fanout::FanOutIo::new(runtime.clone(), wake.clone()));
+        let (spend, spend_rx) = crate::open_calls::SpendSink::channel(wake.clone());
+        world.insert_resource(spend_rx);
         world.insert_resource(InferenceStage {
+            spend,
             // The wake goes into the pools, not just the bridges: freeing a slot
             // has to re-drive dispatch, or the agents parked on a full pool never
             // learn that capacity came back.
@@ -435,6 +438,7 @@ impl PipelineWorld {
         ));
         world.insert_resource(crate::pipeline::JournalInbox(journal_rx));
         world.insert_resource(crate::pipeline::RunJournals::default());
+        world.insert_resource(crate::open_calls::LateSettled::default());
         world.insert_resource(crate::pipeline::PersistLaneHealth(persist_stats));
         world.insert_resource(MessageIntake(msg_rx));
         // Telemetry defaults to the no-op sink; a host that wants export
@@ -458,6 +462,14 @@ impl PipelineWorld {
                     abort_terminal_work,
                     crate::inference_call::fire_due_calls,
                     crate::title_bridge::fire_due_titles,
+                )
+                    .chain(),
+                // What every call that ended since the last tick cost, before
+                // any lane reads the answer it came with: a call is billed
+                // whatever its run is doing by now.
+                (
+                    crate::open_calls::give_up_jobs,
+                    crate::open_calls::collect_call_spend,
                 )
                     .chain(),
                 // A message wakes an interactive stage parked on it; then a
@@ -974,6 +986,21 @@ impl PipelineWorld {
     pub(crate) fn narrow_tool_lane(&self, upto: usize) -> usize {
         self.tool_lane.narrow(upto)
     }
+    /// Settle the calls the file of the finished run `run_id` still lists as
+    /// out: each is asked after at its provider, and what it cost is written
+    /// to the run's file, which takes it off the list there. A finished run
+    /// is never brought back into the world, so nothing else would settle a
+    /// call that was out when the daemon stopped or the run was unloaded.
+    /// A call that stands for a job `state` still holds is given up with
+    /// the job, which a finished run never picks up.
+    pub fn settle_recorded_calls(&self, run_id: &str, state: &crate::state::RunState) {
+        crate::open_calls::settle_recorded(
+            &self.world,
+            run_id,
+            &state.open_calls,
+            &state.remote_jobs,
+        );
+    }
 
     /// Wrap an entity that came out of this world, for callers that hold one.
     ///
@@ -1127,6 +1154,7 @@ mod tests {
                 cached_tokens: 0,
                 cache_write_tokens: 0,
                 reported_cost_usd: None,
+                terms: Default::default(),
             },
             finish_reason: FinishReason::Complete,
             reasoning: None,
@@ -2318,6 +2346,80 @@ mod tests {
         // a finished run's duration must not go on climbing when it is read.
         let clock = meta.active.expect("a run carrying a RunClock records one");
         assert_eq!(clock.since, None, "the clock stops at the terminal status");
+    }
+
+    /// A finished run is never brought back into the world, so a call its
+    /// file still lists as out is settled where the run is: asked after,
+    /// and written to the file, which takes it off the list there.
+    #[tokio::test]
+    async fn a_call_a_finished_runs_file_still_lists_is_settled_in_the_file() {
+        use crate::runfile::reader_tests::{initial, spec};
+        let dir = tempfile::tempdir().unwrap();
+        let mut world = PipelineWorld::new(
+            registry_with(vec![text("done")]),
+            Arc::new(EchoTools),
+            InferencePoolConfig::new(),
+            1,
+            Some(dir.path().to_path_buf()),
+            Handle::current(),
+        );
+        let run_dir = dir.path().join("run-old");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let file = run_dir.join(leviath_core::files::RUN_FILE);
+        let mut state = initial();
+        state.status = crate::state::RunStatus::Cancelled;
+        state.open_calls = vec![crate::state::OpenCallState {
+            attempt: "cut".into(),
+            kind: Default::default(),
+            stage: None,
+            visit: String::new(),
+            iteration: 1,
+            model: crate::spec::names::ModelRef::parse("gone/m").unwrap(),
+            provider_call_id: Some("gen-1".into()),
+            opened_at: 1,
+        }];
+        // And a job the run was still waiting on, with the call that stands
+        // for it: a finished run picks nothing up.
+        state.remote_jobs = [("gone/m/video".to_string(), "job-1".to_string())].into();
+        state.open_calls.push(crate::state::OpenCallState {
+            attempt: "stood".into(),
+            provider_call_id: Some("job-1".into()),
+            ..state.open_calls[0].clone()
+        });
+        crate::runfile::RunFileWriter::create(
+            &file,
+            &spec(),
+            &crate::spec::env::CodeFiles::new(),
+            &state,
+            Default::default(),
+        )
+        .unwrap();
+
+        world.settle_recorded_calls("run-old", &state);
+        // Read before each tick, so the first reading is of the file as it
+        // was written: the call still listed.
+        let poll = async {
+            loop {
+                let now = crate::runfile::RunFileReader::read(&file)
+                    .unwrap()
+                    .latest_state()
+                    .unwrap();
+                if now.open_calls.is_empty() {
+                    break now;
+                }
+                world.run_until_idle(5).await;
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        };
+        let settled = tokio::time::timeout(std::time::Duration::from_secs(30), poll)
+            .await
+            .expect("the call was written to the run's file");
+        // Its provider is not configured here, so what it cost is unknown,
+        // and so is what the job cost. Neither is still out, and the run
+        // holds no job: it reads the same from here on.
+        assert_eq!(settled.totals.spend.unknown.no_lookup, 2);
+        assert!(settled.remote_jobs.is_empty());
+        assert_eq!(settled.status, crate::state::RunStatus::Cancelled);
     }
 
     #[tokio::test]

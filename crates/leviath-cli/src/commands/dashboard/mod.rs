@@ -955,6 +955,7 @@ mod tests {
             clock_now: 0,
             graph: None,
             accepts_messages: false,
+            cost: String::new(),
         };
         assert_eq!(agent.id, "run-test");
         assert_eq!(agent.blueprint_name, "tester");
@@ -1050,6 +1051,7 @@ mod tests {
             clock_now: 0,
             graph: None,
             accepts_messages: true,
+            cost: String::new(),
         }
     }
 

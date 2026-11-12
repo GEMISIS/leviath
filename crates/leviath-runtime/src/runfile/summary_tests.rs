@@ -284,24 +284,27 @@ fn a_converted_run_lists_as_its_release_did_until_it_moves() {
     assert_eq!(summary_of(&spec, &state, 9).active, None);
 }
 
-/// A cost an earlier release's record never named lists as unknown, with no
-/// call counted unpriced, for the run and for each stage.
+/// A cost an earlier release's record never named lists as unknown, for the
+/// run and for each stage, as one call recorded without a cost.
 #[test]
 fn a_cost_never_named_lists_as_unknown() {
     let mut state = initial();
     state.totals.spend.priced_usd = 0.0;
-    state.totals.spend.cost_unknown = true;
+    state.totals.spend.unknown.not_recorded = 1;
     let mut rec = crate::insert::place::pending_stage(state.cursor.stage.clone());
     rec.entered = true;
-    rec.spend.cost_unknown = true;
+    rec.spend.unknown.not_recorded = 1;
     state.ledger = vec![rec];
     let meta = summary_of(&spec(), &state, 9);
-    assert_eq!((meta.cost_usd, meta.unpriced_calls), (None, 0));
+    assert_eq!((meta.cost_usd, meta.unknown_calls), (None, 1));
+    assert_eq!(meta.unknown.not_recorded, 1);
     assert!(!meta.cost_is_exact);
     let stages = stage_records(&spec(), &state);
-    assert_eq!((stages[0].cost_usd, stages[0].unpriced_calls), (None, 0));
-    state.totals.spend.cost_unknown = false;
-    assert_eq!(summary_of(&spec(), &state, 9).cost_usd, Some(0.0));
+    assert_eq!((stages[0].cost_usd, stages[0].unknown_calls), (None, 1));
+    state.totals.spend.unknown = Default::default();
+    let known = summary_of(&spec(), &state, 9);
+    assert_eq!(known.cost_usd, Some(0.0));
+    assert!(known.cost_is_exact);
 }
 
 /// A run whose ledger says it entered its stage names that stage, though it
@@ -384,4 +387,92 @@ fn a_stage_ledger_lists_every_clock_and_a_converted_one_as_recorded() {
     let moved = stage_records(&converted, &state);
     assert!(moved[0].entered);
     assert_eq!(clock(moved[0].active), Some((30, None)));
+}
+
+/// A call that is out on a run that is going is in flight: the run's cost is
+/// what its settled calls came to, with the call counted beside it, and is
+/// not exact until the call lands. The same call still out on a run that has
+/// ended has nothing left to wait on it but its settling, and until then the
+/// run's cost is not known. Either way for the run, for the stage the call
+/// was made in and for the visit.
+#[test]
+fn a_call_still_out_is_in_flight_on_a_run_that_is_going_and_unsettled_on_one_that_ended() {
+    let mut state = initial();
+    state.totals.spend.priced_usd = 0.5;
+    state.totals.spend.reported_calls = 1;
+    let stage = state.cursor.stage.clone();
+    let mut rec = crate::insert::place::pending_stage(stage.clone());
+    rec.entered = true;
+    rec.spend.priced_usd = 0.5;
+    rec.spend.reported_calls = 1;
+    rec.visits.push(crate::state::VisitRecord {
+        id: "v1".into(),
+        entered_at: 1,
+        left_at: None,
+        spend: rec.spend.clone(),
+        clock: Default::default(),
+    });
+    state.ledger = vec![rec];
+    let settled = summary_of(&spec(), &state, 9);
+    assert_eq!(settled.cost_usd, Some(0.5));
+    assert!(settled.cost_is_exact);
+    assert_eq!(settled.calls_in_flight, 0);
+
+    let out = |stage| crate::state::OpenCallState {
+        attempt: "a1".into(),
+        kind: Default::default(),
+        stage,
+        visit: "v1".into(),
+        iteration: 1,
+        model: crate::spec::names::ModelRef::parse("mock/m").unwrap(),
+        provider_call_id: None,
+        opened_at: 3,
+    };
+    // One stage call and the title call, which no stage owns.
+    state.open_calls = vec![out(Some(stage)), out(None)];
+    let going = summary_of(&spec(), &state, 9);
+    assert_eq!(going.cost_usd, Some(0.5), "what has landed, not nothing");
+    assert!(!going.cost_is_exact, "and not the whole of it yet");
+    assert_eq!(going.calls_in_flight, 2);
+    assert_eq!((going.unknown_calls, going.unknown.not_settled), (0, 0));
+    let stages = stage_records(&spec(), &state);
+    assert_eq!(stages[0].cost_usd, Some(0.5));
+    assert!(!stages[0].cost_is_exact);
+    assert_eq!(stages[0].calls_in_flight, 1);
+    assert_eq!(stages[0].unknown_calls, 0);
+    assert_eq!(stages[0].visits[0].cost_usd, Some(0.5));
+    assert!(!stages[0].visits[0].cost_is_exact);
+    assert_eq!(stages[0].visits[0].calls_in_flight, 1);
+
+    // The run ends with both still out: a daemon that stopped mid-lookup.
+    for ended in [
+        crate::state::RunStatus::Cancelled,
+        crate::state::RunStatus::Complete,
+        crate::state::RunStatus::Error("boom".into()),
+    ] {
+        state.status = ended;
+        let meta = summary_of(&spec(), &state, 9);
+        assert_eq!(meta.cost_usd, None);
+        assert!(!meta.cost_is_exact);
+        assert_eq!(meta.calls_in_flight, 0);
+        assert_eq!(meta.unknown_calls, 2);
+        assert_eq!(meta.unknown.not_settled, 2);
+        assert_eq!(meta.cost_priced_usd, 0.5, "what the settled calls came to");
+    }
+    let stages = stage_records(&spec(), &state);
+    assert_eq!(stages[0].cost_usd, None);
+    assert!(!stages[0].cost_is_exact);
+    assert_eq!(stages[0].unknown.not_settled, 1);
+    assert_eq!(stages[0].calls_in_flight, 0);
+    assert_eq!(stages[0].visits[0].cost_usd, None);
+    assert!(!stages[0].visits[0].cost_is_exact);
+    assert_eq!(stages[0].visits[0].unknown.not_settled, 1);
+
+    // Settled, the ended run is exact again. A job is counted through the
+    // call that stands for it, never beside it.
+    state.open_calls.clear();
+    state.remote_jobs = [("p/m/video".to_string(), "job-1".to_string())].into();
+    let after = summary_of(&spec(), &state, 9);
+    assert_eq!(after.cost_usd, Some(0.5));
+    assert!(after.cost_is_exact);
 }

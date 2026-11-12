@@ -96,7 +96,7 @@ async fn an_image_is_made_with_no_response_format_and_priced_by_its_tokens() {
     .await
     .expect("an image");
     assert_eq!(response.parts[0].name.as_deref(), Some("image-1.png"));
-    assert!((response.tokens_used.reported_cost_usd.unwrap() - 0.045).abs() < 1e-9);
+    assert!((response.tokens_used.priced_cost(None).unwrap() - 0.045).abs() < 1e-9);
     let body: Value = serde_json::from_str(&bodies.lock().unwrap()[0]).unwrap();
     assert!(body.get("response_format").is_none());
     assert_eq!(body["quality"], "low");
@@ -135,7 +135,7 @@ async fn a_video_is_created_polled_downloaded_deleted_and_priced_by_the_second()
     .await
     .expect("a video");
     assert_eq!(response.parts[0].bytes, b"MP4");
-    assert!((response.tokens_used.reported_cost_usd.unwrap() - 0.4).abs() < 1e-9);
+    assert!((response.tokens_used.priced_cost(None).unwrap() - 0.4).abs() < 1e-9);
     // The mock reads a request once, so a multipart body may arrive cut; the
     // count of requests is what it can say for certain.
     let seen = bodies.lock().unwrap();
@@ -261,7 +261,7 @@ async fn speech_is_the_reply_bytes_typed_by_the_header_and_priced_by_the_charact
     .expect("speech");
     assert_eq!(response.parts[0].mime_type.as_str(), "audio/wav");
     assert_eq!(response.parts[0].name.as_deref(), Some("speech.wav"));
-    assert!((response.tokens_used.reported_cost_usd.unwrap() - 15.0 * 5.0 / 1e6).abs() < 1e-12);
+    assert!((response.tokens_used.priced_cost(None).unwrap() - 15.0 * 5.0 / 1e6).abs() < 1e-12);
 
     let url = spawn_mock_server_with_headers(200, "OK", "", b"ID3".to_vec()).await;
     let untyped = run(
@@ -277,7 +277,7 @@ async fn speech_is_the_reply_bytes_typed_by_the_header_and_priced_by_the_charact
     .await
     .expect("speech");
     assert_eq!(untyped.parts[0].mime_type.as_str(), "audio/mpeg");
-    assert_eq!(untyped.tokens_used.reported_cost_usd, None);
+    assert_eq!(untyped.tokens_used.priced_cost(None), None);
 
     // gpt-4o-mini-tts is billed by the second of audio made, read from the
     // file: one second of 128 kbps MP3 at $0.90 an hour.
@@ -294,7 +294,7 @@ async fn speech_is_the_reply_bytes_typed_by_the_header_and_priced_by_the_charact
     )
     .await
     .expect("speech");
-    assert!((per_second.tokens_used.reported_cost_usd.unwrap() - 0.00025).abs() < 1e-12);
+    assert!((per_second.tokens_used.priced_cost(None).unwrap() - 0.00025).abs() < 1e-12);
     let url =
         spawn_mock_server_with_headers(200, "OK", "Content-Type: audio/ogg\r\n", b"OggS".to_vec())
             .await;
@@ -308,7 +308,8 @@ async fn speech_is_the_reply_bytes_typed_by_the_header_and_priced_by_the_charact
     .await
     .expect("speech");
     assert_eq!(
-        unmeasured.tokens_used.reported_cost_usd, None,
+        unmeasured.tokens_used.priced_cost(None),
+        None,
         "a length it cannot read"
     );
 
@@ -346,7 +347,7 @@ async fn a_transcript_is_priced_by_seconds_or_by_tokens_as_usage_says() {
     .expect("a transcript");
     assert_eq!(response.content, "hello");
     assert_eq!(response.parts[0].name.as_deref(), Some("transcript.json"));
-    assert!((response.tokens_used.reported_cost_usd.unwrap() - 0.36).abs() < 1e-9);
+    assert!((response.tokens_used.priced_cost(None).unwrap() - 0.36).abs() < 1e-9);
     let sent = bodies.lock().unwrap()[0].clone();
     assert!(
         sent.contains("verbose_json") && sent.contains("name=\"language\""),
@@ -373,7 +374,7 @@ async fn a_transcript_is_priced_by_seconds_or_by_tokens_as_usage_says() {
     )
     .await
     .expect("a transcript");
-    assert_eq!(diarized.tokens_used.reported_cost_usd, Some(2.5));
+    assert_eq!(diarized.tokens_used.priced_cost(None), Some(2.5));
     let sent = bodies.lock().unwrap()[0].clone();
     assert!(
         sent.contains("diarized_json") && sent.contains("chunking_strategy"),
@@ -400,7 +401,7 @@ async fn a_transcript_is_priced_by_seconds_or_by_tokens_as_usage_says() {
     )
     .await
     .expect("a transcript");
-    assert_eq!(unpriced.tokens_used.reported_cost_usd, None);
+    assert_eq!(unpriced.tokens_used.priced_cost(None), None);
     assert!(bodies.lock().unwrap()[0].contains("json"));
 
     let err = run(
@@ -476,7 +477,7 @@ async fn a_video_job_that_fails_at_any_step_is_an_error() {
     ])
     .await;
     let kept = video(&url).await.expect("the video is kept");
-    assert!((kept.tokens_used.reported_cost_usd.unwrap() - 0.8).abs() < 1e-9);
+    assert!((kept.tokens_used.priced_cost(None).unwrap() - 0.8).abs() < 1e-9);
 }
 
 #[tokio::test]
@@ -927,4 +928,69 @@ async fn gpt_audio_flac_and_the_failures_before_a_reply() {
     let (url, _) = spawn_mock_sequence(vec![(200, "OK", b"{}".to_vec())]).await;
     let err = chat_audio(&endpoint(&url), &ask, true).await.unwrap_err();
     assert!(err.to_string().contains("No choices"), "{err}");
+}
+
+/// The per-second price is for the ordinary sizes. A video that came back at
+/// one of them is priced by its length, and one that came back larger is
+/// billed at a rate the row does not carry, so its cost is unknown.
+#[tokio::test]
+async fn a_video_is_priced_at_the_size_it_came_back_at() {
+    async fn made_at(size: &str) -> leviath_core::cost::CallCost {
+        let done =
+            format!(r#"{{"id":"video_1","status":"completed","seconds":"4","size":"{size}"}}"#);
+        let (url, _) = spawn_mock_sequence(vec![
+            (200, "OK", br#"{"id":"video_1","status":"queued"}"#.to_vec()),
+            (200, "OK", done.into_bytes()),
+            (200, "OK", b"MP4".to_vec()),
+            (200, "OK", br#"{"deleted":true}"#.to_vec()),
+        ])
+        .await;
+        run(
+            &endpoint(&url),
+            Kind::Video,
+            &request("sora-2", "a paper boat", vec![], Value::Null),
+            &unit(0.1, PriceUnit::VideoSecond),
+            FAST,
+        )
+        .await
+        .expect("a video")
+        .tokens_used
+        .cost(None)
+    }
+    let ordinary = made_at("720x1280").await;
+    assert!((ordinary.usd().expect("priced") - 0.4).abs() < 1e-9);
+    assert_eq!(ordinary.class(), leviath_core::cost::CostClass::Computed);
+    assert_eq!(
+        made_at("1792x1024").await,
+        CallCost::Unknown(CostUnknown::UnmodelledTerms)
+    );
+}
+
+/// A transcript billed by tokens, on a model with no token rates here, has
+/// no price: unknown, never nothing.
+#[tokio::test]
+async fn a_token_billed_transcript_with_no_rates_has_no_price() {
+    let tokens = serde_json::json!({ "text": "hi", "usage": { "type": "tokens", "input_tokens": 10, "output_tokens": 2 } });
+    let (url, _) = spawn_mock_sequence(vec![(200, "OK", tokens.to_string().into_bytes())]).await;
+    let response = run(
+        &endpoint(&url),
+        Kind::Transcribe,
+        &request(
+            "gpt-4o-transcribe",
+            "",
+            vec![part("audio/wav", "speech.wav")],
+            Value::Null,
+        ),
+        &Billing {
+            unit: None,
+            tokens: None,
+        },
+        FAST,
+    )
+    .await
+    .expect("a transcript");
+    assert_eq!(
+        response.tokens_used.cost(None),
+        CallCost::Unknown(CostUnknown::NoPrice)
+    );
 }

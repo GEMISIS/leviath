@@ -62,6 +62,7 @@ fn text(content: &str) -> InferenceResponse {
             cached_tokens: 0,
             cache_write_tokens: 0,
             reported_cost_usd: None,
+            terms: Default::default(),
         },
         finish_reason: FinishReason::Complete,
         reasoning: None,
@@ -1071,6 +1072,14 @@ async fn a_restart_mid_job_polls_the_job_the_run_recorded() {
     assert_eq!(after.status, crate::state::RunStatus::Complete);
     assert!(after.remote_jobs.is_empty(), "the call is over");
     assert!(recorded().is_empty(), "and its file says so");
+    // One job, one cost: the call the dead daemon left out stood for the
+    // job, and the call that picked the job up is its account. Nothing was
+    // recorded for the first beside it, and nothing is still out.
+    assert!(after.open_calls.is_empty());
+    let spend = &after.totals.spend;
+    assert_eq!(spend.unknown_calls(), 1, "this provider has no price");
+    assert_eq!(spend.unknown.no_price + spend.unknown.no_usage, 1);
+    assert_eq!(spend.unknown.no_lookup, 0, "no cut-off call beside it");
     let said = after
         .context
         .regions
@@ -1078,4 +1087,62 @@ async fn a_restart_mid_job_polls_the_job_the_run_recorded() {
         .flat_map(|r| &r.entries)
         .any(|e| e.text.contains("made by job-1"));
     assert!(said, "the answer came from the job submitted before");
+}
+
+/// A run that ends while its call waits on a remote job gives the job up.
+/// The provider took the job, so it is recorded: once, as a call that was
+/// cut off, with no figure. The run holds no job afterwards and lists no
+/// call as out, so it does not read as waiting to be settled for ever.
+#[tokio::test]
+async fn a_run_cancelled_mid_job_records_the_job_once_and_holds_none() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    let dir = tempfile::tempdir().unwrap();
+    let job = PolledJob {
+        submitted: Arc::new(AtomicUsize::new(0)),
+        done: Arc::new(AtomicBool::new(false)),
+    };
+    let spec = crate::test_graph::both(graph()).0;
+    let run_dir = dir.path().join(spec.run_id.as_str());
+    let mut world = job_world(dir.path(), job);
+    let entity = crate::insert::insert(
+        world.world_mut(),
+        spec.clone(),
+        crate::spec::env::Bindings::new().with(stage()),
+        &crate::insert::initial_state(&spec),
+    );
+    let standing = |world: &PipelineWorld| {
+        crate::state::inspect::inspect(world.world(), entity).expect("the run is in the world")
+    };
+    for _ in 0..500 {
+        world.run_to_fixed_point();
+        if !standing(&world).remote_jobs.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(standing(&world).remote_jobs.len(), 1, "the job is out");
+
+    let agent = world.own_agent(entity);
+    assert!(world.cancel(agent));
+    for _ in 0..500 {
+        world.run_to_fixed_point();
+        let now = standing(&world);
+        if now.open_calls.is_empty() && now.remote_jobs.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let after = standing(&world);
+    assert_eq!(after.status, crate::state::RunStatus::Cancelled);
+    assert!(after.remote_jobs.is_empty(), "an ended run holds no job");
+    assert!(after.open_calls.is_empty(), "and nothing is left to settle");
+    assert_eq!(after.totals.spend.unknown.no_lookup, 1, "recorded once");
+    assert_eq!(after.totals.spend.unknown_calls(), 1);
+    world.flush_and_stop().await;
+
+    let read = crate::restore::read_for_resume(&run_dir).unwrap().unwrap();
+    let listed = crate::runfile::summary_of(&read.spec, &read.state, 0);
+    assert_eq!(listed.unknown.not_settled, 0);
+    assert_eq!(listed.unknown.no_lookup, 1);
+    assert_eq!(listed.calls_in_flight, 0);
 }

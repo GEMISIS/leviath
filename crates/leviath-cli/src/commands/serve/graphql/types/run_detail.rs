@@ -10,7 +10,7 @@ use async_graphql::{Enum, ID, Object, SimpleObject};
 use leviath_graphql_derive::mirror;
 
 use super::super::connection::Paged;
-use super::super::scalars::{BigInt, Decimal, Timestamp};
+use super::super::scalars::{BigInt, Timestamp};
 use super::run::{CostBreakdown, TokenUsage, WorkingClock};
 
 /// Why a run is parked.
@@ -410,12 +410,18 @@ impl From<&leviath_core::run_meta::StageRecord> for StageRecord {
                 cached_tokens: BigInt(record.cached_tokens as i64),
                 cache_write_tokens: BigInt(record.cache_write_tokens as i64),
             },
-            cost: CostBreakdown {
-                cost_usd: record.cost_usd.map(Decimal),
-                cost_priced_usd: Decimal(record.cost_priced_usd),
-                cost_is_exact: record.cost_is_exact,
-                unpriced_calls: count(record.unpriced_calls),
-            },
+            cost: super::run::CostFigures {
+                cost_usd: record.cost_usd,
+                priced_usd: record.cost_priced_usd,
+                reported_calls: record.reported_calls,
+                computed_calls: record.computed_calls,
+                unknown: record
+                    .unknown
+                    .reconciled(record.unknown_calls, record.cost_usd.is_some()),
+                calls_in_flight: record.calls_in_flight,
+                includes_children: false,
+            }
+            .into(),
             // An empty list would read as "this stage ran on nothing", which is
             // a claim; null is the absence of the answer, which is the truth
             // for a stage that has not run and for a run recorded before this
@@ -452,12 +458,18 @@ impl From<&leviath_core::run_meta::StageRecord> for StageRecord {
                         cached_tokens: BigInt(visit.cached_tokens as i64),
                         cache_write_tokens: BigInt(visit.cache_write_tokens as i64),
                     },
-                    cost: CostBreakdown {
-                        cost_usd: visit.cost_usd.map(Decimal),
-                        cost_priced_usd: Decimal(visit.cost_priced_usd),
-                        cost_is_exact: visit.cost_is_exact,
-                        unpriced_calls: count(visit.unpriced_calls),
-                    },
+                    cost: super::run::CostFigures {
+                        cost_usd: visit.cost_usd,
+                        priced_usd: visit.cost_priced_usd,
+                        reported_calls: visit.reported_calls,
+                        computed_calls: visit.computed_calls,
+                        unknown: visit
+                            .unknown
+                            .reconciled(visit.unknown_calls, visit.cost_usd.is_some()),
+                        calls_in_flight: visit.calls_in_flight,
+                        includes_children: false,
+                    }
+                    .into(),
                 })
                 .collect(),
             region_peaks,

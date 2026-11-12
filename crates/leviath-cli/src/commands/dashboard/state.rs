@@ -1066,6 +1066,7 @@ mod tests {
             clock_now: 0,
             graph: None,
             accepts_messages: true,
+            cost: String::new(),
         }
     }
 
@@ -2557,6 +2558,38 @@ mod tests {
             assert!(dash.toasts.is_empty());
 
             cleanup_run(run_id);
+        });
+    }
+
+    /// A run's row carries what its own calls cost once it has sent one, and
+    /// nothing before that.
+    #[test]
+    fn a_runs_cost_reaches_its_row_once_it_has_sent_a_call() {
+        crate::runstate::with_isolated_runs_dir("sync-run-cost", |_d| {
+            let mut spent = make_run_meta("run-spent", RunStatus::Running);
+            spent.cost_usd = Some(0.25);
+            spent.cost_priced_usd = 0.25;
+            spent.reported_calls = 1;
+            runstate::create_run(&spent).unwrap();
+            runstate::create_run(&make_run_meta("run-quiet", RunStatus::Running)).unwrap();
+
+            let mut dash = make_test_dashboard();
+            dash.sync_from_run_state();
+            let cost_of = |id: &str| {
+                let agent = dash.agents.iter().find(|a| a.id == id);
+                agent.map(|a| a.cost.clone())
+            };
+            assert_eq!(cost_of("run-spent").as_deref(), Some("$0.2500"));
+            assert_eq!(cost_of("run-quiet").as_deref(), Some(""));
+
+            // The figure follows the run as it spends more.
+            spent.cost_usd = Some(0.75);
+            spent.cost_priced_usd = 0.75;
+            spent.reported_calls = 2;
+            runstate::create_run(&spent).unwrap();
+            dash.sync_from_run_state();
+            let agent = dash.agents.iter().find(|a| a.id == "run-spent");
+            assert_eq!(agent.map(|a| a.cost.as_str()), Some("$0.7500"));
         });
     }
 

@@ -181,15 +181,10 @@ fn stage_run_status(status: StageStatus) -> leviath_core::run_meta::StageRunStat
     }
 }
 
-/// A cost is known exactly when no call was priced from published rates and
-/// none went unpriced; it is known at all when none went unpriced and its
-/// record named one.
+/// A spend's cost, when the cost of every call in it is known, and whether
+/// it is.
 pub fn cost(spend: &Spend) -> (Option<f64>, bool) {
-    let known = spend.unpriced_calls == 0 && !spend.cost_unknown;
-    (
-        known.then_some(spend.priced_usd),
-        known && spend.computed_calls == 0,
-    )
+    (spend.cost_usd(), spend.is_exact())
 }
 
 /// A working clock, or none for one that has never run.
@@ -211,10 +206,12 @@ fn visit_record(visit: &VisitRecord) -> leviath_core::run_meta::StageVisitRecord
         cached_tokens: visit.spend.cached_tokens as usize,
         cache_write_tokens: visit.spend.cache_write_tokens as usize,
         cost_usd,
-        unpriced_calls: visit.spend.unpriced_calls as usize,
+        unknown_calls: visit.spend.unknown_calls() as usize,
+        unknown: visit.spend.unknown,
         cost_is_exact,
         reported_calls: visit.spend.reported_calls as usize,
         computed_calls: visit.spend.computed_calls as usize,
+        calls_in_flight: 0,
         cost_priced_usd: visit.spend.priced_usd,
         active: active_clock(&visit.clock),
     }
@@ -240,10 +237,12 @@ pub(crate) fn stage_ledger(state: &RunState) -> StageLedger {
                     cached_tokens: rec.spend.cached_tokens as usize,
                     cache_write_tokens: rec.spend.cache_write_tokens as usize,
                     cost_usd,
-                    unpriced_calls: rec.spend.unpriced_calls as usize,
+                    unknown_calls: rec.spend.unknown_calls() as usize,
+                    unknown: rec.spend.unknown,
                     cost_is_exact,
                     reported_calls: rec.spend.reported_calls as usize,
                     computed_calls: rec.spend.computed_calls as usize,
+                    calls_in_flight: 0,
                     cost_priced_usd: rec.spend.priced_usd,
                     models: rec
                         .models
@@ -418,7 +417,7 @@ pub(crate) fn token_totals(state: &RunState) -> TokenTotals {
             priced_usd: s.priced_usd,
             reported_calls: s.reported_calls as usize,
             computed_calls: s.computed_calls as usize,
-            unpriced_calls: s.unpriced_calls as usize,
+            unknown: s.unknown,
         },
     }
 }

@@ -101,7 +101,13 @@ fn every_kind_of_record_reads_as_an_event_or_a_change() {
         e,
         RunEvent::Inference { attempt, spend, .. } if attempt.is_empty() && spend.reported_calls == 1
     )));
-    assert!(logged(&events, "which are not valid names"));
+    // A bill for a model whose name no run file can hold is kept all the
+    // same, under the nearest name one can.
+    assert!(events.iter().any(|e| matches!(
+        e,
+        RunEvent::Inference { model, spend, .. }
+            if model.model.as_str() == "has_space" && spend.unknown.no_price == 1
+    )));
     let moves: Vec<_> = events
         .iter()
         .filter_map(|e| match e {

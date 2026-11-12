@@ -162,6 +162,13 @@ pub enum AttemptOutcome {
         capacity: bool,
         /// What the loop did next.
         next: Retry,
+        /// Whether the request went out before it failed
+        /// (`ProviderError::request_sent`): `Some(false)` for one that never
+        /// left this machine, and `None` where the error could not say. A
+        /// failed attempt that was sent has a usage record of its own, saying
+        /// what it cost.
+        #[serde(default)]
+        sent: Option<bool>,
     },
 }
 

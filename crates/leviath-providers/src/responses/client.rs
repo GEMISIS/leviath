@@ -33,6 +33,10 @@ pub struct Endpoint {
     pub client: reqwest::Client,
     /// The API root, with no trailing slash.
     pub base_url: String,
+    /// Whether the vendor's published prices apply to what this endpoint
+    /// serves: true until it is pointed at another host, whose prices are
+    /// its own.
+    pub list_priced: bool,
     /// The credential.
     pub auth: Auth,
     /// The operator's extra headers, sent after the provider's own.
@@ -52,6 +56,7 @@ impl Endpoint {
         Self {
             client,
             base_url: base_url.trim_end_matches('/').to_string(),
+            list_priced: true,
             auth,
             extra_headers: Vec::new(),
             rate_limiter: None,
@@ -63,7 +68,9 @@ impl Endpoint {
     /// Point at another host. `None` keeps the current one.
     pub fn set_base_url(&mut self, base_url: Option<String>) {
         if let Some(url) = base_url {
-            self.base_url = url.trim_end_matches('/').to_string();
+            let url = url.trim_end_matches('/').to_string();
+            self.list_priced &= url == self.base_url;
+            self.base_url = url;
         }
     }
 

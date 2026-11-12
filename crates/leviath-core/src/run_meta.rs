@@ -478,22 +478,37 @@ pub struct RunMeta {
     /// Total number of tool calls made across all iterations.
     #[serde(default)]
     pub tool_calls: usize,
-    /// What this run has spent, when every call could be priced.
+    /// What this run has spent, when the cost of every call is known.
     ///
-    /// `None` means *unknown*, never free: some call was served by a model with
-    /// no reported cost and no known rates, so any total would be understating
-    /// by an unknown amount. See [`unpriced_calls`](Self::unpriced_calls) for
-    /// how many, and [`cost_is_exact`](Self::cost_is_exact) for whether the
-    /// figure is the provider's own or reconstructed from rate cards.
+    /// `None` means *unknown*, never free: the cost of some call could not be
+    /// learned, so any total would be understating by an unknown amount. See
+    /// [`unknown_calls`](Self::unknown_calls) for how many and
+    /// [`unknown`](Self::unknown) for why.
     #[serde(default)]
     pub cost_usd: Option<f64>,
-    /// Calls that could not be priced at all. Non-zero forces
+    /// Calls whose cost is unknown. Non-zero forces
     /// [`cost_usd`](Self::cost_usd) to `None`.
+    #[serde(default, alias = "unpriced_calls")]
+    pub unknown_calls: usize,
+    /// Why, for each of those calls.
     #[serde(default)]
-    pub unpriced_calls: usize,
-    /// Whether every priced call carried the provider's own cost figure rather
-    /// than one computed from published rates. `false` means the total is this
-    /// process's best reconstruction of the invoice, not the invoice.
+    pub unknown: crate::cost::UnknownCalls,
+    /// Calls whose cost the provider reported.
+    #[serde(default)]
+    pub reported_calls: usize,
+    /// Calls whose cost was computed from the rate table.
+    #[serde(default)]
+    pub computed_calls: usize,
+    /// Calls that are out and have not landed yet, on a run that is still
+    /// going. They are in no other count and in no figure here until they
+    /// land: [`cost_usd`](Self::cost_usd) is what the calls that have landed
+    /// came to. A call still out on a run that has ended is counted in
+    /// [`unknown`](Self::unknown) as `not_settled` instead.
+    #[serde(default)]
+    pub calls_in_flight: usize,
+    /// Whether the figure is the run's whole cost: the cost of every call is
+    /// known, reported by the provider or computed from the rate table, and
+    /// no call is in flight.
     #[serde(default)]
     pub cost_is_exact: bool,
     /// The priced subtotal, kept even when `cost_usd` is `None` so a resumed run
@@ -833,7 +848,11 @@ impl RunMeta {
             // A run that has made no calls has spent nothing, and that
             // zero IS known - unlike a run whose calls could not be priced.
             cost_usd: Some(0.0),
-            unpriced_calls: 0,
+            unknown_calls: 0,
+            unknown: Default::default(),
+            reported_calls: 0,
+            computed_calls: 0,
+            calls_in_flight: 0,
             cost_is_exact: true,
             cost_priced_usd: 0.0,
             workdir,

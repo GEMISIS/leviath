@@ -393,7 +393,7 @@ handle that on all of them rather than on a few. The body is a line of plain tex
 | `GET /api/runs/{id}/blobs` · `/blobs/{sha256}` | The stored parts a run holds, and one part's bytes. See [below](#a-runs-parts) |
 | The three byte routes above | Also take a short-lived `?exp=&sig=` link in place of the bearer token, which is what a browser needs for an `<img src>`. Mint one with the [GraphQL API](/docs/graphql) |
 | `GET /api/runs/{id}/artifacts/{name}` | The bytes of one file the run handed back, by the name its answer lists. See [below](#a-runs-parts) |
-| `GET /api/runs/tree` · `/{id}/tree-status` · `/{id}/children` | Sub-agent tree + roll-ups of tokens, spend (`subtree_cost_usd`) and working time (`subtree_working_secs`) |
+| `GET /api/runs/tree` · `/{id}/tree-status` · `/{id}/children` | Sub-agent tree + roll-ups of tokens, spend (`subtree_cost_usd`, with `subtree_calls_in_flight` for the calls that have yet to land) and working time (`subtree_working_secs`) |
 | `POST /api/runs/{id}/pause` · `/resume` | Pause a run · resume it |
 | `POST /api/runs/{id}/message` | Steer a running run, or continue a finished one. Takes files too; see [attaching files](#attaching-files) |
 | `POST /api/runs/{id}/continue` | Continue a finished run with a new message, or fork a new run from it. See [continuing a finished run](#continuing-a-finished-run) |
@@ -1237,14 +1237,16 @@ order:
     { "name": "plan",           "status": "complete", "entered": true,
       "prompt_tokens": 8420, "completion_tokens": 610,
       "cached_tokens": 6100, "cache_write_tokens": 240,
-      "cost_usd": 0.0412, "unpriced_calls": 0, "cost_is_exact": false,
+      "cost_usd": 0.0412, "unknown_calls": 0, "cost_is_exact": true,
+      "reported_calls": 0, "computed_calls": 3,
       "cost_priced_usd": 0.0412,
       "visit_count": 1,
       "visits": [
         { "entered_at": 1786409280, "left_at": 1786409461,
           "prompt_tokens": 8420, "completion_tokens": 610,
           "cached_tokens": 6100, "cache_write_tokens": 240,
-          "cost_usd": 0.0412, "unpriced_calls": 0, "cost_is_exact": false,
+          "cost_usd": 0.0412, "unknown_calls": 0, "cost_is_exact": true,
+      "reported_calls": 0, "computed_calls": 3,
           "cost_priced_usd": 0.0412,
           "active": { "banked_secs": 181, "since": null } }
       ],
@@ -1282,18 +1284,26 @@ prefix nothing reuses without `cache_write_tokens`.
 
 `cost_usd` is what that stage spent. It means exactly what it means on a run:
 
-- **`null` is unknown, never free.** Some call in that stage was served by a
-  model with no reported cost and no rates the daemon knows, so any total would
-  understate by an unknown amount. `unpriced_calls` says how many.
-- **`cost_is_exact` says which number you have.** `true` means every priced call
-  carried the provider's own figure: the invoice. `false` means at least one was
-  reconstructed from published rates, which is arithmetic on numbers that drift
-  for reasons outside the daemon: negotiated pricing, a gateway's margin, a
-  request rerouted to another backend.
-- **`cost_priced_usd` is the priced subtotal**, kept even while `cost_usd` is
-  `null` so a resumed run does not restart its accounting from zero. It is not a
-  substitute for `cost_usd`: showing it while calls went unpriced is exactly the
-  partial total that looks authoritative and is not.
+- **`null` is unknown, never free.** The cost of some call in that stage could
+  not be learned, so any total would understate by an unknown amount.
+  `unknown_calls` says how many, and `unknown` says why, as a count per reason
+  (`no_usage`, `no_price`, `unmodelled_terms`, `no_lookup`,
+  `lookup_unanswered`, `not_recorded`, `not_settled`). See
+  [managing your costs](/docs/costs#know-what-you-actually-paid).
+- **A call in flight is not unknown.** While the run is going, a call that is
+  out is counted in `calls_in_flight` and nowhere else, and `cost_usd` stays
+  what the calls that landed came to. A poll in the middle of a call reads a
+  dollar figure and a count, not `null`.
+- **`cost_is_exact` is `true` when the figure is the whole cost.** Every call
+  was either reported by the provider (`reported_calls`) or computed from its
+  whole usage and the rate table (`computed_calls`), none is unknown and none
+  is in flight.
+- **`cost_priced_usd` is the subtotal of the calls with a figure**, kept even
+  while `cost_usd` is `null` so a resumed run does not restart its accounting
+  from zero. It is not a substitute for `cost_usd`: showing it while a call is
+  unknown is exactly the partial total that looks authoritative and is not.
+
+Every call that was sent counts, whether it answered, failed or was cut off.
 
 Do not multiply the tokens by a rate card of your own. Pricing is the daemon's
 job, deliberately. A rate card in a console produces a fourth answer that
@@ -2415,7 +2425,7 @@ than that feature, not broken.
 | `mime.registry` | `GET /api/mime`, the effective mime registry with each row's source |
 | `mime.write` | `PUT /api/mime` and `DELETE /api/mime`, admin-gated, write a row into `mime_types.toml` or take one out |
 | `runs.stages` | `GET /api/runs/{id}/stages`, the per-stage ledger |
-| `runs.stages.cost` | `cost_usd`, `unpriced_calls` and `cost_is_exact` on each stage record, and the `visits` split beneath them |
+| `runs.stages.cost` | `cost_usd`, `unknown_calls`, `unknown` and `cost_is_exact` on each stage record, and the `visits` split beneath them |
 | `runs.stages.models` | `models` on each stage record: the provider and model pairs that stage ran on, oldest first |
 | `runs.waiting_on` | `wait_reason` on a run, saying what a parked run is parked on |
 | `runs.delete` | `DELETE /api/runs/{id}`, which removes the record rather than cancelling the run |
@@ -2604,7 +2614,7 @@ with either way.
 | `tool_call_started` | A tool call goes to the async lane | `call_id`, `tool`, `arguments`, `arguments_truncated` |
 | `tool_call_finished` | That call returns | `call_id`, `tool`, `ok`, `summary` |
 | `log` | A log or output line is written | `line` |
-| `agent_spend` | The run's spend passes a figure named in `[limits] notify_spend_usd` | `threshold_usd`, `total_usd`, `complete`, `stage` |
+| `agent_spend` | The run's spend passes a figure named in `[limits] notify_spend_usd` | `threshold_usd`, `total_usd`, `complete`, `calls_in_flight`, `stage` |
 | `interaction_needed` | The run is blocked on a person | `request` |
 | `interaction_settled` | An ask is answered, times out, is cancelled or is refused | `request_id`, `kind`, `tool`, `prompt`, `stage`, `settlement`, `asked_at`, `at` |
 | `output_submitted` | A `submit_output` call is accepted | `stage`, `final_output` |
@@ -2629,11 +2639,12 @@ and `stage` names the stage that was running when it crossed. Spend is counted i
 dollar, so a figure below one millionth is passed by the first millionth spent. Nothing is emitted for an operator who
 has not listed any figures.
 
-`complete` says whether every call behind `total_usd` could be priced. When it is false the run has
-spent at least that much and more by an unknown amount. It is a different question from whether the
-priced part came from the provider's own figures or was reconstructed from published rate cards.
-That is what `cost_is_exact` on the run record answers, so a total can be complete and still be a
-reconstruction.
+`complete` says whether `total_usd` is the run's whole cost so far: the cost of every call is
+known and no call is out. It is the same answer as `cost_is_exact` on the run record. When it is
+false the run has spent at least that much and more by an unknown amount: `unknown_calls` and
+`unknown` on the run record say how many calls have no figure and why, and `calls_in_flight`, on
+the frame and on the record, says how many are out and have yet to land. A call in flight is not
+in `total_usd`.
 
 A run is created untitled and named a moment later, once a model has shortened its prompt into a
 title. `run_renamed` is that moment. The same `title` then rides every `agent_status` frame, so a

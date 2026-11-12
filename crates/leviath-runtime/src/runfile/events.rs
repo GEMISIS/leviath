@@ -13,12 +13,23 @@ use crate::state::context::ToolCallState;
 use crate::state::journal::{ContextCommitState, SettledState};
 use crate::state::{RunEvent, Spend, ToolResultState};
 
-/// Model attempts that answered, waiting for the usage record that bills
-/// them. An attempt is recorded by the worker that made the call, and its
-/// usage by the system that reads the answer, so the two can land in
-/// different ticks; the call becomes one `Inference` when its usage lands.
+/// What pairs a model attempt that answered with the usage record that
+/// bills it. The attempt is recorded by the lane that read the answer and
+/// the usage by the trip that made the call, so the two land in either
+/// order and in different ticks; the call is one `Inference` either way.
+///
+/// A usage record that names its attempt needs nothing from the attempt's
+/// own record, which is then not kept waiting. One that names none (a run
+/// converted from an old journal) is billed to the latest attempt on its
+/// model that answered.
 #[derive(Debug, Default)]
-pub struct Answered(Vec<AnsweredAttempt>);
+pub struct Answered {
+    /// Attempts that answered, waiting for a usage record that names none.
+    waiting: Vec<AnsweredAttempt>,
+    /// Attempts already billed by a usage record that named them, whose own
+    /// record has yet to land.
+    billed: Vec<String>,
+}
 
 /// One attempt that answered: who answered, and how it said it stopped.
 #[derive(Debug)]
@@ -35,6 +46,32 @@ fn model_ref(provider: &str, model: &str) -> Option<ModelRef> {
     Some(ModelRef {
         provider: ProviderName::new(provider).ok(),
         model: ModelId::new(model).ok()?,
+    })
+}
+
+/// The id a call's cost is recorded under when the model it names is not one
+/// an id can hold: nothing, or something with spaces in it.
+const UNNAMED_MODEL: &str = "unnamed-model";
+
+/// The model a usage record was billed to. A call that was billed is always
+/// recorded, so a model string no id can hold is written the nearest way one
+/// can: its whitespace and control characters as underscores, cut to an id's
+/// length, and [`UNNAMED_MODEL`] where that leaves nothing.
+pub(crate) fn billed_model(provider: &str, model: &str) -> ModelRef {
+    model_ref(provider, model).unwrap_or_else(|| {
+        let spelled: String = model
+            .chars()
+            .map(|c| match c.is_whitespace() || c.is_control() {
+                true => '_',
+                false => c,
+            })
+            .take(64)
+            .collect();
+        ModelRef {
+            provider: ProviderName::new(provider).ok(),
+            model: ModelId::new(spelled)
+                .unwrap_or_else(|_| ModelId::new(UNNAMED_MODEL).expect("a valid id")),
+        }
     })
 }
 
@@ -166,34 +203,52 @@ pub(crate) fn push_events(events: &mut Vec<RunEvent>, answered: &mut Answered, r
             completion_tokens,
             cached_tokens,
             cache_write_tokens,
-            cost_usd,
-            cost_reported_by_provider,
+            cost,
+            ending,
+            attempt,
+            finish_reason,
+            provider_call_id,
             ..
         } => {
-            let Some(used) = model_ref(provider, model) else {
-                return;
+            use leviath_providers::CallCost;
+            let used = billed_model(provider, model);
+            // A record that names its attempt stands on its own. One that
+            // names none is paired with the attempt its lane recorded.
+            let answering = match attempt.is_empty() {
+                true => answered.take(provider, model),
+                false => {
+                    answered.billed(attempt);
+                    None
+                }
             };
-            let attempt = answered.take(provider, model);
-            let reported = *cost_reported_by_provider == Some(true);
-            let spend = Spend {
+            let mut spend = Spend {
                 prompt_tokens: *prompt_tokens as u64,
                 completion_tokens: *completion_tokens as u64,
                 cached_tokens: *cached_tokens as u64,
                 cache_write_tokens: *cache_write_tokens as u64,
-                priced_usd: cost_usd.unwrap_or(0.0),
-                reported_calls: u32::from(cost_usd.is_some() && reported),
-                computed_calls: u32::from(cost_usd.is_some() && !reported),
-                unpriced_calls: u32::from(cost_usd.is_none()),
-                cost_unknown: false,
+                priced_usd: cost.usd().unwrap_or(0.0),
+                reported_calls: u32::from(matches!(cost, CallCost::Reported(_))),
+                computed_calls: u32::from(matches!(cost, CallCost::Computed(_))),
+                unknown: Default::default(),
             };
+            if let Some(reason) = cost.unknown() {
+                spend.unknown.add(reason);
+            }
             events.push(RunEvent::Inference {
-                attempt: attempt.as_ref().map(|a| a.id.clone()).unwrap_or_default(),
+                attempt: match &answering {
+                    Some(a) => a.id.clone(),
+                    None => attempt.clone(),
+                },
                 model: used,
                 spend,
-                finish_reason: attempt.and_then(|a| a.finish_reason),
+                finish_reason: finish_reason
+                    .clone()
+                    .or(answering.and_then(|a| a.finish_reason)),
                 kind: (*kind).into(),
                 stage: crate::spec::names::StageName::new(stage).ok(),
                 iteration: u32::try_from(*iteration).unwrap_or(u32::MAX),
+                ending: *ending,
+                provider_call_id: provider_call_id.clone(),
             });
         }
         RunRecord::InferenceFailover(f) => {
@@ -282,7 +337,9 @@ fn push_attempt(
 ) {
     use crate::runfile::record::AttemptOutcome;
     match &a.outcome {
-        AttemptOutcome::Succeeded => answered.0.push(AnsweredAttempt {
+        // An attempt a usage record already billed by name waits for nothing.
+        AttemptOutcome::Succeeded if answered.was_billed(&a.id) => {}
+        AttemptOutcome::Succeeded => answered.waiting.push(AnsweredAttempt {
             provider: a.provider.clone(),
             model: a.model.clone(),
             id: a.id.clone(),
@@ -296,19 +353,43 @@ fn push_attempt(
 }
 
 impl Answered {
-    /// Whether no attempt is waiting for its bill.
+    /// Whether nothing is waiting to be paired.
     pub(crate) fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.waiting.is_empty() && self.billed.is_empty()
     }
 
     /// The latest attempt on `provider`/`model` that answered, taken out:
-    /// the one a usage record on that model bills.
+    /// the one a usage record on that model that names no attempt bills.
     fn take(&mut self, provider: &str, model: &str) -> Option<AnsweredAttempt> {
         let at = self
-            .0
+            .waiting
             .iter()
             .rposition(|a| a.provider == provider && a.model == model)?;
-        Some(self.0.remove(at))
+        Some(self.waiting.remove(at))
+    }
+
+    /// A usage record billed the attempt `id` by name: its own record, if it
+    /// is waiting, waits no longer, and if it has yet to land it is
+    /// remembered so that it does not start to.
+    fn billed(&mut self, id: &str) {
+        match self.waiting.iter().position(|a| a.id == id) {
+            Some(at) => {
+                self.waiting.remove(at);
+            }
+            None => self.billed.push(id.to_string()),
+        }
+    }
+
+    /// Whether a usage record already billed the attempt `id` by name. It
+    /// is forgotten once asked: an attempt's record lands once.
+    fn was_billed(&mut self, id: &str) -> bool {
+        match self.billed.iter().position(|billed| billed == id) {
+            Some(at) => {
+                self.billed.remove(at);
+                true
+            }
+            None => false,
+        }
     }
 }
 

@@ -138,37 +138,134 @@ inference after it grows. [Structured context](/docs/context) is where this is g
 ## Know what you actually paid
 
 Every run records its own accounting in its [run file](/docs/run-file), and
-`GET /api/runs/{id}` serves it:
+`GET /api/runs/{id}` serves it. Every model call a run sends is in it, whether the call answered,
+failed after it was sent, or was cut off by a deadline, a cancel or a daemon that stopped. Each
+call's cost is in one of three classes:
 
-- `cost_usd` is the total, or `null` when some call could not be priced. Never `0` for unknown:
-  a total that silently omits what it could not price looks authoritative and understates.
-- `unpriced_calls` counts those. Non-zero means the real figure is higher by an unknown amount.
-- `cost_is_exact` says whether the priced calls carried the provider's own figure rather than
-  one reconstructed from published rates.
+- **reported**: the provider stated the amount it billed. OpenRouter and xAI do, on the reply.
+- **computed**: the reply carried the call's whole usage, and Leviath priced it from the rate
+  table. A figure Leviath worked out is never labelled as the provider's.
+- **unknown**: neither could be had. Nothing is estimated in its place.
+
+On the run record:
+
+- `cost_usd` is what every call that has landed came to, or `null` when the cost of any of them
+  is unknown. Never `0` for unknown: a total that leaves out what it could not learn looks
+  authoritative and understates. While the run is going it is the figure so far.
+- `calls_in_flight` counts the calls that are out and have not landed yet. They are in no other
+  count and not in `cost_usd` until they land.
+- `cost_is_exact` is `true` when `cost_usd` is the run's whole cost: every call was reported or
+  computed, none is unknown and none is in flight.
+- `reported_calls`, `computed_calls` and `unknown_calls` count each class, and `unknown` says
+  why, by reason:
+
+| reason | what it means |
+| --- | --- |
+| `no_usage` | the reply said nothing of what the call used: no token counts, or no length, size or count for a media call |
+| `no_price` | no price is known for the model |
+| `unmodelled_terms` | the call was billed on terms the rate table does not cover: a service tier, audio or image tokens, a server tool |
+| `no_lookup` | the call failed or was cut off after it was sent, and the provider gives no way to look up what it charged |
+| `lookup_unanswered` | the same, on a provider that keeps a record, which did not answer in time |
+| `not_recorded` | an earlier release recorded the call without a cost |
+| `not_settled` | the run ended with the call still out, and what it cost is not settled yet: a lookup is running, or was when the daemon stopped |
+
+- `cost_priced_usd` is what the calls with a figure come to. It is kept while `cost_usd` is
+  `null`, and it is not the run's cost.
 
 `lev stages <run-id>` (or `GET /api/runs/{id}/stages`) breaks the same totals down per stage,
-which is how you find the one stage that spent most of the run.
+which is how you find the one stage that spent most of the run, and ends with the run's own cost
+and what it rests on. `lev stages <run-id> --calls` lists every call with how it ended, its
+class and its cost.
+
+### A call that did not answer
+
+A call that never left this machine cost nothing and is not counted. One that was sent is
+settled where it ended, before the run moves on:
+
+- The provider finished the call and said what it used before the failure (a reply that was
+  then rejected): that usage is its cost.
+- The provider knows the call by an id and keeps a record of it: the record is read. OpenRouter
+  gives every call a generation id with its first header, and `GET /generation?id=` answers with
+  the amount charged once OpenRouter has written the record, for a stream that was cut and for
+  one that was cancelled. That is usually about six seconds after the call ends, and on a slow
+  day it has been measured at twelve to more than twenty-four. The whole lookup, every request
+  in it, ends within 15 seconds; a record that has not answered by then leaves the call
+  `lookup_unanswered`, and a call cut before its first header arrived has no id to ask by and
+  is `no_lookup`.
+- The provider refused the request outright with 401, 402, 404 or 429, and nothing had begun:
+  no reply had opened and no usage had arrived. Nothing was run, so nothing was billed. Google
+  and OpenRouter say they do not charge any request they answer with an error, which holds at
+  their own endpoints and not for an error from a proxy at a `base_url` of your own.
+- Otherwise the cost is unknown. A status named part way through a reply that had started is
+  not a refusal. A call that sent its request twice (a script provider that retries) has no
+  whole figure. Anthropic, OpenAI, Bedrock and Meta give no way to read back what a cut stream
+  was charged with an ordinary API key, and no figure is put in its place.
+
+A media job is one cost however many attempts wait on it. An attempt that stops waiting while
+the provider is still running the job records nothing, and stays on the run's list of calls out
+as the job's account. Then one of two things happens, and the job is recorded once either way:
+
+- An attempt picks the job up and reports. That report is the job's cost, and the call that
+  stood for the job comes off the list with nothing recorded.
+- The run gives the job up: another model answered in its place, the run ended or was
+  cancelled, or the run was continued. The provider took the job, so the call that stood for it
+  is recorded as cut off: `$0` on rates that charge nothing, and `no_lookup` otherwise, since a
+  job is not a call a provider keeps a bill for. A finished run found still holding a job when
+  the daemon starts is settled the same way. A fork takes none of its source's jobs.
+
+### A call that is still out
+
+While a run is going, a call of its that is out is in flight. It is counted in `calls_in_flight`
+and in nothing else, `cost_usd` stays what the calls that landed came to, and `cost_is_exact`
+is `false` until it lands. `lev stages` says "so far" and how many calls are in flight, and the
+dashboard shows the figure with the count beside it. A sub-agent tree works the same way:
+`subtree_cost_usd` is what has landed anywhere in the tree, with `subtree_calls_in_flight`
+beside it.
+
+A run that has ended waits on a call only to learn what it cost. Until that is settled the call
+is `not_settled`, which is an unknown like any other: the run has no total and is not exact.
+That lasts a few seconds while a lookup runs, and until the next start when the daemon stopped
+in the middle of one:
+
+- A finished or cancelled run stays loaded while a call of its own is in flight, and for up to
+  30 seconds from the moment that call began to settle, so the cost lands on it. A paused run
+  is not paged out while a call of its own is out either.
+- A call that reports after its run was unloaded is written to the run's file, once.
+- A daemon that stops, gracefully or not, does not wait for a lookup in flight: it drops it.
+  The call stays on its run's list in the run file, with the provider's id. The next start
+  settles it: when the run is brought back if it had not finished, and at start itself if it
+  had. The turn a run sends again after a restart is a second call.
 
 > [!WARNING]
-> A sub-agent's cost is on the sub-agent's own record. Summing only the top-level run understates
-> a fan-out badly: in the $236 run above, the top-level agent's own record said $15. Read the
+> A run's cost is its own calls. A sub-agent or a fan-out worker is a run of its own, with its
+> cost on its own record, and a parent's figure does not include it. Summing only the top-level
+> run understates a fan-out badly: in the $236 run above, the top-level agent's own record said $15. Read the
 > whole tree with `GET /api/runs/{id}/tree-status`, whose `subtree_cost_usd` adds up every run
 > below this one, or with GraphQL `treeStatus { cost { costUsd } }`, which adds it up the same way.
+> While workers are mid-call both are the figure so far, with `subtree_calls_in_flight`
+> (`callsInFlight`) saying how many calls have yet to land.
 
 ## Where the prices come from
 
-A computed cost is a reconstruction from list prices, not an invoice. The provider's bill is the
-figure that counts; this one exists so a run can be compared with the last one and a runaway
-noticed before the bill arrives. Where a figure comes from decides how far to trust it:
+A computed cost is the reply's own usage at the published list price. The provider's bill is
+still the figure that counts, and a negotiated rate belongs in the override below. Where a
+figure comes from:
 
 | provider | source | live or table | coverage |
 |---|---|---|---|
-| OpenRouter | its own catalogue, plus the real cost each call reports | live | every model it serves; `cost_is_exact` is true for these |
-| OpenAI, Anthropic, Google, Meta | the vendor list prices as carried by OpenRouter's catalogue, cross-checked against LiteLLM's table | table, refreshed weekly by an automated PR | current families; a model the table has no row for is `n/a` |
-| xAI | its own listings, plus the real cost each call reports | live, with the table as the fallback | every model it lists; `cost_is_exact` is true for a call that reported its cost |
-| image, video, speech and music models (OpenAI, Google, Bedrock, xAI, Meta) | LiteLLM's table, or the vendor's price page written in by hand where LiteLLM has none (a hand-written row wins) | table, refreshed with the rest; a hand-written row carries its check date | priced per image, second of video, hour of audio, million characters or music clip. See below |
+| OpenRouter | the amount each call reports it was charged | live | every model it serves; reported. On a call made with your own upstream key the amount is OpenRouter's fee plus the upstream's charge, which the reply states beside it |
+| OpenAI, Anthropic, Google, Meta | the vendor list prices as carried by OpenRouter's catalogue, cross-checked against LiteLLM's table | table, refreshed weekly by an automated PR | computed. A row prices the model it names and its dated snapshots (`gpt-5.5-2026-04-23`, `-latest`), and no other: a model that only shares a family name with a row has no price. The table is the vendor's own endpoint's: behind a `base_url` of your own, only the override below prices a call |
+| xAI | the amount each call reports it was charged, then its own listings | live, with the table as the fallback | every model it lists; reported for a call that stated its cost, computed otherwise |
+| image, video, speech and music models (OpenAI, Google, Bedrock, xAI, Meta) | LiteLLM's table, or the vendor's price page written in by hand where LiteLLM has none (a hand-written row wins) | table, refreshed with the rest; a hand-written row carries its check date | computed, per image, second of video, hour of audio, million characters or music clip that came back. A reply that names no quantity is unknown, and so is an image made at a quality or size the flat price is not for. See below |
 | Ollama | free by design | neither | every model; a self-hosted cost belongs in the override below |
-| Rhai script providers, OpenAI-compatible endpoints | the script's `list_models`, or a `[model_capabilities]` override | whichever the script gives | unpriced unless one of those says otherwise |
+| Rhai script providers, OpenAI-compatible endpoints | the script's `list_models`, or a `[model_capabilities]` override | whichever the script gives | unknown unless one of those says otherwise |
+| Meshy | none: Meshy bills in credits, whose dollar price depends on your plan | neither | unknown |
+
+The table prices the ordinary service tier. A reply that says it was served on another tier
+(`flex`, `priority`, `batch`), or that counts audio or image tokens, a server tool such as web
+search, or a cache write kept for longer than the rate covers, is unknown rather than priced at
+the list rate. Anthropic's hour-long cache write is priced: it is twice the input rate on every
+model.
 
 Some media models are billed by the token rather than by the unit, and those are priced by their
 tokens. OpenAI's image models and Gemini's image and speech models work that way.

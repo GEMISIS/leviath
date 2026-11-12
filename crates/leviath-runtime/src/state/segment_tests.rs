@@ -27,8 +27,7 @@ fn what_a_segment_spent_is_what_the_run_spent_since_it_started() {
         priced_usd: 1.0,
         reported_calls: 1,
         computed_calls: 1,
-        unpriced_calls: 0,
-        cost_unknown: false,
+        unknown: Default::default(),
     };
     let now = Spend {
         prompt_tokens: 25,
@@ -38,8 +37,10 @@ fn what_a_segment_spent_is_what_the_run_spent_since_it_started() {
         priced_usd: 1.75,
         reported_calls: 3,
         computed_calls: 1,
-        unpriced_calls: 1,
-        cost_unknown: true,
+        unknown: leviath_core::cost::UnknownCalls {
+            no_lookup: 1,
+            ..Default::default()
+        },
     };
     let own = spent_since(&now, &before);
     assert_eq!(own.prompt_tokens, 15);
@@ -49,8 +50,9 @@ fn what_a_segment_spent_is_what_the_run_spent_since_it_started() {
     assert_eq!(own.priced_usd, 0.75);
     assert_eq!(own.reported_calls, 2);
     assert_eq!(own.computed_calls, 0);
-    assert_eq!(own.unpriced_calls, 1);
-    assert!(own.cost_unknown);
+    assert_eq!(own.unknown_calls(), 1);
+    assert_eq!(own.unknown.no_lookup, 1, "with its reason");
+    assert_eq!(own.cost_usd(), None);
     // Never below zero.
     assert_eq!(spent_since(&before, &now).priced_usd, 0.0);
 }

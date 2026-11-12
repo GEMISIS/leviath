@@ -138,7 +138,8 @@ pub struct InteractionRecord {
 /// One thing a run did, sent to the world's journal as it happens.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RunRecord {
-    /// What one provider call cost, sent as it lands.
+    /// What one provider call that was sent cost, sent as it lands: one per
+    /// call, whether it answered, failed or was cut off.
     ///
     /// Per call rather than cumulative, so two calls between two steps stay two
     /// calls, and "no request ever exceeded the window" is provable from the run
@@ -163,19 +164,27 @@ pub enum RunRecord {
         cached_tokens: usize,
         /// Tokens written to provider cache.
         cache_write_tokens: usize,
-        /// What this one call cost in USD, when it could be established.
+        /// What this one call cost, and how that is known.
         ///
         /// Per call rather than only per run, because the model can change
         /// mid-run: a stage that fails over to a second provider has spent at
         /// two different rates, and a run-level total cannot be re-derived
         /// afterwards.
         ///
-        /// `None` means unpriced (the provider reported no cost and no rates
-        /// were known), never that the call was free.
-        cost_usd: Option<f64>,
-        /// Whether `cost_usd` is the provider's own figure rather than one
-        /// computed from published rates. Absent when there is no cost.
-        cost_reported_by_provider: Option<bool>,
+        /// Never a zero standing in for unknown: a call with no figure says
+        /// why it has none.
+        cost: leviath_providers::CallCost,
+        /// How the call ended: answered, failed after it was sent, or cut off.
+        ending: crate::state::journal::CallEnding,
+        /// The attempt this is the cost of, as the trip that made the call
+        /// minted it. Empty where no trip named one: the attempt's own
+        /// record is then paired with this one when both have landed.
+        attempt: String,
+        /// Why the model stopped, for a call that answered, where the trip
+        /// that made it said.
+        finish_reason: Option<String>,
+        /// The provider's own id for the call, when it gave one.
+        provider_call_id: Option<String>,
         /// Unix seconds.
         at: i64,
     },

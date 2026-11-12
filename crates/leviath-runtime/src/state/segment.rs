@@ -93,8 +93,7 @@ pub fn spent_since(now: &Spend, before: &Spend) -> Spend {
         priced_usd: (now.priced_usd - before.priced_usd).max(0.0),
         reported_calls: now.reported_calls.saturating_sub(before.reported_calls),
         computed_calls: now.computed_calls.saturating_sub(before.computed_calls),
-        unpriced_calls: now.unpriced_calls.saturating_sub(before.unpriced_calls),
-        cost_unknown: now.cost_unknown,
+        unknown: now.unknown.since(&before.unknown),
     }
 }
 

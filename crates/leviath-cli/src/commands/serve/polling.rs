@@ -362,6 +362,7 @@ fn to_server_event(event: WorldEvent) -> ServerEvent {
             threshold_usd,
             total_usd,
             complete,
+            calls_in_flight,
             stage,
         } => ServerEvent::AgentSpend {
             agent_id,
@@ -369,6 +370,7 @@ fn to_server_event(event: WorldEvent) -> ServerEvent {
             threshold_usd,
             total_usd,
             complete,
+            calls_in_flight,
             stage,
         },
         WorldEvent::Spawned {
@@ -960,6 +962,7 @@ mod tests {
                 threshold_usd: 25.0,
                 total_usd: 27.5,
                 complete: true,
+                calls_in_flight: 0,
                 stage: "analyze".into(),
             }),
             "agent_spend"

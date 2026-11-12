@@ -386,3 +386,102 @@ fn thought_summaries_are_reasoning_text_not_answer_text() {
     assert_eq!(chunks[2].delta, "Answer");
     assert!(chunks[2].reasoning_delta.is_none());
 }
+
+/// The usage counts every modality and the grounding tool, and anything but
+/// text is a term the token rates do not cover.
+#[test]
+fn usage_names_what_the_text_rates_do_not_cover() {
+    let usage = usage_of(&json!({
+        "total_input_tokens": 100,
+        "total_cached_tokens": 40,
+        "total_output_tokens": 10,
+        "total_thought_tokens": 5,
+        "input_tokens_by_modality": [
+            { "modality": "TEXT", "tokens": 60 },
+            { "modality": "AUDIO", "tokens": 40 },
+            { "modality": "IMAGE", "tokens": 0 }
+        ],
+        "output_tokens_by_modality": [{ "modality": "audio", "tokens": 3 }],
+        "tool_use_tokens_by_modality": [{ "tokens": 1 }],
+        "grounding_tool_count": 2
+    }));
+    assert_eq!(
+        (
+            usage.prompt_tokens,
+            usage.cached_tokens,
+            usage.completion_tokens
+        ),
+        (60, 40, 15)
+    );
+    assert!(usage.terms.whole);
+    assert_eq!(
+        usage.terms.extra_terms,
+        ["audio_tokens", "grounding_tool_count"]
+    );
+    let plain = usage_of(&json!({ "total_input_tokens": 3, "total_output_tokens": 1 }));
+    assert!(plain.terms.extra_terms.is_empty());
+}
+
+/// An interaction that ends failed or cancelled has still used what it
+/// reported, and the turn's closing chunk names the model and the tier.
+#[tokio::test]
+async fn an_ending_keeps_what_the_interaction_used() {
+    let trace = crate::CallTrace::new();
+    let chunks = trace
+        .scope(async {
+            run(&[
+                json!({ "event_type": "step.stop", "index": 9,
+                    "usage": { "total_input_tokens": 10, "total_output_tokens": 5 } }),
+                json!({ "event_type": "interaction.completed", "interaction": { "status": "failed" } }),
+            ])
+        })
+        .await;
+    assert!(chunks.last().unwrap().is_err());
+    let seen = trace.seen();
+    assert!(seen.whole, "the interaction is over");
+    assert_eq!(seen.usage.map(|u| u.prompt_tokens), Some(10));
+
+    // Cancelled before it reported any usage: nothing to keep.
+    let quiet = crate::CallTrace::new();
+    quiet
+        .scope(async {
+            run(&[
+                json!({ "event_type": "interaction.completed", "interaction": { "status": "cancelled" } }),
+            ])
+        })
+        .await;
+    assert_eq!(quiet.seen().usage, None);
+
+    let done = run(&[
+        json!({ "event_type": "interaction.completed", "interaction": {
+            "status": "completed", "model": "gemini-3.5-flash-lite", "service_tier": "flex",
+            "usage": { "total_input_tokens": 4, "total_output_tokens": 2 } } }),
+    ])
+    .pop()
+    .unwrap()
+    .unwrap();
+    let tokens = done.tokens.unwrap();
+    assert_eq!(tokens.terms.model.as_deref(), Some("gemini-3.5-flash-lite"));
+    assert_eq!(tokens.terms.service_tier.as_deref(), Some("flex"));
+}
+
+/// The interaction's id is in its first event, and is what Google knows the
+/// call by; an event that carries none names nothing.
+#[tokio::test]
+async fn an_interaction_names_itself_in_its_first_event() {
+    let trace = crate::CallTrace::new();
+    trace
+        .scope(async {
+            run(&[
+                json!({ "event_type": "interaction.created", "interaction": { "id": "v1_abc" } }),
+            ])
+        })
+        .await;
+    assert_eq!(trace.seen().call_id.as_deref(), Some("v1_abc"));
+
+    let quiet = crate::CallTrace::new();
+    quiet
+        .scope(async { run(&[json!({ "event_type": "interaction.created", "interaction": {} })]) })
+        .await;
+    assert_eq!(quiet.seen().call_id, None);
+}

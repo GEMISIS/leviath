@@ -39,9 +39,18 @@ fn usage(model: &str, cost: Option<f64>, reported: Option<bool>) -> RunRecord {
         completion_tokens: 2,
         cached_tokens: 1,
         cache_write_tokens: 0,
-        cost_usd: cost,
-        cost_reported_by_provider: reported,
+        cost: match (cost, reported) {
+            (Some(usd), Some(true)) => leviath_providers::CallCost::Reported(usd),
+            (Some(usd), _) => leviath_providers::CallCost::Computed(usd),
+            (None, _) => {
+                leviath_providers::CallCost::Unknown(leviath_providers::CostUnknown::NoPrice)
+            }
+        },
+        ending: crate::state::CallEnding::Answered,
+        attempt: String::new(),
+        provider_call_id: None,
         at: 1,
+        finish_reason: None,
     }
 }
 
@@ -73,10 +82,14 @@ fn a_model_call_and_its_usage_become_one_inference_event() {
         kind,
         stage,
         iteration,
+        ending,
+        provider_call_id,
     } = &events[1]
     else {
         unreachable!()
     };
+    assert_eq!(*ending, crate::state::CallEnding::Answered);
+    assert_eq!(*provider_call_id, None);
     assert_eq!(*kind, crate::state::journal::CallKind::Stage);
     assert_eq!(stage.as_ref().map(|s| s.as_str()), Some("plan"));
     assert_eq!(*iteration, 1);
@@ -107,12 +120,22 @@ fn usage_with_no_call_to_attach_to_stands_on_its_own() {
             RunEvent::Inference { spend, .. } => Some((
                 spend.reported_calls,
                 spend.computed_calls,
-                spend.unpriced_calls,
+                spend.unknown_calls(),
             )),
             _ => None,
         })
         .collect();
-    assert_eq!(spends, vec![(0, 0, 1), (0, 1, 0)]);
+    // The call to a model no id can name is recorded all the same, so the
+    // per-call list adds up to the run's total.
+    assert_eq!(spends, vec![(0, 0, 1), (0, 1, 0), (0, 0, 1)]);
+    let named: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            RunEvent::Inference { model, .. } => Some(model.model.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(named, ["other", "other", "unnamed-model"]);
     let RunEvent::Inference {
         attempt,
         finish_reason,
@@ -221,6 +244,7 @@ fn a_failed_call_is_a_log_line_and_a_nameless_model_is_nothing() {
             transient: true,
             capacity: false,
             next: RetryState::SameModel,
+            sent: None,
         }
     );
     assert_eq!(kept[1].model, "");
@@ -565,4 +589,81 @@ fn a_result_says_how_its_call_ended() {
     for (text, want) in cases {
         assert_eq!(outcome_of(text), want, "{text}");
     }
+}
+
+/// A usage record that names the attempt it bills, on `model`.
+fn usage_for(attempt: &str, model: &str) -> RunRecord {
+    RunRecord::InferenceUsage {
+        kind: Default::default(),
+        stage: "plan".into(),
+        iteration: 1,
+        provider: "mock".into(),
+        model: model.into(),
+        prompt_tokens: 10,
+        completion_tokens: 2,
+        cached_tokens: 0,
+        cache_write_tokens: 0,
+        cost: leviath_providers::CallCost::Reported(0.5),
+        ending: crate::state::CallEnding::CutOff,
+        attempt: attempt.into(),
+        provider_call_id: Some("gen-1".into()),
+        at: 1,
+        finish_reason: None,
+    }
+}
+
+/// A call that was billed is always an event, so the per-call list adds up
+/// to the total: a model string no id can hold is spelled the nearest way
+/// one can, and one that leaves nothing gets a stand-in name.
+#[test]
+fn a_bill_on_a_model_no_id_can_hold_is_still_an_event() {
+    let events = events_of(&[
+        usage("my model\tv2", Some(0.5), Some(true)),
+        usage("", Some(0.25), None),
+    ]);
+    assert_eq!(events.len(), 2, "one event for each bill");
+    let shown = format!("{events:?}");
+    assert!(shown.contains("my_model_v2"), "{shown}");
+    assert!(shown.contains("unnamed-model"), "{shown}");
+}
+
+/// A bill that names its attempt takes that attempt off the list of those
+/// waiting for one, whichever of the two records lands first.
+#[test]
+fn a_bill_that_names_its_attempt_settles_it_in_either_order() {
+    let mut events = Vec::new();
+    let mut answered = Answered::default();
+    let landed = attempt("mock", "m", json!("succeeded"), "stop");
+    push_events(&mut events, &mut answered, &landed);
+    assert!(!answered.is_empty(), "the attempt waits for its bill");
+    push_events(&mut events, &mut answered, &usage_for("a1", "m"));
+    assert!(answered.is_empty(), "billed by name, it waits no longer");
+
+    let mut answered = Answered::default();
+    push_events(&mut events, &mut answered, &usage_for("a1", "m"));
+    assert!(
+        !answered.is_empty(),
+        "the bill landed first and is remembered"
+    );
+    push_events(&mut events, &mut answered, &landed);
+    assert!(answered.is_empty(), "its attempt does not start to wait");
+    let shown = format!("{:?}", events.last());
+    assert!(shown.contains("Attempt"), "{shown}");
+}
+
+/// Each kind of call a run's state lists is the kind its usage record names.
+#[test]
+fn a_listed_calls_kind_is_its_usage_records_kind() {
+    use crate::runfile::record::InferenceKind;
+    use crate::state::journal::CallKind;
+    assert_eq!(InferenceKind::from(CallKind::Stage), InferenceKind::Stage);
+    assert_eq!(
+        InferenceKind::from(CallKind::Compaction),
+        InferenceKind::Compaction
+    );
+    assert_eq!(InferenceKind::from(CallKind::Title), InferenceKind::Title);
+    assert_eq!(
+        InferenceKind::from(CallKind::Routing),
+        InferenceKind::Routing
+    );
 }

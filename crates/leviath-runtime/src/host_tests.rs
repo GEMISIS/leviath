@@ -87,6 +87,7 @@ fn text(content: &str) -> InferenceResponse {
             cached_tokens: 0,
             cache_write_tokens: 0,
             reported_cost_usd: None,
+            terms: Default::default(),
         },
         finish_reason: FinishReason::Complete,
         reasoning: None,
@@ -1648,6 +1649,59 @@ async fn a_persisted_paused_root_is_parked_and_pages_back_in() {
     assert!(host.parked.is_empty(), "resumed run left the parked map");
     let e2 = host.by_run_id["run-a"];
     assert_eq!(host.world.agent_status(e2), Some(AgentStatus::Active));
+}
+
+/// A paused run with a call of its own still out (a title, a summary) is
+/// not paged out: the call reports to the run where it is. Paged out and
+/// back in the meantime, the run would settle the same call a second time,
+/// as one a stopped daemon left out, and the real answer would find the
+/// call already taken.
+#[tokio::test]
+async fn a_paused_run_with_a_call_still_out_is_not_paged_out() {
+    let mut host = host_with(vec![]);
+    host.set_reloader(paging_reloader());
+    let e = spawn(&mut host, "run-a", "agent-a");
+    assert!(
+        ask(&mut host, |reply| ControlOp::Pause {
+            run_id: "run-a".to_string(),
+            reply
+        })
+        .await
+    );
+    let mut wm = crate::pipeline::PersistWatermark::default();
+    wm.stamp_status(leviath_core::run_meta::RunStatus::Paused);
+    let open = crate::open_calls::OpenCalls::new(
+        "run-a",
+        vec![crate::open_calls::OpenCall {
+            attempt: "title".into(),
+            kind: crate::runfile::record::InferenceKind::Title,
+            stage: String::new(),
+            visit: String::new(),
+            iteration: 0,
+            provider: "p".into(),
+            model: "m".into(),
+            provider_call_id: None,
+            opened_at: 1,
+            settling_since: None,
+            job: None,
+            carries: false,
+        }],
+    );
+    host.world_mut()
+        .world_mut()
+        .entity_mut(e.entity())
+        .insert((wm, open.clone()));
+
+    host.emit_events();
+    assert!(
+        host.world.world().get::<AgentState>(e.entity()).is_some(),
+        "a run owed a call stays where the call can find it"
+    );
+
+    // The call lands, and the run is paged out as any paused root is.
+    assert!(open.close("title"));
+    host.emit_events();
+    assert!(host.world.world().get::<AgentState>(e.entity()).is_none());
 }
 
 /// The park gate holds until the paused state is known to be on its way to
@@ -3277,6 +3331,70 @@ async fn a_completed_event_without_an_answer_carries_none() {
     assert!(answer.is_none());
 }
 
+/// A spend event says how many calls are in flight, and is not complete
+/// while any call is out: one in flight is behind no total yet, and one
+/// still out on a run that has ended is not settled.
+#[tokio::test]
+async fn a_spend_event_counts_the_calls_in_flight_and_is_not_complete_with_one_out() {
+    let mut host = host_with(vec![]);
+    host.set_spend_notify_usd(vec![1.0, 5.0]);
+    let mut rx = host.subscribe();
+    let agent = spawn(&mut host, "run-busy", "agent-busy");
+    let entity = agent.entity();
+    host.emit_events();
+    let open = crate::open_calls::OpenCalls::new(
+        "run-busy",
+        vec![crate::open_calls::OpenCall {
+            attempt: "a1".into(),
+            kind: crate::runfile::record::InferenceKind::Stage,
+            stage: "s".into(),
+            visit: String::new(),
+            iteration: 0,
+            provider: "p".into(),
+            model: "m".into(),
+            provider_call_id: None,
+            opened_at: 1,
+            settling_since: None,
+            job: None,
+            carries: false,
+        }],
+    );
+    let spent = |host: &mut WorldHost, priced_usd: f64| {
+        let mut totals = crate::persistence::TokenTotals::default();
+        totals.cost.priced_usd = priced_usd;
+        host.world_mut()
+            .world_mut()
+            .entity_mut(entity)
+            .insert((totals, open.clone()));
+    };
+    let mut crossed = |host: &mut WorldHost| {
+        host.emit_events();
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .find_map(|e| match e {
+                WorldEvent::Spend {
+                    complete,
+                    calls_in_flight,
+                    ..
+                } => Some((complete, calls_in_flight)),
+                _ => None,
+            })
+            .expect("a threshold was passed")
+    };
+
+    // Going, with one call out: the total is what has landed.
+    spent(&mut host, 2.0);
+    assert_eq!(crossed(&mut host), (false, 1));
+
+    // Ended with the call still out: not in flight, and not settled.
+    host.world_mut()
+        .world_mut()
+        .get_mut::<AgentState>(entity)
+        .unwrap()
+        .status = AgentStatus::Cancelled;
+    spent(&mut host, 6.0);
+    assert_eq!(crossed(&mut host), (false, 0));
+}
+
 /// A run announces each spend threshold once, as it passes it.
 ///
 /// The motivating case: a run spent $274 while looking, from outside, exactly
@@ -3301,7 +3419,7 @@ async fn a_run_announces_each_spend_threshold_once_as_it_passes_it() {
     );
 
     // The spawn bundle here carries no totals, so the run gets one to move.
-    let set_cost = |host: &mut WorldHost, priced_usd: f64, unpriced: usize| {
+    let set_cost = |host: &mut WorldHost, priced_usd: f64, unpriced: u32| {
         let mut totals = host
             .world_mut()
             .world()
@@ -3309,7 +3427,7 @@ async fn a_run_announces_each_spend_threshold_once_as_it_passes_it() {
             .copied()
             .unwrap_or_default();
         totals.cost.priced_usd = priced_usd;
-        totals.cost.unpriced_calls = unpriced;
+        totals.cost.unknown.no_price = unpriced;
         host.world_mut()
             .world_mut()
             .entity_mut(entity)

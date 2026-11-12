@@ -148,6 +148,9 @@ pub struct GeminiProvider {
 
     /// The native API root, with no trailing slash.
     base_url: String,
+    /// Whether the published price table applies: true while the provider
+    /// talks to Google's own endpoint.
+    list_priced: bool,
 
     /// Rate limiter
     rate_limiter: Option<RateLimiter>,
@@ -179,6 +182,7 @@ impl GeminiProvider {
             client,
             api_key,
             base_url: DEFAULT_BASE_URL.to_string(),
+            list_priced: true,
             rate_limiter: None,
             learned: Default::default(),
             capability_overrides: HashMap::new(),
@@ -217,6 +221,8 @@ impl GeminiProvider {
         if let Some(url) = base_url {
             let url = url.trim_end_matches('/');
             self.base_url = url.strip_suffix("/openai").unwrap_or(url).to_string();
+            // Google's list prices are for Google's own endpoint.
+            self.list_priced = self.base_url == DEFAULT_BASE_URL;
         }
         self
     }
@@ -394,14 +400,23 @@ impl Provider for GeminiProvider {
         .then(|| model_key.to_string())
     }
 
+    /// Google's billing terms: a request that fails with a 400 or 500 error
+    /// is not charged for the tokens used. Those are Google's terms for
+    /// Google's own endpoint: an error from whatever answers at another
+    /// `base_url` is not Google's, and says nothing of what was charged.
+    fn bills_no_error_answer(&self) -> bool {
+        self.list_priced
+    }
+
     fn pricing(&self, model: &str) -> Option<crate::ModelPricing> {
-        // Config first: it is the only source that can know a negotiated rate,
-        // and the shipped table is a transcription of a public page that may
-        // have moved since this build.
-        self.capability_overrides
-            .get(model)
-            .and_then(|o| o.pricing())
-            .or_else(|| crate::pricing::published_rates("google", model))
+        crate::pricing::rates_for(
+            "google",
+            model,
+            self.capability_overrides
+                .get(model)
+                .and_then(|o| o.pricing()),
+            self.list_priced,
+        )
     }
 
     fn learned_models(&self) -> Option<&crate::learned::LearnedModels> {
