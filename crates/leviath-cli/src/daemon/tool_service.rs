@@ -208,7 +208,7 @@ pub(crate) struct AgentToolState {
     pub global_perms: Arc<Live<HashMap<String, ToolPolicy>>>,
     /// `[security] allow_blueprint_permissions`: whether this manifest's
     /// `[tool_permissions]` may exceed the built-in default for a tool the user
-    /// has not configured. See `BLUEPRINT_LOOSENABLE` in `crate::tools`.
+    /// has not configured. See [`leviath_runtime::tool_policy::resolve_policy`].
     /// Re-read when the run resumes, like the permission maps beside it.
     pub blueprint_may_loosen: Arc<std::sync::atomic::AtomicBool>,
     /// The agent's interaction backend (ask_user + tool approvals).
@@ -753,15 +753,11 @@ pub(crate) fn decide_call(
                 tc.name
             ))
         }
-        // Says what actually lifts it. The run re-reads its permissions when it
-        // resumes, so the message names an edit plus a resume rather than a
-        // cancel and a fresh run.
-        ToolPolicy::Deny => ToolVerdict::Refuse(format!(
-            "[denied] Tool '{}' is not permitted. To allow it, set it to \"allow\" or \
-             \"ask\" under [tool_permissions] in config.toml and resume this run \
-             (`lev resume`); the run re-reads them and does not need restarting.",
-            tc.name
-        )),
+        // Says what actually lifts it, in the words every host that decides
+        // by the permission layers answers a deny with.
+        ToolPolicy::Deny => {
+            ToolVerdict::Refuse(leviath_runtime::tool_policy::denied_refusal(&tc.name))
+        }
         // Only what is still uncovered: that is what the prompt names and
         // what a scoped approval records. Uncovered is judged per scope. An
         // approval for the stage records what nothing covers now; one for the

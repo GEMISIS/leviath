@@ -18,25 +18,6 @@ use crate::daemon::sandbox_manager::SandboxManager;
 use crate::daemon::script_host::ScriptAllow;
 use crate::yolo::YoloProfile;
 
-/// A tool policy as the permission layers write it.
-fn policy_word(policy: ToolPolicy) -> String {
-    match policy {
-        ToolPolicy::Allow => "allow",
-        ToolPolicy::Ask => "ask",
-        ToolPolicy::Deny => "deny",
-    }
-    .to_string()
-}
-
-fn permissions(
-    table: &BTreeMap<leviath_runtime::spec::names::ToolName, ToolPolicy>,
-) -> HashMap<String, String> {
-    table
-        .iter()
-        .map(|(tool, policy)| (tool.to_string(), policy_word(*policy)))
-        .collect()
-}
-
 /// The permission layers of one run.
 #[derive(Debug, Clone)]
 pub(super) struct Layers {
@@ -63,6 +44,12 @@ impl Layers {
         agent: Option<&str>,
     ) -> Self {
         let entry_index = entry_index(graph);
+        let permissions = leviath_runtime::tool_policy::RunPermissions::new(
+            graph,
+            launch,
+            config.permissions_for_agent(agent),
+            config.security.allow_blueprint_permissions,
+        );
         Self {
             entry_index,
             entry_stage: graph
@@ -70,19 +57,11 @@ impl Layers {
                 .get(entry_index)
                 .map(|s| s.name.to_string())
                 .unwrap_or_default(),
-            stage_perms_by_index: graph
-                .stages
-                .iter()
-                .map(|s| permissions(&s.tool_permissions))
-                .collect(),
-            agent_perms: permissions(&graph.tool_permissions),
-            launch_overrides: launch
-                .allow
-                .iter()
-                .map(|t| (t.to_string(), ToolPolicy::Allow))
-                .collect(),
-            agent_scoped: config.permissions_for_agent(agent),
-            may_loosen: config.security.allow_blueprint_permissions,
+            stage_perms_by_index: permissions.stages,
+            agent_perms: permissions.graph,
+            launch_overrides: permissions.launch,
+            agent_scoped: permissions.user,
+            may_loosen: permissions.blueprint_may_loosen,
         }
     }
 

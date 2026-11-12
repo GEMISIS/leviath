@@ -152,12 +152,82 @@ An application that resolves against its own machine, without a world, makes the
 with `leviath::runtime::resolve::check(&request, &env)`, where `env` is an
 `EmbedEnv` or its own `ResolveEnv`. An `EmbedEnv` knows no MCP servers; one whose embedder
 connects them is told what they offer with `.with_mcp_tools(server, &tools)`, so a stage naming
-`server__tool` (or a run whose output is judged by one) checks as it would on the daemon.
+`server__tool` (or a run whose output is judged by one) resolves as it would on the daemon.
 
 Not every [seed](/docs/context) works when embedded, because some of them are daemon behaviour.
 A `literal` seed resolves as written. A `files`, `glob`, `command`, `code` or `tools` seed is not
 run: it is an issue when the region is `required`, and leaves the region empty otherwise. Pass that
 content as an input instead.
+
+### Checking a run against the user's permissions
+
+Resolving knows nothing about the user's [tool permissions](/docs/configuration#tool-permissions).
+A daemon reads them when it starts the run it resolved, and one rule there refuses a spawn that
+resolved cleanly: a stage's [validator tool](/docs/rhai-validators#what-it-may-call) must simply
+run, because nobody can approve a call in the middle of a submission. So `check` passes a run
+whose validator tool would have to ask, and the daemon then refuses it.
+
+`check_with_permissions` makes both checks. Give it the user's settings and it answers with the
+issue the daemon would give: the same path, message and hint.
+
+```rust
+use leviath::runtime::resolve::check_with_permissions;
+use leviath::runtime::tool_policy::ToolPermissions;
+
+// A machine whose user has set nothing.
+let permissions = ToolPermissions::default();
+if let Err(issues) = check_with_permissions(&request, &env, &permissions).await {
+    for issue in issues.iter() {
+        println!("{}: {}", issue.path, issue.message);
+        if let Some(hint) = &issue.hint {
+            println!("  {hint}");
+        }
+    }
+}
+```
+
+Take a graph whose `review` stage is judged by the MCP tool `docs__check`, with
+`docs__check = "allow"` in the graph's own `tool_permissions`. A graph cannot allow an MCP tool by
+itself, so that prints:
+
+```text
+stages.review.output.validator_tool.tool: the validator tool "docs__check" would not run: it is set to ask, and nobody is there to approve it mid-submission
+  `docs__check = "allow"` in tool_permissions has no effect, because a graph cannot allow this tool by itself; name it in this spawn's `launch.allow` (`--allow` on the command line), or name a tool the stage may call unprompted
+```
+
+Name the tool in the request's `launch.allow` and the check passes, as the spawn will.
+
+`ToolPermissions` holds the user's side of the decision:
+
+| Setting | What it does here |
+|---|---|
+| `[tool_permissions]` and `[agent_tool_permissions.<name>]` | The policy for a tool, and the ceiling a graph's own is held to |
+| `[security] allow_blueprint_permissions` | Lets a graph's own `allow` count for any tool |
+| `[safe_commands]` and `[agent_safe_commands.<name>]` | A tool named under `tools` runs without a prompt, so a validator tool on the safe list is not refused |
+| `[security] allow_blueprint_safe_commands` | Lets the graph's own `safe_commands` count, as `allow_blueprint = true` under `[agent_safe_commands.<name>]` does for one blueprint |
+
+To check against the config file of the machine the run will start on, read them with
+`leviath::runtime::user_creds::load_tool_permissions(&source)`, which takes the same
+`UserCredsSource` as `load_user_creds`. With a `RunSpec` already in hand,
+`leviath::runtime::tool_policy::check_validator_tools(&spec, &permissions)` is the rule alone.
+
+The check decides the call from what is written down: the graph's and the stage's
+`tool_permissions`, the graph's `safe_commands`, the request's `launch` (its `allow` list, and
+`Unattended::All`, which waives every ask), and the user's settings. It needs the tool's name and
+no connection, so a tool of an MCP server you declared with `with_mcp_tools` and never connected
+is still reported at `ask`.
+
+A running daemon knows more than that, and the check does not see it:
+
+| Not seen | What it means for the answer |
+|---|---|
+| A named [yolo profile](/docs/yolo) | The profile is the daemon's file, and it can allow a call or hold one back. The check judges the run as if it were attended |
+| What a `shell` validator's command does | The daemon reads the line: where it writes and reads, and which of its commands the safe list's `shell` entries cover. The check judges `shell` by its name, and no safe entry covers it |
+| Write paths, the write budget, free disk space and locked permission files | The daemon refuses a validator call that breaks one. The check does not look |
+
+A host that does know one of these gives the verdict itself, with
+`leviath::runtime::tool_policy::validator_tool_refusals`. The `lev` daemon calls that same function
+with its own verdict, so the path, the message and the hint cannot drift from the ones above.
 
 ## Events
 

@@ -1051,3 +1051,98 @@ fn every_keyed_providers_headers_are_reached_through_the_table() {
         );
     }
 }
+
+/// The user's tool permissions are read from the three places `lev` keeps
+/// them, beside whatever else the file holds; no file is a machine whose
+/// user has set nothing.
+#[test]
+fn tool_permissions_are_read_from_the_same_file() {
+    use leviath_core::policy::ToolPolicy;
+
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(
+        load_tool_permissions(&bare(dir.path())).unwrap(),
+        crate::tool_policy::ToolPermissions::default()
+    );
+
+    let dir = with_config(
+        "override_model = \"m\"\n\
+         [tool_permissions]\nshell = \"deny\"\nweb_fetch = \"allow\"\n\
+         [agent_tool_permissions.coder]\nshell = \"ask\"\n\
+         [safe_commands]\ndefaults = false\ntools = [\"gh__search\"]\nshell = [\"rg\"]\n\
+         outside_workdir = \"deny\"\n\
+         [agent_safe_commands.coder]\ntools = [\"web_fetch\"]\nallow_blueprint = true\n\
+         [security]\nallow_blueprint_permissions = true\ncredential_store = \"file\"\n\
+         allow_blueprint_safe_commands = true\n\
+         [providers]\nopenai_api_key = \"o\"\n",
+    );
+    let loaded = load_tool_permissions(&bare(dir.path())).unwrap();
+    assert_eq!(
+        loaded.safe_commands,
+        crate::tool_policy::SafeCommandSettings {
+            defaults: false,
+            tools: vec!["gh__search".to_string()],
+            shell: vec!["rg".to_string()],
+        }
+    );
+    assert_eq!(
+        loaded.agent_safe_commands,
+        HashMap::from([(
+            "coder".to_string(),
+            crate::tool_policy::AgentSafeCommandSettings {
+                tools: vec!["web_fetch".to_string()],
+                shell: vec![],
+                allow_blueprint: true,
+            }
+        )])
+    );
+    assert!(loaded.allow_blueprint_safe_commands);
+    assert_eq!(
+        loaded
+            .safe_keys(Some("coder"), None, None)
+            .into_keys()
+            .collect::<Vec<_>>(),
+        ["gh__search", "web_fetch"]
+    );
+    assert_eq!(
+        loaded.tool_permissions,
+        HashMap::from([
+            ("shell".to_string(), ToolPolicy::Deny),
+            ("web_fetch".to_string(), ToolPolicy::Allow),
+        ])
+    );
+    assert_eq!(
+        loaded.agent_tool_permissions,
+        HashMap::from([(
+            "coder".to_string(),
+            HashMap::from([("shell".to_string(), ToolPolicy::Ask)])
+        )])
+    );
+    assert!(loaded.allow_blueprint_permissions);
+    assert_eq!(
+        loaded.for_agent(Some("coder")).get("shell"),
+        Some(&ToolPolicy::Ask)
+    );
+
+    // A file with none of the three is the defaults, switch included.
+    let dir = with_config("[security]\ncredential_store = \"file\"\n");
+    assert_eq!(
+        load_tool_permissions(&bare(dir.path())).unwrap(),
+        crate::tool_policy::ToolPermissions::default()
+    );
+}
+
+/// A policy that is not one, or a file that will not read, is an error
+/// naming the file, as it is for `lev`.
+#[test]
+fn tool_permissions_that_will_not_read_are_an_error() {
+    let dir = with_config("[tool_permissions]\nshell = \"sometimes\"\n");
+    let e = load_tool_permissions(&bare(dir.path())).unwrap_err();
+    assert!(matches!(e, UserCredsError::Parse { .. }), "{e:?}");
+    assert!(e.to_string().contains("config.toml"), "{e}");
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("config.toml")).unwrap();
+    let e = load_tool_permissions(&bare(dir.path())).unwrap_err();
+    assert!(matches!(e, UserCredsError::Read { .. }), "{e:?}");
+}

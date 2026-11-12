@@ -139,6 +139,7 @@ pub mod title;
 pub(crate) mod title_bridge;
 pub mod tool_bridge;
 mod tool_guard;
+pub mod tool_policy;
 pub mod user_creds;
 pub mod world;
 // test_support.rs gates itself with an inner `#![cfg(test)]` attribute, so no

@@ -107,10 +107,33 @@ pub enum ResolveMode {
 /// The env is the embedder's own, so what it declares is what is checked:
 /// an [`EmbedEnv`](crate::embed::EmbedEnv) given the tools of the MCP
 /// servers the embedder connects checks a stage that names them.
+///
+/// Resolving knows nothing of the user's tool permissions. What a daemon
+/// refuses on their account once a request resolves is checked by
+/// [`check_with_permissions`].
 pub async fn check(request: &SpawnRequest, env: &dyn ResolveEnv) -> Result<(), SpawnIssues> {
     resolve(request, &Caller::TopLevel, env, ResolveMode::Check)
         .await
         .map(|_| ())
+}
+
+/// [`check`], then what a daemon whose user has `permissions` decides once
+/// the request resolves: whether each stage's validator tool would simply
+/// run ([`check_validator_tools`](crate::tool_policy::check_validator_tools)).
+/// `Ok` says a spawn would be refused for neither.
+///
+/// The daemon makes that second decision when it binds the run it resolved,
+/// so its issues read from the run's root (`stages.<stage>.output...`), as
+/// the daemon reports them, where an issue of resolving reads from the
+/// request's (`source.raw.stages...`). They are found only for a request
+/// that resolves, as on the daemon.
+pub async fn check_with_permissions(
+    request: &SpawnRequest,
+    env: &dyn ResolveEnv,
+    permissions: &crate::tool_policy::ToolPermissions,
+) -> Result<(), SpawnIssues> {
+    let resolved = resolve(request, &Caller::TopLevel, env, ResolveMode::Check).await?;
+    crate::tool_policy::check_validator_tools(&resolved.spec, permissions).into_result(())
 }
 
 /// Resolve `request` for `caller` against this machine.

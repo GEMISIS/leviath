@@ -430,6 +430,185 @@ async fn with_the_opt_in_on_an_mcp_validator_is_told_to_allow_it() {
     );
 }
 
+/// The rule is the runtime's, so a program that embeds it and checks a run
+/// before spawning is told what this daemon would tell it. For the same run
+/// and the same user settings, binding here and the library's own check
+/// answer with the same issues (path, message and hint), refusals and
+/// passes alike.
+#[tokio::test]
+async fn the_librarys_check_and_the_daemons_bind_give_the_same_issues() {
+    use ToolPolicy::{Allow, Ask, Deny};
+
+    let dir = tempfile::tempdir().unwrap();
+    let judged = |tool: &str, says: Option<ToolPolicy>| judged_spec(dir.path(), tool, says);
+    let mut raw = judged(MCP, Some(Allow));
+    raw.origin = SpecOrigin::Raw;
+    let mut launch_allowed = judged(MCP, Some(Allow));
+    launch_allowed
+        .launch
+        .allow
+        .push(ToolName::new(MCP).unwrap());
+    let mut unwatched = judged(MCP, None);
+    unwatched.launch.unattended = Unattended::All;
+
+    let mut loose = quiet();
+    loose.security.allow_blueprint_permissions = true;
+    let mut per_agent = quiet();
+    per_agent
+        .agent_tool_permissions
+        .insert("helper".into(), [(MCP.to_string(), Allow)].into());
+    let mut ceiling = quiet();
+    ceiling.tool_permissions.insert("web_fetch".into(), Ask);
+    let mut denying = quiet();
+    denying.tool_permissions.insert(MCP.into(), Deny);
+
+    // The safe list: the user's own, the blueprint's per-agent one, and the
+    // graph's own under each of the two opt-ins.
+    let mut raw_plain = judged(MCP, None);
+    raw_plain.origin = SpecOrigin::Raw;
+    let mut declares = judged(MCP, None);
+    declares.graph.safe_commands.tools = vec![ToolName::new(MCP).unwrap()];
+    let mut safe_user = quiet();
+    safe_user.safe_commands.tools.push(MCP.into());
+    let mut safe_agent = quiet();
+    safe_agent.agent_safe_commands.insert(
+        "helper".into(),
+        crate::approvals::AgentSafeCommands {
+            tools: vec![MCP.into()],
+            ..Default::default()
+        },
+    );
+    let mut safe_graphs = quiet();
+    safe_graphs.security.allow_blueprint_safe_commands = true;
+    let mut safe_trusted = quiet();
+    safe_trusted.agent_safe_commands.insert(
+        "helper".into(),
+        crate::approvals::AgentSafeCommands {
+            allow_blueprint: true,
+            ..Default::default()
+        },
+    );
+
+    let cases = [
+        (
+            "on the user's safe list",
+            safe_user.clone(),
+            judged(MCP, None),
+            false,
+        ),
+        (
+            "on the user's safe list and denied by the graph",
+            safe_user,
+            judged(MCP, Some(Deny)),
+            true,
+        ),
+        (
+            "on the blueprint's per-agent safe list",
+            safe_agent.clone(),
+            judged(MCP, None),
+            false,
+        ),
+        (
+            "on a per-agent safe list, for a graph its caller wrote",
+            safe_agent,
+            raw_plain,
+            true,
+        ),
+        (
+            "on the graph's safe list, which nobody opted into",
+            quiet(),
+            declares.clone(),
+            true,
+        ),
+        (
+            "on the graph's safe list, with every graph's honoured",
+            safe_graphs,
+            declares.clone(),
+            false,
+        ),
+        (
+            "on the graph's safe list, with this blueprint's honoured",
+            safe_trusted,
+            declares,
+            false,
+        ),
+        (
+            "an MCP tool only the graph allows",
+            quiet(),
+            judged(MCP, Some(Allow)),
+            true,
+        ),
+        (
+            "an MCP tool nothing allows",
+            quiet(),
+            judged(MCP, None),
+            true,
+        ),
+        ("a graph its caller wrote", quiet(), raw, true),
+        (
+            "a loosenable tool at ask",
+            quiet(),
+            judged("web_fetch", Some(Ask)),
+            true,
+        ),
+        (
+            "a loosenable tool the graph allows",
+            quiet(),
+            judged("web_fetch", Some(Allow)),
+            false,
+        ),
+        (
+            "a loosenable tool under the user's ask",
+            ceiling,
+            judged("web_fetch", Some(Allow)),
+            true,
+        ),
+        (
+            "the opt-in on and the graph allowing",
+            loose.clone(),
+            judged(MCP, Some(Allow)),
+            false,
+        ),
+        (
+            "the opt-in on and nothing allowing",
+            loose,
+            judged(MCP, None),
+            true,
+        ),
+        (
+            "the per-agent table allowing",
+            per_agent,
+            judged(MCP, Some(Allow)),
+            false,
+        ),
+        ("the graph denying", quiet(), judged(MCP, Some(Deny)), true),
+        ("the user denying", denying, judged(MCP, Some(Allow)), true),
+        (
+            "a question for a person",
+            quiet(),
+            judged("ask_user_text", None),
+            true,
+        ),
+        ("the launch allowing", quiet(), launch_allowed, false),
+        ("a launch nobody watches", quiet(), unwatched, false),
+    ];
+    for (case, config, spec, refused) in cases {
+        let library = leviath_runtime::tool_policy::check_validator_tools(
+            &spec,
+            &config.tool_permission_settings(),
+        );
+        let (env, _agents) = crate::daemon::resolve_env::tests::env_with(config);
+        let daemon = env
+            .bind(&spec, &CodeFiles::new())
+            .await
+            .err()
+            .unwrap_or_default();
+        assert_eq!(daemon, library, "{case}");
+        assert_eq!(!daemon.is_empty(), refused, "{case}: {daemon:?}");
+        assert!(daemon.iter().all(|issue| issue.hint.is_some()), "{case}");
+    }
+}
+
 /// Each stage's write paths are what the run inherited, then its graph's,
 /// then its own; the script host starts on the entry stage's.
 #[tokio::test]

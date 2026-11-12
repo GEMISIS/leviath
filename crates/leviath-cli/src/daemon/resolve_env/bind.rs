@@ -149,90 +149,30 @@ pub(super) fn agent_name(spec: &RunSpec) -> Option<&str> {
 }
 
 /// Every stage whose answers a validator tool judges, where the tool would
-/// not simply run: denied, set to `ask`, or a question for a person. The call
-/// is decided as a mid-run call from that stage would be, by its
-/// `tool_permissions`, the launch's `allow` and the yolo profile, and only a
-/// call that runs passes. Nobody is there to ask mid-submission, so `ask` is
-/// refused here, where it can be fixed, rather than at the end of a long run.
+/// not simply run: the runtime's rule
+/// ([`leviath_runtime::tool_policy::validator_tool_refusals`]), with the
+/// verdict of this run's own tool lane. The call is decided as a mid-run
+/// call from that stage would be, with nothing granted and nothing written,
+/// by everything `tools` holds: the permission layers, the yolo profile, the
+/// safe list and the fences.
 fn validator_tool_refusals(spec: &RunSpec, tools: &AgentToolState) -> SpawnIssues {
-    let mut issues = SpawnIssues::new();
-    for plan in &spec.stages {
-        let Some(validator) = plan.output.as_ref().and_then(|o| o.validator_tool.as_ref()) else {
-            continue;
-        };
-        let submits = plan
-            .tools
-            .iter()
-            .any(|t| t.name.as_str() == leviath_tools::SUBMIT_OUTPUT_TOOL);
-        let Some(stage_index) = spec
-            .graph
-            .stages
-            .iter()
-            .position(|s| s.name == plan.stage)
-            .filter(|_| submits)
-        else {
-            continue;
-        };
-        let call = leviath_providers::ToolCall {
-            id: "validator".to_string(),
-            name: validator.tool.to_string(),
-            arguments: validator.spec().arguments(""),
-            thought_signature: None,
-        };
-        let grants = leviath_runtime::pipeline::ToolGrants::default();
+    let layers = leviath_runtime::tool_policy::RunPermissions {
+        launch: (*tools.launch_overrides).clone(),
+        stages: (*tools.stage_perms_by_index).clone(),
+        graph: (*tools.agent_perms).clone(),
+        user: (*tools.global_perms.get()).clone(),
+        blueprint_may_loosen: tools.blueprint_may_loosen(),
+        safe: (*tools.safe_keys.get()).clone(),
+    };
+    let grants = leviath_runtime::pipeline::ToolGrants::default();
+    leviath_runtime::tool_policy::validator_tool_refusals(spec, &layers, &|stage_index, call| {
         let ctx = leviath_runtime::pipeline::DecideCtx {
             grants: &grants,
             written: 0,
             stage_index,
         };
-        let verdict = crate::daemon::tool_service::decide_call(tools, &call, &ctx);
-        let asks = matches!(verdict, leviath_runtime::pipeline::ToolVerdict::Ask { .. });
-        let why = match verdict {
-            leviath_runtime::pipeline::ToolVerdict::Run { .. } => continue,
-            // Its first sentence: the rest is written for a run already
-            // going ("resume this run"), and the hint below says what to do
-            // at spawn.
-            leviath_runtime::pipeline::ToolVerdict::Refuse(text) => text
-                .split_once(". ")
-                .map_or(text.as_str(), |(first, _)| first)
-                .to_string(),
-            leviath_runtime::pipeline::ToolVerdict::Ask { .. } => {
-                "it is set to ask, and nobody is there to approve it mid-submission".to_string()
-            }
-            leviath_runtime::pipeline::ToolVerdict::Interact { .. } => {
-                "it puts a question to a person, which no check can wait on".to_string()
-            }
-        };
-        issues.push(
-            SpawnIssue::new(
-                SpecPath::root()
-                    .field("stages")
-                    .key(plan.stage.as_str())
-                    .field("output")
-                    .field("validator_tool")
-                    .field("tool"),
-                IssueCode::NotAllowed,
-                format!(
-                    "the validator tool \"{}\" would not run: {why}",
-                    validator.tool
-                ),
-            )
-            .hint(match asks {
-                true => super::validator_hint::ask_hint(
-                    tools,
-                    stage_index,
-                    validator.tool.as_str(),
-                    agent_name(spec),
-                ),
-                false => format!(
-                    "set `{} = \"allow\"` in tool_permissions, or name a tool the stage may \
-                     call unprompted",
-                    validator.tool
-                ),
-            }),
-        );
-    }
-    issues
+        crate::daemon::tool_service::decide_call(tools, call, &ctx)
+    })
 }
 
 /// An issue at a top-level field of the spec.

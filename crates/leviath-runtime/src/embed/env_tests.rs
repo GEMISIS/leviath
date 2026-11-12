@@ -510,3 +510,94 @@ async fn a_check_sees_the_mcp_tools_the_embedder_declares() {
         "{issues}"
     );
 }
+
+/// The refusal an embedder could not see before it spawned. A graph whose
+/// validator tool is an MCP tool resolves, even with the graph marking the
+/// tool `allow`, and the daemon then refuses the run, because a graph cannot
+/// allow that tool by itself. The check that knows the user's permissions
+/// gives the daemon's refusal and its hint, from the tools the embedder
+/// declared and no connection, and passes once the launch allows the tool.
+#[tokio::test]
+async fn a_check_with_permissions_refuses_an_mcp_validator_only_the_graph_allows() {
+    use crate::spec::request::{SpawnRequest, SpawnSource};
+    use crate::tool_policy::ToolPermissions;
+    use leviath_core::policy::ToolPolicy;
+
+    let judge = ToolName::new("items__check_model").unwrap();
+    let mut graph = graph_judged_by_an_mcp_tool();
+    graph.tool_permissions = [(judge.clone(), ToolPolicy::Allow)].into();
+    let dir = tempfile::tempdir().unwrap();
+    let mut request = SpawnRequest::new(SpawnSource::Raw(Box::new(graph)));
+    request.workdir = Some(dir.path().to_path_buf());
+    let env = env().with_mcp_tools(
+        McpServerName::new("items").unwrap(),
+        &[Tool {
+            name: "check_model".into(),
+            description: "judges a model".into(),
+            parameters: serde_json::json!({"type": "object"}),
+        }],
+    );
+    let stock = ToolPermissions::default();
+
+    // Resolving alone has nothing to say about it.
+    crate::resolve::check(&request, &env).await.unwrap();
+
+    let issues = crate::resolve::check_with_permissions(&request, &env, &stock)
+        .await
+        .unwrap_err();
+    assert_eq!(issues.0.len(), 1, "{issues}");
+    let issue = &issues.0[0];
+    assert_eq!(
+        issue.path.to_string(),
+        "stages.build.output.validator_tool.tool"
+    );
+    assert_eq!(issue.code, IssueCode::NotAllowed);
+    assert_eq!(
+        issue.message,
+        "the validator tool \"items__check_model\" would not run: it is set to ask, and nobody \
+         is there to approve it mid-submission"
+    );
+    assert_eq!(
+        issue.hint.as_deref(),
+        Some(
+            "`items__check_model = \"allow\"` in tool_permissions has no effect, because a \
+             graph cannot allow this tool by itself; name it in this spawn's `launch.allow` \
+             (`--allow` on the command line), or name a tool the stage may call unprompted"
+        )
+    );
+
+    // The user's own settings decide it too: their opt-in lets the graph's
+    // `allow` count.
+    let loose = ToolPermissions {
+        allow_blueprint_permissions: true,
+        ..ToolPermissions::default()
+    };
+    crate::resolve::check_with_permissions(&request, &env, &loose)
+        .await
+        .unwrap();
+    // So does their safe list: a tool it names runs without a prompt.
+    let safe = ToolPermissions {
+        safe_commands: crate::tool_policy::SafeCommandSettings {
+            tools: vec![judge.to_string()],
+            ..Default::default()
+        },
+        ..ToolPermissions::default()
+    };
+    crate::resolve::check_with_permissions(&request, &env, &safe)
+        .await
+        .unwrap();
+
+    request.launch.allow.push(judge);
+    crate::resolve::check_with_permissions(&request, &env, &stock)
+        .await
+        .unwrap();
+
+    // A request that does not resolve answers with why, as `check` does.
+    let undeclared = crate::resolve::check_with_permissions(&request, &self::env(), &stock)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        undeclared.0[0].path.to_string(),
+        "source.raw.stages.build.tools[1]"
+    );
+}

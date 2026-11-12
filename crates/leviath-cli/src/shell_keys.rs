@@ -31,7 +31,7 @@ use std::collections::BTreeSet;
 
 /// The namespace every shell key carries, so a key can never collide with the
 /// bare tool name a non-shell grant uses.
-pub const KEY_PREFIX: &str = "shell:";
+pub const KEY_PREFIX: &str = leviath_runtime::tool_policy::SHELL_KEY_PREFIX;
 
 /// Words that introduce a compound command and are followed by the program that
 /// actually runs. They are stripped and parsing continues, so `do if grep -q x f`
