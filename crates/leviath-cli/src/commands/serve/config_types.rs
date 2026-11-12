@@ -257,7 +257,7 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // to fall back to handing over the TOML where it will not.
     "mime.write",
     "runs.stages",
-    // `cost_usd`, `unpriced_calls` and `cost_is_exact` on each stage record, and
+    // `cost_usd`, `unknown_calls` and `cost_is_exact` on each stage record, and
     // the `visits` split beneath them. Without the price a console drawing a
     // run's graph can annotate a node with how long it took and not with what
     // it cost, and the obvious workaround, multiplying tokens by a rate card

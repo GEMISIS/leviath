@@ -54,6 +54,9 @@ pub(crate) struct CompactionJob {
     /// One `(region_name, request)` per region to summarize. Each request is
     /// sent with its route's model and extra fields.
     pub requests: Vec<(String, InferenceRequest)>,
+    /// What each summarizing call is accounted under, or `None` in a world
+    /// with nowhere to account to.
+    pub ticket: Option<crate::open_calls::CallTicket>,
 }
 
 /// The completed result of a [`CompactionJob`]: the `(region_name, summary)`
@@ -63,37 +66,20 @@ pub(crate) struct CompactionOutcome {
     pub entity: Entity,
     /// Per-region summaries, or the error compaction failed with.
     pub result: Result<Vec<(String, String)>, ProviderError>,
-    /// What each completed call billed, one entry per region actually
-    /// summarized.
-    ///
-    /// Carried separately from `result` because the two do not have the same
-    /// length when a batch fails partway: the summaries are discarded whole
-    /// (compaction is all-or-nothing for the window), but the calls that
-    /// already ran were still billed and still have to be counted.
-    pub usage: Vec<leviath_providers::TokenUsage>,
-    /// The provider that served the batch.
-    pub provider_name: String,
-    /// The model the batch targeted.
-    pub model: String,
-    /// What the provider charges for that model, resolved while the
-    /// `Arc<dyn Provider>` was still in scope. Only the name survives past
-    /// here, and a name cannot be asked its rates.
-    pub pricing: Option<leviath_providers::ModelPricing>,
 }
 
 /// What one route made of the batch.
 struct Batch {
     summaries: Vec<(String, String)>,
-    usage: Vec<leviath_providers::TokenUsage>,
     result: Result<(), ProviderError>,
 }
 
 impl Batch {
     /// Whether the batch should move to the next route: the provider said it
     /// cannot serve anyone (out of credits, unreachable) before a single
-    /// summary was billed, so nothing is lost by sending the batch elsewhere.
+    /// summary was written, so nothing is lost by sending the batch elsewhere.
     fn fails_over(&self) -> bool {
-        self.usage.is_empty()
+        self.summaries.is_empty()
             && self
                 .result
                 .as_ref()
@@ -102,14 +88,15 @@ impl Batch {
 }
 
 /// Summarize each region on `route`, in order, stopping at the first error.
+/// Every call that is sent reports what it cost as it ends, under `ticket`.
 async fn summarize(
     route: &SummaryRoute,
     requests: &[(String, InferenceRequest)],
     deadline: std::time::Duration,
+    ticket: Option<&crate::open_calls::CallTicket>,
 ) -> Batch {
     let mut batch = Batch {
         summaries: Vec::new(),
-        usage: Vec::new(),
         result: Ok(()),
     };
     for (region, request) in requests {
@@ -118,6 +105,12 @@ async fn summarize(
             extra: route.extra.clone(),
             ..request.clone()
         };
+        let sent = crate::open_calls::Sent::new(
+            ticket,
+            route.provider.as_ref(),
+            &route.provider_name,
+            &route.model,
+        );
         // Guarded before it is sent, like every other lane's request, and
         // inside the same deadline so a count that hangs cannot hold the slot
         // past it. No calibration: that corrects the agent's own window on
@@ -126,15 +119,17 @@ async fn summarize(
         let call = async {
             crate::inference_bridge::guard_context_window(route.provider.as_ref(), &request, None)
                 .await?;
-            route.provider.infer(&request).await
+            sent.begin(&leviath_core::execution::mint_attempt_id());
+            sent.scope(route.provider.infer(&request)).await
         };
         match tokio::time::timeout(deadline, call).await {
             Ok(Ok(response)) => {
                 crate::listed_404s::answered(route.provider.name(), &route.model);
-                batch.usage.push(response.tokens_used);
+                sent.answered(&response.tokens_used, &response.finish_reason);
                 batch.summaries.push((region.clone(), response.content));
             }
             Ok(Err(e)) => {
+                sent.failed(&e).await;
                 // A 404 for a model the route's provider lists is an outage,
                 // and moves the batch on as an unusable route does.
                 let listed = crate::inference_bridge::listed_outage(
@@ -146,6 +141,7 @@ async fn summarize(
                 break;
             }
             Err(_) => {
+                sent.cut_off().await;
                 batch.result = Err(leviath_providers::ProviderError::Other(format!(
                     "compaction exceeded the {}s deadline and was aborted to free \
                      the pool slot",
@@ -180,12 +176,13 @@ pub(crate) async fn run_compaction_job(
         fallbacks,
         pools,
         requests,
+        ticket,
     } = job;
     let mut rest = fallbacks.into_iter();
     let mut at = (route, permit);
-    let (route, batch) = loop {
+    let batch = loop {
         let (route, permit) = at;
-        let batch = summarize(&route, &requests, deadline).await;
+        let batch = summarize(&route, &requests, deadline, ticket.as_ref()).await;
         drop(permit); // free the pool slot before anything else runs
         let next = match batch.fails_over() {
             true => rest.by_ref().find_map(|r| {
@@ -196,7 +193,7 @@ pub(crate) async fn run_compaction_job(
             false => None,
         };
         let Some(next) = next else {
-            break (route, batch);
+            break batch;
         };
         tracing::warn!(
             from_provider = %route.provider_name,
@@ -211,10 +208,6 @@ pub(crate) async fn run_compaction_job(
     let outcome = CompactionOutcome {
         entity,
         result: batch.result.map(|()| batch.summaries),
-        usage: batch.usage,
-        pricing: route.provider.pricing(&route.model),
-        provider_name: route.provider_name,
-        model: route.model,
     };
     let _ = results.send(outcome);
     wake.notify_one();
@@ -264,6 +257,7 @@ mod tests {
                         cached_tokens: 0,
                         cache_write_tokens: 0,
                         reported_cost_usd: None,
+                        terms: Default::default(),
                     },
                     finish_reason: FinishReason::Complete,
                     reasoning: None,
@@ -385,6 +379,7 @@ mod tests {
                 .into_iter()
                 .map(|r| (r.to_string(), request()))
                 .collect(),
+            ticket: None,
         }
     }
 
@@ -399,6 +394,17 @@ mod tests {
     }
 
     async fn outcome_of(job: CompactionJob) -> CompactionOutcome {
+        billed_outcome_of(job).await.0
+    }
+
+    /// The outcome of `job`, and the provider each call it sent was billed
+    /// to: every call reports what it cost as it ends.
+    async fn billed_outcome_of(mut job: CompactionJob) -> (CompactionOutcome, Vec<String>) {
+        let (ticket, _open, mut spends) = crate::open_calls::tests::ticket(
+            job.entity,
+            crate::runfile::record::InferenceKind::Compaction,
+        );
+        job.ticket = Some(ticket);
         let (tx, mut rx) = mpsc::unbounded_channel();
         run_compaction_job(
             job,
@@ -407,25 +413,31 @@ mod tests {
             Arc::new(Notify::new()),
         )
         .await;
-        rx.try_recv().expect("an outcome is always reported")
+        let mut billed = Vec::new();
+        while let Ok(spend) = spends.0.try_recv() {
+            assert_eq!(spend.model, format!("{}-model", spend.provider));
+            billed.push(spend.provider);
+        }
+        (
+            rx.try_recv().expect("an outcome is always reported"),
+            billed,
+        )
     }
 
     /// A provider out of credits before it wrote anything hands the batch to
     /// the next route, which summarizes it and is billed for it.
     #[tokio::test]
     async fn an_unusable_route_fails_over_to_the_next() {
-        let outcome = outcome_of(job_over(
+        let (outcome, billed) = billed_outcome_of(job_over(
             route("a", script(vec![Err("unavailable")])),
             vec![route("b", script(vec![Ok("s1"), Ok("s2")]))],
             InferencePools::new(InferencePoolConfig::new()),
             vec!["x", "y"],
         ))
         .await;
-        assert_eq!(
-            (outcome.provider_name.as_str(), outcome.model.as_str()),
-            ("b", "b-model")
-        );
-        assert_eq!(outcome.usage.len(), 2);
+        // The call the first route refused was sent, and is accounted for
+        // beside the two the second answered.
+        assert_eq!(billed, ["a", "b", "b"]);
         assert_eq!(outcome.result.unwrap().len(), 2);
     }
 
@@ -433,24 +445,24 @@ mod tests {
     /// the batch on; a 404 for one it does not list is that route's answer.
     #[tokio::test]
     async fn a_not_found_moves_on_only_for_a_listed_model() {
-        let outcome = outcome_of(job_over(
+        let (outcome, billed) = billed_outcome_of(job_over(
             route("listed", script(vec![Err("not-found")])),
             vec![route("b", script(vec![Ok("s1")]))],
             InferencePools::new(InferencePoolConfig::new()),
             vec!["x"],
         ))
         .await;
-        assert_eq!(outcome.provider_name, "b");
+        assert_eq!(billed.last().map(String::as_str), Some("b"));
         assert_eq!(outcome.result.unwrap().len(), 1);
 
-        let outcome = outcome_of(job_over(
+        let (outcome, billed) = billed_outcome_of(job_over(
             route("a", script(vec![Err("not-found")])),
             vec![route("b", script(vec![Ok("never")]))],
             InferencePools::new(InferencePoolConfig::new()),
             vec!["x"],
         ))
         .await;
-        assert_eq!(outcome.provider_name, "a");
+        assert_eq!(billed, ["a"]);
         assert!(outcome.result.is_err());
     }
 
@@ -460,14 +472,14 @@ mod tests {
     async fn a_busy_fallback_is_passed_over() {
         let mut busy = InferencePoolConfig::new();
         busy.set_limit("b-model", 0);
-        let outcome = outcome_of(job_over(
+        let (outcome, billed) = billed_outcome_of(job_over(
             route("a", script(vec![Err("unavailable")])),
             vec![route("b", script(vec![Ok("never")]))],
             InferencePools::new(busy),
             vec!["x"],
         ))
         .await;
-        assert_eq!(outcome.provider_name, "a");
+        assert_eq!(billed, ["a"]);
         assert!(outcome.result.is_err());
     }
 
@@ -480,15 +492,17 @@ mod tests {
             (vec![Err("boom")], 0),
             (vec![Ok("s"), Err("unavailable")], 1),
         ] {
-            let outcome = outcome_of(job_over(
+            let (outcome, accounted) = billed_outcome_of(job_over(
                 route("a", script(first)),
                 vec![route("b", script(vec![Ok("never"), Ok("never")]))],
                 InferencePools::new(InferencePoolConfig::new()),
                 vec!["x", "y"],
             ))
             .await;
-            assert_eq!(outcome.provider_name, "a");
-            assert_eq!(outcome.usage.len(), billed);
+            // Every call that was sent is accounted for, the failed one too,
+            // and all of them on the first route.
+            assert_eq!(accounted.len(), billed + 1);
+            assert!(accounted.iter().all(|provider| provider == "a"));
             assert!(outcome.result.is_err());
         }
     }
@@ -712,10 +726,7 @@ mod tests {
             !provider.inferred.load(std::sync::atomic::Ordering::SeqCst),
             "refused before the call, not after it"
         );
-        assert!(
-            outcome.usage.is_empty(),
-            "nothing ran, so nothing was billed"
-        );
+
         // The provider would have answered had the request reached it, so the
         // refusal above is the guard's doing and not the mock's.
         let answered = provider.infer(&request()).await.expect("the mock answers");

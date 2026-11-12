@@ -87,6 +87,16 @@ fn pricing_prefers_config_then_the_published_table() {
     assert_eq!(provider.pricing("no-such-model-9"), None);
 }
 
+/// Google's terms say a request that fails with a 400 or 500 is not charged.
+/// An error from a proxy at another base URL is the proxy's.
+#[test]
+fn an_error_answer_is_not_billed_at_googles_own_endpoint() {
+    assert!(GeminiProvider::new(client(), "k".to_string()).bills_no_error_answer());
+    let proxied = GeminiProvider::new(client(), "k".to_string())
+        .with_base_url(Some("https://proxy.local/v1beta".to_string()));
+    assert!(!proxied.bills_no_error_answer());
+}
+
 #[test]
 fn the_base_is_the_native_root_whatever_spelling_names_it() {
     let provider = GeminiProvider::new(client(), "k".to_string());

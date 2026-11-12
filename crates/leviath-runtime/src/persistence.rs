@@ -146,16 +146,26 @@ impl TokenTotals {
     ///
     /// `pricing` is the fallback: a call the provider priced itself is counted
     /// at that figure and these rates are never consulted.
+    #[cfg(test)]
     pub(crate) fn add_usage_priced(
         &mut self,
         usage: &leviath_providers::TokenUsage,
         pricing: Option<&leviath_providers::ModelPricing>,
     ) {
+        self.add_call(usage, usage.cost(pricing));
+    }
+
+    /// Fold one call in: what it used, and `cost`, what that came to.
+    pub(crate) fn add_call(
+        &mut self,
+        usage: &leviath_providers::TokenUsage,
+        cost: leviath_providers::CallCost,
+    ) {
         self.prompt_tokens += usage.prompt_tokens;
         self.completion_tokens += usage.completion_tokens;
         self.cached_tokens += usage.cached_tokens;
         self.cache_write_tokens += usage.cache_write_tokens;
-        self.cost.add(usage, pricing);
+        self.cost.add_cost(cost);
     }
 }
 
@@ -320,6 +330,8 @@ pub(crate) struct RunMetaSources<'a> {
     /// The parking markers the agent is carrying, read off the entity by the
     /// caller, which is where they are queryable.
     pub parked: WaitMarkers,
+    /// How many calls the run lists as out: sent, and not yet accounted for.
+    pub calls_out: usize,
 }
 
 /// Where the run has got to, and when.
@@ -363,7 +375,25 @@ pub(crate) fn build_run_meta(sources: RunMetaSources<'_>, at: RunPosition) -> Ru
         final_output,
         stage_models,
         parked,
+        calls_out,
     } = sources;
+    // A call that is out on a run that is going is in flight: it lands, and
+    // until it does the total is what the settled calls came to, and is not
+    // exact. One still out on a run that has ended has nothing left to wait
+    // on it but its settling, and until that is done what the run cost is
+    // not known.
+    let ended = crate::pipeline::is_terminal_status(&state.status);
+    let mut unknown = totals.cost.unknown;
+    let calls_in_flight = match ended {
+        true => {
+            unknown.add_many(
+                leviath_core::cost::CostUnknown::NotSettled,
+                u32::try_from(calls_out).unwrap_or(u32::MAX),
+            );
+            0
+        }
+        false => calls_out,
+    };
     let RunPosition {
         stage_index,
         now_secs,
@@ -397,9 +427,13 @@ pub(crate) fn build_run_meta(sources: RunMetaSources<'_>, at: RunPosition) -> Ru
         tool_calls: totals.tool_calls,
         // `None` when any call went unpriced: an understated total that looks
         // authoritative is worse than an honest absence.
-        cost_usd: totals.cost.total_usd(),
-        unpriced_calls: totals.cost.unpriced_calls,
-        cost_is_exact: totals.cost.is_exact(),
+        cost_usd: unknown.is_empty().then_some(totals.cost.priced_usd),
+        unknown_calls: unknown.total() as usize,
+        unknown,
+        reported_calls: totals.cost.reported_calls,
+        computed_calls: totals.cost.computed_calls,
+        calls_in_flight,
+        cost_is_exact: unknown.is_empty() && calls_in_flight == 0,
         cost_priced_usd: totals.cost.priced_usd,
         workdir: md.workdir.clone(),
         started_at: md.started_at,
@@ -612,6 +646,7 @@ mod tests {
             cached_tokens: 2,
             cache_write_tokens: 1,
             reported_cost_usd: None,
+            terms: Default::default(),
         });
         t.add_usage(&TokenUsage {
             prompt_tokens: 3,
@@ -620,6 +655,7 @@ mod tests {
             cached_tokens: 0,
             cache_write_tokens: 0,
             reported_cost_usd: None,
+            terms: Default::default(),
         });
         t.tool_calls = 6;
         assert_eq!(t.prompt_tokens, 13);
@@ -711,6 +747,7 @@ mod tests {
                     children_outstanding: Some(2),
                     ..Default::default()
                 },
+                calls_out: 0,
             },
             RunPosition {
                 stage_index: 0,
@@ -750,6 +787,7 @@ mod tests {
                 final_output: None,
                 stage_models: Vec::new(),
                 parked: WaitMarkers::default(),
+                calls_out: 0,
             },
             RunPosition {
                 stage_index: 1,
@@ -803,6 +841,7 @@ mod tests {
                 final_output: None,
                 stage_models: used.clone(),
                 parked: WaitMarkers::default(),
+                calls_out: 0,
             },
             RunPosition {
                 stage_index: 0,
@@ -832,6 +871,7 @@ mod tests {
                 final_output: None,
                 stage_models: Vec::new(),
                 parked: WaitMarkers::default(),
+                calls_out: 0,
             },
             RunPosition {
                 stage_index: 1,
@@ -859,6 +899,7 @@ mod tests {
                 final_output: None,
                 stage_models: Vec::new(),
                 parked: WaitMarkers::default(),
+                calls_out: 0,
             },
             RunPosition {
                 stage_index: 0,
@@ -889,6 +930,7 @@ mod tests {
                     final_output: None,
                     stage_models: Vec::new(),
                     parked: WaitMarkers::default(),
+                    calls_out: 0,
                 },
                 RunPosition {
                     stage_index: 0,
@@ -914,6 +956,7 @@ mod tests {
                 final_output: None,
                 stage_models: Vec::new(),
                 parked: WaitMarkers::default(),
+                calls_out: 0,
             },
             RunPosition {
                 stage_index: 0,
@@ -940,6 +983,7 @@ mod tests {
                 final_output: None,
                 stage_models: Vec::new(),
                 parked: WaitMarkers::default(),
+                calls_out: 0,
             },
             RunPosition {
                 stage_index: 0,
@@ -967,6 +1011,7 @@ mod tests {
                 final_output: None,
                 stage_models: Vec::new(),
                 parked: WaitMarkers::default(),
+                calls_out: 0,
             },
             RunPosition {
                 stage_index: 2,
@@ -1004,6 +1049,7 @@ mod tests {
                 final_output: Some(&submitted),
                 stage_models: Vec::new(),
                 parked: WaitMarkers::default(),
+                calls_out: 0,
             },
             RunPosition {
                 stage_index: 0,
@@ -1043,6 +1089,7 @@ mod tests {
                 final_output: None,
                 stage_models: Vec::new(),
                 parked: WaitMarkers::default(),
+                calls_out: 0,
             },
             RunPosition {
                 stage_index: 0,

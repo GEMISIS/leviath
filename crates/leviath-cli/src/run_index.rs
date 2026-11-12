@@ -26,8 +26,11 @@ use serde::{Deserialize, Serialize};
 use crate::runstate::{self, RunMeta};
 
 /// The index format. An index written in any other is read as empty and
-/// rebuilt.
-const VERSION: u32 = 1;
+/// rebuilt. It moves whenever what a summary says changes meaning, so a
+/// summary an earlier build made is never read as this build's: in 3, a
+/// run's cost is exact when no call's cost is unknown and none is in flight,
+/// and a call in flight is counted on its own and leaves the figure standing.
+const VERSION: u32 = 3;
 
 /// How often the daemon brings the index up to date.
 pub(crate) const REFRESH_EVERY: Duration = Duration::from_secs(2);
@@ -226,20 +229,46 @@ pub(crate) fn list(runs_dir: &Path) -> Vec<RunMeta> {
 /// read cannot say it finished, so its directory is among them, for the
 /// daemon to say what is wrong with it.
 pub(crate) fn unfinished(runs_dir: &Path) -> Vec<PathBuf> {
-    unfinished_at_a_glance(runs_dir).unwrap_or_else(|| {
+    recoverable(runs_dir).unfinished
+}
+
+/// What a starting daemon reads back, by run directory, each list sorted.
+#[derive(Debug, Default)]
+pub(crate) struct Recoverable {
+    /// The runs that have not finished, and the ones whose file does not
+    /// read: see [`unfinished`].
+    pub(crate) unfinished: Vec<PathBuf>,
+    /// The runs that finished with a call still on their list of calls out,
+    /// which nothing else will ever settle.
+    pub(crate) unsettled: Vec<PathBuf>,
+}
+
+/// The run directories under `runs_dir` a starting daemon has something to
+/// do with, through its index, found without reading the file of every run
+/// that finished and owes nothing.
+pub(crate) fn recoverable(runs_dir: &Path) -> Recoverable {
+    at_a_glance(runs_dir).unwrap_or_else(|| {
         let (runs, mut unreadable) = indexed(runs_dir);
-        let mut open: Vec<PathBuf> = runs
-            .into_iter()
-            .filter(|(_, run)| !runstate::is_terminal_status(&run.status))
-            .map(|(dir, _)| dir)
-            .collect();
-        open.append(&mut unreadable);
-        open.sort();
-        open
+        let mut found = Recoverable::default();
+        for (dir, run) in runs {
+            match (
+                runstate::is_terminal_status(&run.status),
+                run.unknown.not_settled > 0,
+            ) {
+                (false, _) => found.unfinished.push(dir),
+                (true, true) => found.unsettled.push(dir),
+                (true, false) => {}
+            }
+        }
+        found.unfinished.append(&mut unreadable);
+        found.unfinished.sort();
+        found.unsettled.sort();
+        found
     })
 }
 
-/// One run in the index, with only what says whether it finished.
+/// One run in the index, with only what says whether it finished and
+/// whether a call of its is still out.
 #[derive(Deserialize)]
 struct Glance {
     stamp: Stamp,
@@ -249,6 +278,14 @@ struct Glance {
 #[derive(Deserialize)]
 struct GlanceRun {
     status: runstate::RunStatus,
+    #[serde(default)]
+    unknown: GlanceUnknown,
+}
+
+#[derive(Default, Deserialize)]
+struct GlanceUnknown {
+    #[serde(default)]
+    not_settled: u32,
 }
 
 /// The index, with only what says whether each run finished.
@@ -258,14 +295,14 @@ struct GlanceFile {
     runs: BTreeMap<String, Glance>,
 }
 
-/// [`unfinished`], answered from each run's status in the index, when the
+/// [`recoverable`], answered from each run's status in the index, when the
 /// index is up to date: every run file under `runs_dir` is as it last read,
 /// and it holds no other. `None` when it is not, or does not read.
 ///
 /// A summary of a run is a few kilobytes. Making one for each of a thousand
 /// finished runs, only to drop them again, leaves a daemon holding megabytes
 /// of freed memory between what it keeps, for as long as it runs.
-fn unfinished_at_a_glance(runs_dir: &Path) -> Option<Vec<PathBuf>> {
+fn at_a_glance(runs_dir: &Path) -> Option<Recoverable> {
     // Read through a small buffer rather than whole: the index of a thousand
     // runs is megabytes, and nearly all of it is passed over.
     let index = std::fs::File::open(path_for(runs_dir)).ok()?;
@@ -279,18 +316,23 @@ fn unfinished_at_a_glance(runs_dir: &Path) -> Option<Vec<PathBuf>> {
         .collect();
     dirs.sort();
     let mut indexed = 0;
-    let mut open = Vec::new();
+    let mut found = Recoverable::default();
     for (dir, name) in dirs {
         let Some(stamp) = Stamp::of(&dir) else {
             continue;
         };
         let entry = file.runs.get(&name).filter(|e| e.stamp == stamp)?;
         indexed += 1;
-        if !runstate::is_terminal_status(&entry.run.status) {
-            open.push(dir);
+        match (
+            runstate::is_terminal_status(&entry.run.status),
+            entry.run.unknown.not_settled > 0,
+        ) {
+            (false, _) => found.unfinished.push(dir),
+            (true, true) => found.unsettled.push(dir),
+            (true, false) => {}
         }
     }
-    (indexed == file.runs.len()).then_some(open)
+    (indexed == file.runs.len()).then_some(found)
 }
 
 /// How the run files under `runs_dir` look from outside: the size and

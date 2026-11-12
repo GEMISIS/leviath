@@ -14,6 +14,7 @@ pub mod cache;
 pub mod config;
 pub mod context;
 pub mod context_cause;
+pub mod cost;
 pub mod credentials;
 pub mod duration;
 pub mod effort;
@@ -49,6 +50,7 @@ pub mod write_paths;
 
 pub use cache::CacheHint;
 pub use context_cause::ContextCause;
+pub use cost::{CallCost, CostClass, CostUnknown, UnknownCalls};
 pub use credentials::{
     CredentialStore, CredentialStoreKind, MemoryStore, mcp_account, provider_account,
 };

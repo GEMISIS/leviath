@@ -87,7 +87,7 @@ pub(crate) fn start_summary(
     stage: &InferenceStage,
     outcomes: &tokio::sync::mpsc::UnboundedSender<CompactionOutcome>,
     lane: &'static str,
-    entity: Entity,
+    (entity, state, open_calls): (Entity, &AgentState, Option<&crate::open_calls::OpenCalls>),
     routes: Vec<SummaryRoute>,
     requests: Vec<(String, InferenceRequest)>,
 ) -> Result<(), Declined> {
@@ -116,6 +116,17 @@ pub(crate) fn start_summary(
             fallbacks: rest.collect(),
             pools: stage.pools.clone(),
             requests,
+            // Billed to the stage the run is in, the same way its own turns
+            // are: a stage that compacts twice can spend more on summarizing
+            // its context than on the work.
+            ticket: Some(crate::open_calls::CallTicket::new(
+                stage,
+                entity,
+                open_calls,
+                crate::runfile::record::InferenceKind::Compaction,
+                (&state.current_stage, &state.current_visit),
+                state.iteration,
+            )),
         },
     );
     Ok(())
@@ -135,6 +146,11 @@ pub(crate) fn spawn_summary_job(
 ) {
     let lost_outcomes = outcomes.clone();
     let lost_wake = stage.wake.clone();
+    let lost_call = crate::open_calls::LostCall {
+        ticket: job.ticket.clone(),
+        provider: job.route.provider.clone(),
+        runtime: stage.runtime.clone(),
+    };
     crate::lane_supervisor::spawn_supervised(
         &stage.runtime,
         lane,
@@ -145,16 +161,12 @@ pub(crate) fn spawn_summary_job(
             stage.wake.clone(),
         ),
         move |message| {
+            // A call the dead job had sent is settled here, as one that was
+            // cut off.
+            lost_call.settle();
             let _ = lost_outcomes.send(CompactionOutcome {
                 entity,
                 result: Err(leviath_providers::ProviderError::Other(message)),
-                // Nothing ran, so there is nothing to price.
-                pricing: None,
-                // A job that never ran billed nothing. Empty rather than
-                // absent: there is no call to attribute, not an unknown cost.
-                usage: Vec::new(),
-                provider_name: String::new(),
-                model: String::new(),
             });
             lost_wake.notify_one();
         },
@@ -172,6 +184,7 @@ type CompactionQuery = (
     Option<&'static CompactionSettings>,
     Option<&'static crate::pipeline::PromptCalibration>,
     Option<&'static StageInference>,
+    Option<&'static crate::open_calls::OpenCalls>,
 );
 
 /// Compaction-dispatch system: for each `ReadyToInfer` agent, when the window
@@ -198,7 +211,9 @@ pub(crate) fn dispatch_compaction(
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
-    for (entity, state, mut window, settings, calibration, inference) in agents.iter_mut() {
+    for (entity, state, mut window, settings, calibration, inference, open_calls) in
+        agents.iter_mut()
+    {
         crate::tick_scope::enter(entity);
         if state.status != AgentStatus::Active {
             continue; // paused / waiting / cancelled - don't start new work
@@ -259,7 +274,7 @@ pub(crate) fn dispatch_compaction(
             &stage,
             &stage.compaction_outcomes,
             "compaction",
-            entity,
+            (entity, state, open_calls),
             routes,
             requests,
         );
@@ -279,10 +294,6 @@ pub(crate) fn dispatch_compaction(
 type CollectCompactionQuery = (
     &'static mut ContextWindow,
     Option<&'static mut crate::telemetry::StageActivity>,
-    Option<&'static mut crate::persistence::TokenTotals>,
-    Option<&'static crate::persistence::RunMetadata>,
-    Option<&'static AgentState>,
-    Option<&'static mut crate::pipeline::StageLedger>,
     Option<&'static crate::continuation::ContinuationCompact>,
 );
 
@@ -294,14 +305,11 @@ type CollectCompactionQuery = (
 pub(crate) fn collect_compaction(
     mut results: ResMut<CompactionResults>,
     mut agents: Query<CollectCompactionQuery, With<AwaitingCompaction>>,
-    persist: Option<Res<crate::pipeline::JournalSender>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
     while let Ok(outcome) = results.0.try_recv() {
-        let Ok((mut window, activity, mut totals, md, state, mut ledger, continuing)) =
-            agents.get_mut(outcome.entity)
-        else {
+        let Ok((mut window, activity, continuing)) = agents.get_mut(outcome.entity) else {
             continue; // stale: agent cancelled/despawned since dispatch
         };
         crate::tick_scope::enter(outcome.entity);
@@ -312,36 +320,9 @@ pub(crate) fn collect_compaction(
                     success: outcome.result.is_ok(),
                 });
         }
-        // One record per call, not one per batch. A batch summarizes a region
-        // each, so folding them into a single number would recreate downstream
-        // exactly the ambiguity this record exists to remove.
-        //
-        // Counted even when the batch failed partway: the calls that already
-        // ran were billed, and the summaries being discarded is a decision
-        // about the window, not about the invoice.
-        // Billed to the stage the run was in when the window filled up, the same
-        // way its own turns are. Compaction is not free and not incidental - a
-        // stage that compacts twice can spend more on summarizing its context
-        // than on the work - so leaving it out of the ledger would leave the
-        // one question the ledger exists to answer, which stage cost that,
-        // answerable only for the cheap half of the bill.
-        for usage in &outcome.usage {
-            crate::inference_usage::record_call(
-                totals.as_deref_mut(),
-                ledger.as_deref_mut(),
-                persist.as_deref(),
-                md,
-                &crate::inference_usage::CallUsage {
-                    kind: crate::runfile::record::InferenceKind::Compaction,
-                    stage: state.map_or("", |s| s.current_stage.as_str()),
-                    iteration: state.map_or(0, |s| s.iteration),
-                    provider: &outcome.provider_name,
-                    model: &outcome.model,
-                    usage,
-                    pricing: outcome.pricing,
-                },
-            );
-        }
+        // What each summarizing call cost is already the run's, one record
+        // per call and whether or not the batch finished: each reported it as
+        // it ended (see `open_calls`).
         let mut summarized: Vec<String> = Vec::new();
         if let Ok(summaries) = outcome.result {
             for (region_name, summary) in summaries {
@@ -591,6 +572,7 @@ type EdgeCompactQuery = (
     Option<&'static CompactionSettings>,
     Option<&'static StageInference>,
     Option<&'static mut crate::continuation::ContinuationCompact>,
+    Option<&'static crate::open_calls::OpenCalls>,
 );
 
 /// Edge-compaction dispatch: for each `ReadyToInfer` agent with a
@@ -608,7 +590,9 @@ pub(crate) fn dispatch_edge_compact(
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
-    for (entity, state, mut window, pending, settings, inference, continuing) in agents.iter_mut() {
+    for (entity, state, mut window, pending, settings, inference, continuing, open_calls) in
+        agents.iter_mut()
+    {
         crate::tick_scope::enter(entity);
         if state.status != AgentStatus::Active {
             continue; // paused / waiting / cancelled - don't start new work
@@ -623,7 +607,7 @@ pub(crate) fn dispatch_edge_compact(
                 &stage,
                 &stage.compaction_outcomes,
                 "compaction",
-                entity,
+                (entity, state, open_calls),
                 routes,
                 requests,
             ))

@@ -21,6 +21,7 @@ pub mod segment;
 pub use context::{ContextDiff, ContextState, EntryKind, EntryMeta, EntryState, RegionState};
 pub use delta::{Change, RunEvent, StateDelta, TransitionReason, TransitionRecord};
 pub use files::{BlobFile, FileRef, RunFiles, StageFile, StageFiles, under};
+pub use journal::{CallEnding, OpenCallState};
 pub use segment::{ContinuedState, SegmentEnd};
 
 use crate::spec::names::{EdgeName, ModelRef, RunId, StageName, WorkerName};
@@ -104,6 +105,11 @@ pub struct RunState {
     /// after a restart polls them rather than paying for them again. Empty
     /// between calls.
     pub remote_jobs: BTreeMap<String, String>,
+    /// The model calls it has sent that are not yet accounted for: one in
+    /// flight, or one cut off whose cost is still being looked up. A call
+    /// still listed when the run is read back after a restart was out when
+    /// the daemon stopped, and is settled then as a call of its own.
+    pub open_calls: Vec<OpenCallState>,
 }
 
 /// The approvals a person granted a run beyond the call they were asked
@@ -171,6 +177,7 @@ impl RunState {
             written: 0,
             last_progress_at: None,
             remote_jobs: BTreeMap::new(),
+            open_calls: Vec::new(),
         }
     }
 
@@ -299,6 +306,47 @@ pub struct StageProgress {
     pub no_image_nudges: u32,
 }
 
+impl RunState {
+    /// Take the call made as `attempt` off the list of calls out, and add
+    /// `spend`, what it turned out to cost on `model`, to the run's totals,
+    /// to the stage it was made for and to the visit of that stage it was
+    /// made in. False, with nothing changed, when the list holds no such
+    /// call: it was settled before.
+    pub fn settle_call(&mut self, attempt: &str, spend: &Spend, model: &ModelRef) -> bool {
+        let Some(at) = self.open_calls.iter().position(|c| c.attempt == attempt) else {
+            return false;
+        };
+        let call = self.open_calls.remove(at);
+        // A call that stood for a job is the job's account: the run holds
+        // the job no longer, and any other call listed on the same job (a
+        // daemon that died while one was picking it up lists two) comes off
+        // with it, since one job is one account.
+        let stood = self
+            .remote_jobs
+            .values()
+            .any(|job| Some(job) == call.provider_call_id.as_ref());
+        self.open_calls
+            .retain(|other| !(stood && other.provider_call_id == call.provider_call_id));
+        self.remote_jobs
+            .retain(|_, job| Some(&*job) != call.provider_call_id.as_ref());
+        self.totals.spend.add(spend);
+        let stage = self
+            .ledger
+            .iter_mut()
+            .find(|record| Some(&record.stage) == call.stage.as_ref());
+        if let Some(record) = stage {
+            record.spend.add(spend);
+            if !record.models.contains(model) {
+                record.models.push(model.clone());
+            }
+            for visit in record.visits.iter_mut().filter(|v| v.id == call.visit) {
+                visit.spend.add(spend);
+            }
+        }
+        true
+    }
+}
+
 /// One stage's record: spend, visits and the models it ran on.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct StageRecord {
@@ -399,11 +447,52 @@ pub struct Spend {
     pub reported_calls: u32,
     /// Calls priced from published rates.
     pub computed_calls: u32,
-    /// Calls that could not be priced.
-    pub unpriced_calls: u32,
-    /// Whether its cost is not known though no call was counted as
-    /// unpriced: a record from an earlier release that named no cost.
-    pub cost_unknown: bool,
+    /// Calls whose cost is unknown, by reason.
+    pub unknown: leviath_core::cost::UnknownCalls,
+}
+
+impl Spend {
+    /// How many calls have no figure.
+    pub fn unknown_calls(&self) -> u32 {
+        self.unknown.total()
+    }
+
+    /// Whether the cost of every call is known, reported or computed.
+    pub fn is_exact(&self) -> bool {
+        self.unknown.is_empty()
+    }
+
+    /// The cost, or `None` while any call's cost is unknown.
+    pub fn cost_usd(&self) -> Option<f64> {
+        self.is_exact().then_some(self.priced_usd)
+    }
+
+    /// Add `other` to this spend.
+    pub fn add(&mut self, other: &Self) {
+        self.prompt_tokens = self.prompt_tokens.saturating_add(other.prompt_tokens);
+        self.completion_tokens = self
+            .completion_tokens
+            .saturating_add(other.completion_tokens);
+        self.cached_tokens = self.cached_tokens.saturating_add(other.cached_tokens);
+        self.cache_write_tokens = self
+            .cache_write_tokens
+            .saturating_add(other.cache_write_tokens);
+        self.priced_usd += other.priced_usd;
+        self.reported_calls = self.reported_calls.saturating_add(other.reported_calls);
+        self.computed_calls = self.computed_calls.saturating_add(other.computed_calls);
+        self.unknown.merge(&other.unknown);
+    }
+
+    /// Which class the one call this spend describes is in: an event's
+    /// spend counts exactly one call.
+    pub fn class(&self) -> leviath_core::cost::CostClass {
+        use leviath_core::cost::CostClass;
+        match (self.unknown.is_empty(), self.reported_calls > 0) {
+            (false, _) => CostClass::Unknown,
+            (true, true) => CostClass::Reported,
+            (true, false) => CostClass::Computed,
+        }
+    }
 }
 
 /// A run's totals.

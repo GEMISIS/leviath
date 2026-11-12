@@ -81,6 +81,7 @@ use {
     crate::provider::{
         FinishReason, InferenceResponse, ProviderError, Result, StreamChunk, TokenUsage,
     },
+    leviath_core::cost::{CallCost, CostUnknown},
     leviath_core::mime::{Blob, MimeType},
 };
 
@@ -399,11 +400,12 @@ where
             Poll::Running => {}
         }
         if Instant::now() >= deadline {
-            return Err(ProviderError::Other(format!(
+            // Not a failed job: the provider is still running it and will
+            // bill it, so it is kept for the call made again to pick up.
+            return Err(crate::jobs::still_running(format!(
                 "{what} did not finish within its deadline; raise the stage's \
                  request_timeout_secs if it needs longer"
-            ))
-            .after_send());
+            )));
         }
         tokio::time::sleep(interval).await;
     }
@@ -552,8 +554,10 @@ pub(crate) fn json_blob(bytes: Vec<u8>, name: &str) -> Blob {
     .named(name)
 }
 
-/// The response for a media call: a one-line summary as the text, the files
-/// as parts, and the call's cost when it is known.
+/// What `quantity` units cost at `unit`, as a figure this crate computed:
+/// no figure where no unit price is known, and none where the reply named no
+/// quantity to price (a video with no length, a transcription with no
+/// duration). A quantity is what came back, never what was asked for.
 #[cfg(any(
     feature = "openrouter",
     feature = "openai",
@@ -563,16 +567,104 @@ pub(crate) fn json_blob(bytes: Vec<u8>, name: &str) -> Blob {
     feature = "bedrock",
     feature = "meta"
 ))]
-pub(crate) fn response(
-    summary: String,
-    parts: Vec<Blob>,
-    cost_usd: Option<f64>,
-) -> InferenceResponse {
+pub(crate) fn unit_cost(
+    unit: Option<crate::pricing::UnitPrice>,
+    quantity: Option<f64>,
+) -> CallCost {
+    match (unit, quantity.filter(|q| *q > 0.0)) {
+        (None, _) => CallCost::Unknown(CostUnknown::NoPrice),
+        (Some(_), None) => CallCost::Unknown(CostUnknown::NoUsage),
+        (Some(unit), Some(quantity)) => CallCost::Computed(unit.cost(quantity)),
+    }
+}
+
+/// The usage of a media call: no tokens, and `cost` as the provider stated
+/// it, as this crate computed it, or as unknown with its reason.
+#[cfg(any(
+    feature = "openrouter",
+    feature = "openai",
+    feature = "xai",
+    feature = "xai-subscription",
+    feature = "google",
+    feature = "bedrock",
+    feature = "meta"
+))]
+pub(crate) fn usage(cost: CallCost) -> TokenUsage {
+    let usage = TokenUsage::new(0, 0, 0, 0);
+    match cost {
+        CallCost::Reported(usd) => usage.with_reported_cost(Some(usd)),
+        CallCost::Computed(usd) => usage.with_computed_cost(usd),
+        CallCost::Unknown(reason) => usage.with_unknown_cost(reason),
+    }
+}
+
+/// Say what a finished job cost before its file is fetched: the provider is
+/// done and has billed it, whatever becomes of the download.
+#[cfg(any(
+    feature = "openrouter",
+    feature = "openai",
+    feature = "xai",
+    feature = "xai-subscription"
+))]
+pub(crate) fn job_done(cost: CallCost) {
+    crate::call_trace::note_whole_usage(&usage(cost));
+}
+
+/// How long an MP4 plays, in seconds, by its movie header (`moov/mvhd`):
+/// the duration over the timescale. `None` for a file with no such header.
+#[cfg(feature = "google")]
+pub(crate) fn video_seconds(bytes: &[u8]) -> Option<f64> {
+    /// The big-endian number in the `len` bytes at `at`.
+    fn number(bytes: &[u8], at: usize, len: usize) -> Option<u64> {
+        let digits = bytes.get(at..at + len)?;
+        Some(digits.iter().fold(0, |n, b| (n << 8) | u64::from(*b)))
+    }
+    /// The body of the first box named `name` among the boxes in `bytes`.
+    fn find<'a>(mut bytes: &'a [u8], name: &[u8; 4]) -> Option<&'a [u8]> {
+        loop {
+            let size = number(bytes, 0, 4)?;
+            let kind = bytes.get(4..8)?;
+            // A size of 1 puts the real size in the next eight bytes; a size
+            // of 0 runs to the end of the file.
+            let (start, size) = match size {
+                1 => (16, number(bytes, 8, 8)?),
+                0 => (8, bytes.len() as u64),
+                size => (8, size),
+            };
+            let size = usize::try_from(size).unwrap_or(usize::MAX);
+            let body = bytes.get(start..size)?;
+            if kind == name {
+                return Some(body);
+            }
+            bytes = &bytes[size..];
+        }
+    }
+    let header = find(find(bytes, b"moov")?, b"mvhd")?;
+    // Version 1 writes 64-bit times, version 0 32-bit ones.
+    let (timescale, duration) = match *header.first()? {
+        1 => (number(header, 20, 4)?, number(header, 24, 8)?),
+        _ => (number(header, 12, 4)?, number(header, 16, 4)?),
+    };
+    (timescale > 0 && duration > 0).then(|| duration as f64 / timescale as f64)
+}
+
+/// The response for a media call: a one-line summary as the text, the files
+/// as parts, and what the call cost.
+#[cfg(any(
+    feature = "openrouter",
+    feature = "openai",
+    feature = "xai",
+    feature = "xai-subscription",
+    feature = "google",
+    feature = "bedrock",
+    feature = "meta"
+))]
+pub(crate) fn response(summary: String, parts: Vec<Blob>, cost: CallCost) -> InferenceResponse {
     InferenceResponse {
         reasoning_summary: None,
         content: summary,
         tool_calls: Vec::new(),
-        tokens_used: TokenUsage::new(0, 0, 0, 0).with_reported_cost(cost_usd),
+        tokens_used: usage(cost),
         finish_reason: FinishReason::Complete,
         reasoning: None,
         parts,
@@ -654,7 +746,24 @@ pub(crate) fn extension(mime: &str) -> &'static str {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    /// A minimal MP4: a file type box, then a movie box holding a movie
+    /// header that says `duration` units at `timescale` units a second.
+    pub(crate) fn mp4(timescale: u32, duration: u32) -> Vec<u8> {
+        let boxed = |name: &[u8; 4], body: &[u8]| {
+            let mut out = ((body.len() + 8) as u32).to_be_bytes().to_vec();
+            out.extend_from_slice(name);
+            out.extend_from_slice(body);
+            out
+        };
+        let mut header = vec![0u8; 12];
+        header.extend_from_slice(&timescale.to_be_bytes());
+        header.extend_from_slice(&duration.to_be_bytes());
+        let mut file = boxed(b"ftyp", b"isom");
+        file.extend(boxed(b"moov", &boxed(b"mvhd", &header)));
+        file
+    }
+
     use super::*;
     use crate::provider::{ContentBlock, Message, MessageContent, SystemBlock};
     use leviath_core::mime::{MimeRegistry, Part as CorePart};
@@ -943,7 +1052,7 @@ mod tests {
             text,
             "Produced 1 part(s) with xai/grok-imagine-image: a.png"
         );
-        let response = response(text, parts, Some(0.02));
+        let response = response(text, parts, CallCost::Reported(0.02));
         assert_eq!(response.tokens_used.reported_cost_usd, Some(0.02));
         let mut stream = one_chunk(response);
         let chunk = stream.next().await.unwrap().unwrap();
@@ -974,5 +1083,129 @@ mod tests {
     async fn a_download_cut_short_is_an_error() {
         let url = leviath_testkit::spawn_mock_server_truncated_body(200, "OK").await;
         assert!(download(&reqwest::Client::new(), &url).await.is_err());
+    }
+
+    #[cfg(feature = "google")]
+    #[test]
+    fn a_videos_length_is_read_off_its_movie_header() {
+        assert_eq!(video_seconds(&mp4(1_000, 3_000)), Some(3.0));
+        assert_eq!(video_seconds(&mp4(600, 4_800)), Some(8.0));
+        // No header, a header with no timescale, and bytes that are no MP4.
+        assert_eq!(video_seconds(b"MP4"), None);
+        assert_eq!(video_seconds(&mp4(0, 3_000)), None);
+        assert_eq!(video_seconds(&mp4(1_000, 0)), None);
+        assert_eq!(video_seconds(&[]), None);
+
+        // A version-1 header writes 64-bit times.
+        let mut header = vec![1u8, 0, 0, 0];
+        header.extend_from_slice(&[0u8; 16]);
+        header.extend_from_slice(&1_000u32.to_be_bytes());
+        header.extend_from_slice(&5_000u64.to_be_bytes());
+        let boxed = |name: &[u8; 4], body: &[u8]| {
+            let mut out = ((body.len() + 8) as u32).to_be_bytes().to_vec();
+            out.extend_from_slice(name);
+            out.extend_from_slice(body);
+            out
+        };
+        let wide = boxed(b"moov", &boxed(b"mvhd", &header));
+        assert_eq!(video_seconds(&wide), Some(5.0));
+        // Cut short inside its header: in the duration, and in the timescale.
+        assert_eq!(
+            video_seconds(&boxed(b"moov", &boxed(b"mvhd", &header[..26]))),
+            None
+        );
+        assert_eq!(
+            video_seconds(&boxed(b"moov", &boxed(b"mvhd", &header[..22]))),
+            None
+        );
+        // The same for the 32-bit header, and for a header with nothing in it.
+        let short = mp4(1_000, 3_000);
+        let narrow = &short[short.len() - 20..];
+        assert_eq!(
+            video_seconds(&boxed(b"moov", &boxed(b"mvhd", narrow))),
+            Some(3.0)
+        );
+        assert_eq!(
+            video_seconds(&boxed(b"moov", &boxed(b"mvhd", &narrow[..18]))),
+            None
+        );
+        assert_eq!(
+            video_seconds(&boxed(b"moov", &boxed(b"mvhd", &narrow[..14]))),
+            None
+        );
+        assert_eq!(video_seconds(&boxed(b"moov", &boxed(b"mvhd", b""))), None);
+        // A movie box with no header in it, a box whose name is cut off, and
+        // a box that says it is longer than the file.
+        assert_eq!(video_seconds(&boxed(b"moov", &boxed(b"trak", b"x"))), None);
+        assert_eq!(video_seconds(&wide[..6]), None);
+        assert_eq!(video_seconds(&wide[..wide.len() - 6]), None);
+
+        // A box whose size is in the eight bytes after its name, and one that
+        // runs to the end of the file.
+        let inner = boxed(b"mvhd", &{
+            let mut h = vec![0u8; 12];
+            h.extend_from_slice(&1_000u32.to_be_bytes());
+            h.extend_from_slice(&2_000u32.to_be_bytes());
+            h
+        });
+        let mut long = 1u32.to_be_bytes().to_vec();
+        long.extend_from_slice(b"moov");
+        long.extend_from_slice(&((inner.len() + 16) as u64).to_be_bytes());
+        long.extend_from_slice(&inner);
+        assert_eq!(video_seconds(&long), Some(2.0));
+        let mut open = 0u32.to_be_bytes().to_vec();
+        open.extend_from_slice(b"moov");
+        open.extend_from_slice(&inner);
+        assert_eq!(video_seconds(&open), Some(2.0));
+        // A wide size cut short, and one too large to be a length.
+        assert_eq!(video_seconds(&long[..12]), None);
+        let mut huge = 1u32.to_be_bytes().to_vec();
+        huge.extend_from_slice(b"moov");
+        huge.extend_from_slice(&u64::MAX.to_be_bytes());
+        assert_eq!(video_seconds(&huge), None);
+    }
+
+    #[test]
+    fn a_unit_cost_needs_a_price_and_a_quantity_that_came_back() {
+        let per_second = crate::pricing::UnitPrice {
+            usd: 0.1,
+            unit: crate::pricing::PriceUnit::VideoSecond,
+        };
+        assert_eq!(
+            unit_cost(Some(per_second), Some(4.0)),
+            CallCost::Computed(0.4)
+        );
+        assert_eq!(
+            unit_cost(Some(per_second), None),
+            CallCost::Unknown(CostUnknown::NoUsage),
+            "a reply that names no length prices nothing"
+        );
+        assert_eq!(
+            unit_cost(Some(per_second), Some(0.0)),
+            CallCost::Unknown(CostUnknown::NoUsage),
+            "and a length of nothing is no length"
+        );
+        assert_eq!(
+            unit_cost(None, Some(4.0)),
+            CallCost::Unknown(CostUnknown::NoPrice)
+        );
+    }
+
+    #[test]
+    fn a_media_calls_usage_says_how_its_cost_is_known() {
+        assert_eq!(
+            usage(CallCost::Reported(0.5)).cost(None),
+            CallCost::Reported(0.5)
+        );
+        assert_eq!(
+            usage(CallCost::Computed(0.25)).cost(None),
+            CallCost::Computed(0.25)
+        );
+        assert_eq!(
+            usage(CallCost::Unknown(CostUnknown::NoUsage)).cost(None),
+            CallCost::Unknown(CostUnknown::NoUsage)
+        );
+        // Computed is never reported.
+        assert_eq!(usage(CallCost::Computed(0.25)).reported_cost_usd, None);
     }
 }

@@ -230,6 +230,7 @@ type TransitionChoiceQuery = (
         Option<&'static crate::pipeline::inference::SystemBlockHashes>,
         Option<&'static crate::pipeline::PromptCalibration>,
         Option<&'static crate::components::PromptFrame>,
+        Option<&'static crate::open_calls::OpenCalls>,
     ),
 );
 
@@ -473,7 +474,7 @@ pub(crate) fn dispatch_transition_choice(
         built_from,
     ) in agents.iter_mut()
     {
-        let (config, progress, prefix, block_prefix, calibration, shown) = built_from;
+        let (config, progress, prefix, block_prefix, calibration, shown, open_calls) = built_from;
         crate::tick_scope::enter(entity);
         if state.status != AgentStatus::Active {
             continue; // paused / waiting / cancelled - don't start new work
@@ -559,6 +560,17 @@ pub(crate) fn dispatch_transition_choice(
             // or ended up on a different model, and neither is a thing this call
             // does.
             journal: None,
+            // Billed to the stage being left, which is the stage that asked
+            // the question, at the iteration it had reached.
+            ticket: Some(crate::open_calls::CallTicket::new(
+                &stage,
+                entity,
+                open_calls,
+                crate::runfile::record::InferenceKind::Routing,
+                (&state.current_stage, &state.current_visit),
+                state.iteration,
+            )),
+            provider_name: si.provider_name.clone(),
         };
         // Held on the agent as a call like the stage's own, so the agent waits
         // on `AwaitingTransitionResponse` while the world decides on each
@@ -606,7 +618,6 @@ type CollectTransitionChoiceQuery = (
     &'static AwaitingTransitionResponse,
     Option<&'static mut crate::persistence::RunOutcomeFlags>,
     Option<&'static crate::persistence::RunMetadata>,
-    Option<&'static mut crate::persistence::TokenTotals>,
     Option<&'static mut StageLedger>,
     (
         Option<&'static StageInference>,
@@ -640,7 +651,6 @@ pub(crate) fn collect_transition_choice(
             resp,
             mut flags,
             metadata,
-            mut totals,
             mut ledger,
             (called, reasked),
             mut buffer,
@@ -771,29 +781,8 @@ pub(crate) fn collect_transition_choice(
             }
         };
 
-        // Routing calls are short but not free, and one fires at every stage
-        // boundary of every branching run. Read off the stage's own inference
-        // config, which is what dispatch resolved the provider from.
-        //
-        // Billed to the stage being left, which is the stage that asked the
-        // question. `state.current_stage` is still that stage here: the cursor
-        // does not move until `enter_stage` below.
-        let si = spec_view::stage_inference(&spec.0, cursor.index, overrides);
-        crate::inference_usage::record_call(
-            totals.as_deref_mut(),
-            ledger.as_deref_mut(),
-            persist.as_deref(),
-            metadata,
-            &crate::inference_usage::CallUsage {
-                kind: crate::runfile::record::InferenceKind::Routing,
-                stage: &state.current_stage,
-                iteration: state.iteration,
-                provider: &si.provider_name,
-                model: &si.model,
-                usage: &response.tokens_used,
-                pricing: outcome.pricing,
-            },
-        );
+        // What the routing call cost is already the run's, billed to the stage
+        // being left: the trip that made it reported it (see `open_calls`).
 
         // A reply that gives no answer is read as an empty one.
         let choice = routing_answer(&response).unwrap_or_default().to_string();

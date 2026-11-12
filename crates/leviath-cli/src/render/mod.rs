@@ -556,6 +556,7 @@ impl Renderer {
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
+pub(crate) mod cost;
 pub(crate) mod mermaid;
 pub(crate) mod table;
 

@@ -692,10 +692,12 @@ fn every_id_travels_as_an_id() {
     ///
     /// `callId` is a provider's own correlation value, echoed back so a client
     /// can line an answer up against what the model sent; nothing here is
-    /// filed under it. `modelId` is the name a provider knows a model by,
-    /// which two providers can share - the identity is `ModelOutput.id`, which
-    /// carries the provider as well.
-    const NOT_IDENTITIES: [&str; 2] = ["callId", "modelId"];
+    /// filed under it. `providerCallId` is the provider's own name for one
+    /// call it served, kept so its charge can be looked up there; nothing
+    /// here is filed under it either. `modelId` is the name a provider knows
+    /// a model by, which two providers can share - the identity is
+    /// `ModelOutput.id`, which carries the provider as well.
+    const NOT_IDENTITIES: [&str; 3] = ["callId", "providerCallId", "modelId"];
 
     /// One field, as this guard reads it: its name, the type it answers with,
     /// and the name and type of each argument it takes.

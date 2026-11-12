@@ -55,7 +55,7 @@ fn parse_usage(obj: Option<&Value>) -> TokenUsage {
     // has no `total_tokens` to forward) no longer records zero tokens. A
     // reported total larger than the derived one stands: a script that knows
     // only a total has all-zero parts, and that total is the whole answer.
-    TokenUsage::new(
+    let usage = TokenUsage::new(
         usize_field(obj, "prompt_tokens")
             .saturating_sub(cached)
             .saturating_sub(cache_write),
@@ -64,7 +64,18 @@ fn parse_usage(obj: Option<&Value>) -> TokenUsage {
         usize_field(obj, "completion_tokens"),
     )
     .with_reported_total(usize_field(obj, "total_tokens"))
-    .with_reported_cost(cost)
+    .with_reported_cost(cost);
+    // A script forwarding an endpoint that repeats its running total on
+    // every chunk says so with `cumulative = true`, and each chunk then
+    // replaces the one before rather than adding to it.
+    let cumulative = obj
+        .and_then(|v| v.get("cumulative"))
+        .and_then(Value::as_bool)
+        == Some(true);
+    match cumulative {
+        true => usage.whole(),
+        false => usage,
+    }
 }
 
 /// Convert the map returned by a script's `inference` function into an
@@ -474,6 +485,21 @@ mod cost_tests {
             let parsed = parse_usage(Some(&usage));
             assert_eq!(parsed.reported_cost_usd, Some(0.0021), "via `{key}`");
         }
+    }
+
+    /// Counts a script marks `cumulative` are the call's running total, so a
+    /// later chunk replaces them; unmarked counts are added up.
+    #[test]
+    fn cumulative_counts_replace_and_plain_ones_add() {
+        let chunk = |cumulative: bool| {
+            parse_usage(Some(&serde_json::json!({
+                "prompt_tokens": 10, "completion_tokens": 4, "cumulative": cumulative
+            })))
+        };
+        assert!(chunk(true).terms.whole);
+        assert!(!chunk(false).terms.whole);
+        assert_eq!(chunk(true).merged(chunk(true)).completion_tokens, 4);
+        assert_eq!(chunk(false).merged(chunk(false)).completion_tokens, 8);
     }
 
     /// Silence means unpriced, not free.

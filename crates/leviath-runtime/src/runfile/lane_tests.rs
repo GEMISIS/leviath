@@ -20,6 +20,7 @@ fn step(run_id: &str, state: RunState) -> RunFileStep {
         at: 7,
         events: Vec::new(),
         acks: Vec::new(),
+        settles: Vec::new(),
     }
 }
 
@@ -308,4 +309,109 @@ async fn a_step_that_cannot_be_written_is_an_error_and_closes_the_file() {
     };
     assert!(lane.record(runs.path(), step("r1", changed)).await.is_err());
     assert!(lane.writers.is_empty());
+}
+
+/// A finished run whose file still lists a call as out, in the visit `v1`
+/// of its stage, and one no stage owns.
+fn finished_with_calls_out() -> RunState {
+    use crate::state::journal::CallKind;
+    let mut state = initial();
+    state.status = RunStatus::Complete;
+    let stage = state.cursor.stage.clone();
+    let mut record = crate::insert::place::pending_stage(stage.clone());
+    record.entered = true;
+    record.visits.push(crate::state::VisitRecord {
+        id: "v1".into(),
+        entered_at: 1,
+        left_at: Some(2),
+        spend: Default::default(),
+        clock: Default::default(),
+    });
+    state.ledger = vec![record];
+    let out = |attempt: &str, kind, stage| crate::state::OpenCallState {
+        attempt: attempt.into(),
+        kind,
+        stage,
+        visit: "v1".into(),
+        iteration: 1,
+        model: crate::spec::names::ModelRef::parse("mock/m").unwrap(),
+        provider_call_id: Some("gen-1".into()),
+        opened_at: 3,
+    };
+    state.open_calls = vec![
+        out("cut", CallKind::Stage, Some(stage)),
+        out("title", CallKind::Title, None),
+    ];
+    state
+}
+
+/// What the call made as `attempt` turned out to cost, as a step's event.
+fn settled(attempt: &str, usd: f64) -> RunEvent {
+    RunEvent::Inference {
+        attempt: attempt.into(),
+        model: crate::spec::names::ModelRef::parse("mock/m").unwrap(),
+        spend: crate::state::Spend {
+            prompt_tokens: 192,
+            completion_tokens: 1252,
+            priced_usd: usd,
+            reported_calls: 1,
+            ..Default::default()
+        },
+        finish_reason: None,
+        kind: Default::default(),
+        stage: None,
+        iteration: 1,
+        ending: crate::state::CallEnding::CutOff,
+        provider_call_id: Some("gen-1".into()),
+    }
+}
+
+/// A call that reports after its run left memory is written to the run's
+/// file: its cost joins the run's totals, its stage and the visit it was
+/// made in, and it comes off the list of calls out. Reported a second time
+/// it changes nothing.
+#[tokio::test]
+async fn a_late_call_is_settled_in_the_file_of_a_run_that_left_memory() {
+    let runs = tempfile::tempdir().unwrap();
+    run_dir(runs.path(), "r1");
+    let mut lane = RunFileLane::new("m", "w");
+    lane.record(runs.path(), step("r1", finished_with_calls_out()))
+        .await
+        .unwrap();
+    assert!(lane.writers.is_empty(), "the finished run's file is closed");
+
+    let mut late = RunFileStep::events("r1", 9, vec![settled("cut", 0.5), log("beside it")]);
+    late.settles = vec!["cut".into()];
+    assert_eq!(lane.record(runs.path(), late).await.unwrap(), Some(1));
+    let r = file(runs.path(), "r1");
+    let state = r.latest_state().unwrap();
+    let left: Vec<&str> = state
+        .open_calls
+        .iter()
+        .map(|c| c.attempt.as_str())
+        .collect();
+    assert_eq!(left, ["title"], "the settled call is off the list");
+    assert_eq!(state.totals.spend.priced_usd, 0.5);
+    assert_eq!(state.totals.spend.reported_calls, 1);
+    assert_eq!(state.totals.spend.completion_tokens, 1252);
+    assert_eq!(state.ledger[0].spend.priced_usd, 0.5);
+    assert_eq!(state.ledger[0].visits[0].spend.priced_usd, 0.5);
+    assert_eq!(state.ledger[0].models.len(), 1);
+    assert_eq!(r.deltas(1, 1).unwrap()[0].events.len(), 2);
+
+    // The same call reported again: it was settled, so nothing is written.
+    let mut again = RunFileStep::events("r1", 10, vec![settled("cut", 0.5)]);
+    again.settles = vec!["cut".into()];
+    assert_eq!(lane.record(runs.path(), again).await.unwrap(), None);
+    assert_eq!(file(runs.path(), "r1").last_seq(), 1);
+
+    // A call no stage owns joins the run's totals alone, and a second call
+    // on the same model names the model once.
+    let mut title = RunFileStep::events("r1", 11, vec![settled("title", 0.25)]);
+    title.settles = vec!["title".into()];
+    assert_eq!(lane.record(runs.path(), title).await.unwrap(), Some(2));
+    let state = file(runs.path(), "r1").latest_state().unwrap();
+    assert!(state.open_calls.is_empty());
+    assert_eq!(state.totals.spend.priced_usd, 0.75);
+    assert_eq!(state.ledger[0].spend.priced_usd, 0.5);
 }

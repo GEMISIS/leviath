@@ -207,6 +207,39 @@ impl ProviderError {
         }
     }
 
+    /// The HTTP status the provider answered with, when this error is such
+    /// an answer: a rate limit is a 429, a prompt the provider itself found
+    /// too long is a 400, and any other carries its status at the head of
+    /// its message. `None` for a failure that is not a status the provider
+    /// sent: a transport failure, an answer that would not parse, an error
+    /// that arrived inside a reply already under way.
+    pub fn answered_status(&self) -> Option<u16> {
+        match self {
+            ProviderError::RateLimitExceeded { .. } => Some(429),
+            ProviderError::TokenLimitExceeded { sent, .. } => sent.then_some(400),
+            ProviderError::ApiError(m) | ProviderError::Unavailable { detail: m, .. } => {
+                crate::provider::leading_http_status(m)
+            }
+            ProviderError::RequestFailed(_)
+            | ProviderError::ClientBuild(_)
+            | ProviderError::InvalidResponse(_)
+            | ProviderError::RetentionRefused(_)
+            | ProviderError::Other(_) => None,
+        }
+    }
+
+    /// Whether the provider's answer says, by what it is, that the request
+    /// was never run: the key was not recognised (401), the account could
+    /// not pay for it (402), there is nothing by that name to run it on
+    /// (404), or the provider would not take it just now (429).
+    ///
+    /// A request that was never run was never billed. Every other status
+    /// (a 400 some providers charge a fee for, a 5xx that may have come
+    /// after work was done) leaves that open.
+    pub fn refused_unrun(&self) -> bool {
+        matches!(self.answered_status(), Some(401 | 402 | 404 | 429))
+    }
+
     /// The text this error's tags ride in: its message, or an unusable
     /// provider's detail. A rate limit and a token limit have none.
     fn message(&self) -> Option<&str> {

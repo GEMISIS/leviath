@@ -370,6 +370,8 @@ fn write_journal(run_id: &str, moments: &[Moment]) {
                     kind: *kind,
                     stage: leviath_runtime::spec::names::StageName::new(stage).ok(),
                     iteration: *iteration as u32,
+                    ending: Default::default(),
+                    provider_call_id: None,
                 }],
                 None,
             ),
@@ -462,6 +464,8 @@ async fn a_run_file_reads_as_a_timeline() {
             kind,
             stage: stage.map(|s| leviath_runtime::spec::names::StageName::new(s).unwrap()),
             iteration,
+            ending: Default::default(),
+            provider_call_id: None,
         };
         step_with(
             &dir,

@@ -43,6 +43,13 @@ pub(crate) struct RunFileStep {
     /// Who waits to hear where the step landed, fired once it is written or
     /// lost.
     pub acks: Vec<tokio::sync::oneshot::Sender<crate::persistence_bridge::Appended>>,
+    /// The attempts of the calls this step settles, for a step whose run is
+    /// not in memory: each `Inference` event of the step that names one is
+    /// what a call the file still lists as out turned out to cost. The lane
+    /// folds each into the file's state and takes the call off its list,
+    /// and leaves out an event for a call the list no longer holds, which
+    /// was settled already.
+    pub settles: Vec<String>,
 }
 
 /// A run's state now, and the spec it was placed from.
@@ -63,6 +70,7 @@ impl RunFileStep {
             at,
             events,
             acks: Vec::new(),
+            settles: Vec::new(),
         }
     }
 }
@@ -202,6 +210,7 @@ fn write_step(
             Some(now) => now.state,
             None => writer.state().clone(),
         };
+        let events = settle_listed(&mut state, step.events, &step.settles);
         state.files = writer.state().files.clone();
         overlay(&mut state.files, written);
         warn_missing_blobs(run_dir, writer.state(), &state);
@@ -209,13 +218,37 @@ fn write_step(
             state.status,
             RunStatus::Complete | RunStatus::Error(_) | RunStatus::Cancelled
         );
-        let seq = writer.record(state, step.at, step.events)?;
+        let seq = match !step.settles.is_empty() && events.is_empty() {
+            // Every call the step came to settle was settled already.
+            true => None,
+            false => writer.record(state, step.at, events)?,
+        };
         Ok(((!finished).then_some(writer), seq))
     });
     match result {
         Ok((writer, seq)) => (writer, Ok(seq)),
         Err(e) => (None, Err(e)),
     }
+}
+
+/// Fold the calls a step settles into `state`: each `Inference` event of
+/// `events` whose attempt is among `settles` is taken off the state's list
+/// of calls out and added to its totals, its stage and the visit it was made
+/// in. An event for a call the list does not hold is left out, since that
+/// call was settled before; every other event is kept as it is.
+fn settle_listed(state: &mut RunState, events: Vec<RunEvent>, settles: &[String]) -> Vec<RunEvent> {
+    events
+        .into_iter()
+        .filter(|event| match event {
+            RunEvent::Inference {
+                attempt,
+                model,
+                spend,
+                ..
+            } if settles.contains(attempt) => state.settle_call(attempt, spend, model),
+            _ => true,
+        })
+        .collect()
 }
 
 /// The writer for a run whose file is not open: the file on disk, or a new

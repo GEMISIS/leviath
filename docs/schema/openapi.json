@@ -5973,6 +5973,56 @@
           }
         }
       },
+      "UnknownCalls": {
+        "type": "object",
+        "description": "How many calls have an unknown cost, by reason. Every count is zero when the cost is exact.",
+        "required": [
+          "no_usage",
+          "no_price",
+          "unmodelled_terms",
+          "no_lookup",
+          "lookup_unanswered",
+          "not_recorded",
+          "not_settled"
+        ],
+        "properties": {
+          "no_usage": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Calls whose reply said nothing of what they used."
+          },
+          "no_price": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Calls to a model with no known price."
+          },
+          "unmodelled_terms": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Calls billed on terms the rate table does not cover."
+          },
+          "no_lookup": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Calls that failed or were cut off after they were sent, on a provider that gives no way to learn what such a call cost."
+          },
+          "lookup_unanswered": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Calls that failed or were cut off, whose provider was asked what they cost and did not answer in time."
+          },
+          "not_recorded": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Calls an earlier release recorded without a cost."
+          },
+          "not_settled": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Calls still out on a run that has ended, whose cost is not settled yet: a lookup is running, or was when the daemon stopped. A call out on a run that is still going is in flight, and is counted in calls_in_flight instead."
+          }
+        }
+      },
       "StageRecord": {
         "type": "object",
         "required": [
@@ -6038,20 +6088,28 @@
               "number",
               "null"
             ],
-            "description": "What this stage spent, accumulated across revisits. Null means unknown, never free: some call was served by a model with no reported cost and no known rates, so any total would understate by an unknown amount. Counts every call made in the stage - its own turns, the compaction calls that summarize its context, and the routing call at its boundary. The run's title call belongs to no stage, so the stages can sum to slightly less than the run's own cost_usd. Absent on a daemon without the runs.stages.cost capability, which is not the same as null."
+            "description": "What this stage spent, accumulated across revisits. Null means unknown, never free: the cost of some call could not be learned (unknown says why), so any total would understate by an unknown amount. Counts every call made in the stage - its own turns, the compaction calls that summarize its context, and the routing call at its boundary. The run's title call belongs to no stage, so the stages can sum to slightly less than the run's own cost_usd. Absent on a daemon without the runs.stages.cost capability, which is not the same as null."
           },
-          "unpriced_calls": {
+          "unknown_calls": {
             "type": "integer",
             "minimum": 0,
-            "description": "Calls in this stage that could not be priced at all. Non-zero forces cost_usd to null."
+            "description": "Calls in this stage whose cost is unknown. Non-zero forces cost_usd to null."
+          },
+          "unknown": {
+            "$ref": "#/components/schemas/UnknownCalls"
+          },
+          "calls_in_flight": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Calls made in this stage that are out and have not landed yet, on a run that is still going. They are in no other count and not in cost_usd, which stays what the calls that landed came to. A call still out on a run that has ended is counted in unknown as not_settled instead."
           },
           "cost_is_exact": {
             "type": "boolean",
-            "description": "Whether every priced call carried the provider's own cost figure. False means the total is a reconstruction from published rates, not the invoice."
+            "description": "Whether cost_usd is the stage's whole cost: the cost of every call is known, reported by the provider or computed from the rate table, and no call is in flight. True exactly when unknown_calls and calls_in_flight are both zero."
           },
           "cost_priced_usd": {
             "type": "number",
-            "description": "The priced subtotal, kept even while cost_usd is null so a resumed run does not restart from zero. Not a substitute for cost_usd: showing it while calls went unpriced is the partial total that looks authoritative and is not."
+            "description": "What the calls with a known cost add up to, kept even while cost_usd is null so a resumed run does not restart from zero. Not a substitute for cost_usd: showing it while some call's cost is unknown is the partial total that looks authoritative and is not."
           },
           "models": {
             "type": "array",
@@ -6157,7 +6215,8 @@
           "cached_tokens",
           "cache_write_tokens",
           "cost_usd",
-          "unpriced_calls",
+          "unknown_calls",
+          "unknown",
           "cost_is_exact",
           "cost_priced_usd"
         ],
@@ -6196,14 +6255,22 @@
             ],
             "description": "What this visit spent. Null means unknown, never free, on the same rule as the stage and the run."
           },
-          "unpriced_calls": {
+          "unknown_calls": {
             "type": "integer",
             "minimum": 0,
-            "description": "Calls in this visit that could not be priced at all. Non-zero forces cost_usd to null."
+            "description": "Calls in this visit whose cost is unknown. Non-zero forces cost_usd to null."
+          },
+          "unknown": {
+            "$ref": "#/components/schemas/UnknownCalls"
+          },
+          "calls_in_flight": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Calls made in this visit that are out and have not landed yet, on a run that is still going. Not in cost_usd until they land."
           },
           "cost_is_exact": {
             "type": "boolean",
-            "description": "Whether every priced call in this visit carried the provider's own cost figure rather than one computed from published rates."
+            "description": "Whether cost_usd is the visit's whole cost: the cost of every call is known, reported by the provider or computed from the rate table, and no call is in flight."
           },
           "cost_priced_usd": {
             "type": "number",

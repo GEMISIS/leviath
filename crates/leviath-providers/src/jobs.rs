@@ -84,6 +84,16 @@ impl JobLog {
         }
     }
 
+    /// Forget every job whose id `keep` does not answer for: the run that
+    /// held them waits on them no longer.
+    pub fn keep(&self, keep: &dyn Fn(&str) -> bool) {
+        let before = self.held().len();
+        self.held().retain(|_, id| keep(id));
+        if self.held().len() != before {
+            self.changed();
+        }
+    }
+
     /// Run `call` with this log as the one its provider submits through.
     pub fn scope<F: Future>(&self, call: F) -> impl Future<Output = F::Output> {
         JOBS.scope(self.clone(), call)
@@ -138,10 +148,12 @@ pub struct Ran<T> {
 /// and wait on that. `wait` polls a job by id to its end.
 ///
 /// A job the provider no longer has (it answers 404 for it) is submitted
-/// again, and the result's `note` says so. A job that failed, or that ran
-/// past its deadline, is forgotten, so the call made again submits afresh;
-/// one whose polling failed on the way (a dropped connection, a busy
-/// provider) is kept, so the call made again picks it back up.
+/// again, and the result's `note` says so. A job the provider said failed is
+/// forgotten, so the call made again submits afresh. One still running when
+/// this call stopped waiting (`still_running`), or whose polling failed on
+/// the way (a dropped connection, a busy provider), is kept: the provider
+/// goes on running and billing it, so the call made again picks it back up
+/// rather than paying for another.
 ///
 /// Whatever fails once there is a job says its request was sent (see
 /// [`ProviderError::request_sent`]): the provider has the job, whether this
@@ -159,6 +171,8 @@ where
     let resumed = log.as_ref().and_then(|l| l.get(step));
     let polled = resumed.is_some();
     if let Some(id) = resumed {
+        // The provider has this job, so the call is one it knows by an id.
+        crate::call_trace::note_job(&id);
         match wait(id.clone()).await {
             Err(e) if e.failure_kind() == Some(FailureKind::NotFound) => {
                 tracing::warn!(step, job = %id, "a job this call submitted before is gone; submitting it again");
@@ -173,6 +187,7 @@ where
         }
     }
     let id = submit().await.map_err(|e| submit_failed(polled, e))?;
+    crate::call_trace::note_job(&id);
     if let Some(log) = &log {
         log.put(step, &id);
     }
@@ -190,11 +205,36 @@ fn submit_failed(after_poll: bool, error: ProviderError) -> ProviderError {
     }
 }
 
-/// `waited`, forgetting the job when it ended without a result: a failed job
-/// or one past its deadline is never picked back up. Its error says a
+/// The tag at the head of the error for a job this call stopped waiting on
+/// while the provider was still running it.
+const STILL_RUNNING: &str = "[job-running] ";
+
+/// The error for a job that outlasted the wait for it: `why`, marked so the
+/// job is kept rather than forgotten. Its request was sent.
+#[cfg(any(
+    test,
+    feature = "openrouter",
+    feature = "openai",
+    feature = "xai",
+    feature = "xai-subscription",
+    feature = "google"
+))]
+pub(crate) fn still_running(why: String) -> ProviderError {
+    ProviderError::Other(format!("{STILL_RUNNING}{why}")).after_send()
+}
+
+/// Whether `error` says its job is still running at the provider.
+fn is_still_running(error: &ProviderError) -> bool {
+    matches!(error, ProviderError::Other(m) if m.contains(STILL_RUNNING))
+}
+
+/// `waited`, forgetting the job when the provider said it failed: a failed
+/// job is never picked back up, and one still running is. Its error says a
 /// request was sent, since the job it waited on was.
 fn settle<T>(log: Option<&JobLog>, step: &str, waited: Result<T>) -> Result<T> {
-    if let (Some(log), Err(ProviderError::Other(_))) = (log, &waited) {
+    if let (Some(log), Err(error @ ProviderError::Other(_))) = (log, &waited)
+        && !is_still_running(error)
+    {
         log.forget(step);
     }
     waited.map_err(ProviderError::after_send)

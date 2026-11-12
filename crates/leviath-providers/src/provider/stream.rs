@@ -204,6 +204,9 @@ pub async fn collect_stream(
     let mut summary: Option<String> = None;
     let mut parts = Vec::new();
 
+    // The provider accepted the request and opened a reply: an error from
+    // here on comes from inside it, and is no refusal.
+    crate::call_trace::note_began();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
         content.push_str(&chunk.delta);
@@ -226,6 +229,9 @@ pub async fn collect_stream(
         }
         if let Some(usage) = chunk.tokens {
             tokens = tokens.merged(usage);
+            // Kept where the caller can still read it if the stream stops
+            // here: a call cut partway has used what it has reported.
+            crate::call_trace::note_usage(&tokens);
         }
         if let Some(reason) = chunk.finish_reason {
             finish_reason = Some(reason);
@@ -246,6 +252,9 @@ pub async fn collect_stream(
         )
         .after_send());
     };
+    // The model finished, so the usage is the whole call's, and it stays the
+    // call's whatever is made of the reply below.
+    crate::call_trace::note_whole_usage(&tokens);
 
     Ok(InferenceResponse {
         content,
@@ -716,6 +725,7 @@ mod tests {
             cached_tokens: 0,
             cache_write_tokens: 0,
             reported_cost_usd: None,
+            terms: Default::default(),
         };
         let stream = chunks(vec![StreamChunk {
             reasoning_delta: None,

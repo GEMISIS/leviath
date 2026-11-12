@@ -193,7 +193,7 @@ async fn an_image_is_made_through_invoke_model_and_priced_per_image() {
         .expect("an image");
     assert_eq!(response.parts.len(), 1);
     let per_image = crate::pricing::published_unit_rate("bedrock", model).map(|row| row.usd);
-    assert_eq!(response.tokens_used.reported_cost_usd, per_image);
+    assert_eq!(response.tokens_used.priced_cost(None), per_image);
     let sent: Value = serde_json::from_str(&bodies.lock().unwrap()[0]).unwrap();
     assert_eq!(sent["prompt"], "a lighthouse");
 

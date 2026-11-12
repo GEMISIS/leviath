@@ -173,6 +173,7 @@ async fn the_attempts_read_back_typed_with_their_outcome() {
                     transient: false,
                     capacity: false,
                     next: Retry::Reported,
+                    sent: None,
                 },
             ),
             failover("insufficient_credits"),
@@ -269,6 +270,7 @@ async fn an_unclassified_failure_has_no_kind() {
                         transient: true,
                         capacity: true,
                         next: Retry::SameModel,
+                        sent: None,
                     },
                 ),
                 failover(""),
@@ -360,6 +362,7 @@ async fn the_attempts_page_carries_on_from_its_cursor() {
                             transient: true,
                             capacity: true,
                             next: Retry::RenewedFiles,
+                            sent: None,
                         },
                     )
                 })
@@ -659,6 +662,7 @@ async fn every_mirrored_function_runs() {
             transient: true,
             capacity: false,
             next: Retry::Reported,
+            sent: None,
         })),
     ])
     .await;

@@ -141,7 +141,7 @@ fn the_fixtures_differ_in_every_field() {
     all.extend(kinds(
         StateDelta::between(&busy(), &base(), 0, Vec::new()).changes,
     ));
-    assert_eq!(all.len(), 31, "{all:?}");
+    assert_eq!(all.len(), 32, "{all:?}");
 }
 
 proptest! {

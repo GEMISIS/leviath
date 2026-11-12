@@ -156,6 +156,15 @@ pub(crate) fn parse_event(
         .unwrap_or_default();
 
     match kind {
+        // The response's own id, in the first event: what the provider knows
+        // the call by, however the call ends.
+        "response.created" => {
+            if let Some(id) = json.pointer("/response/id").and_then(|id| id.as_str()) {
+                crate::call_trace::note_call_id(id);
+            }
+            None
+        }
+
         "response.output_text.delta" => {
             let text = json.get("delta").and_then(|d| d.as_str()).unwrap_or("");
             Some(Some(Ok(StreamChunk {
@@ -334,10 +343,20 @@ pub(crate) fn parse_event(
         // An error the server found after committing to a 200. Without its own
         // arm this falls through and the stream ends cleanly, leaving a
         // truncated answer with nothing anywhere saying why.
-        "response.failed" | "error" => Some(Some(Err(ProviderError::ApiError(format!(
-            "the model provider reported: {}",
-            failure_message(&json)
-        ))))),
+        "response.failed" | "error" => {
+            // A response that failed after it began still says what it used,
+            // which is the call's whole usage: the provider is done with it.
+            if let Some(response) = json
+                .get("response")
+                .filter(|r| r.get("usage").is_some_and(|u| !u.is_null()))
+            {
+                crate::call_trace::note_whole_usage(&usage_of(response, &turn.dialect));
+            }
+            Some(Some(Err(ProviderError::ApiError(format!(
+                "the model provider reported: {}",
+                failure_message(&json)
+            )))))
+        }
 
         _ => None,
     }
@@ -427,32 +446,48 @@ fn output_index(json: &serde_json::Value) -> usize {
     feature = "meta"
 ))]
 fn usage_of(response: &serde_json::Value, dialect: &super::Dialect) -> TokenUsage {
-    let usage = response.get("usage");
-    let number = |node: Option<&serde_json::Value>, key: &str| -> usize {
-        node.and_then(|n| n.get(key))
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0) as usize
-    };
-    let details = usage.and_then(|u| u.get("input_tokens_details"));
-
-    let input = number(usage, "input_tokens");
-    let cached = number(details, "cached_tokens");
-    let written = number(details, "cache_write_tokens");
+    use crate::usage::count;
+    let usage = response.get("usage").unwrap_or(&serde_json::Value::Null);
+    let cached = count(usage, "/input_tokens_details/cached_tokens");
+    let written = count(usage, "/input_tokens_details/cache_write_tokens");
     let reported = usage
-        .and_then(|u| u.get("cost_in_usd_ticks"))
+        .get("cost_in_usd_ticks")
         .and_then(serde_json::Value::as_f64)
         .filter(|_| dialect.reported_cost)
         .map(|ticks| ticks / super::TICKS_PER_USD);
-    TokenUsage::new(
+    let mut parsed = TokenUsage::new(
         // Saturating because a server reporting details larger than its own
         // total is malformed, and clamping beats wrapping under
         // `overflow-checks`.
-        input.saturating_sub(cached).saturating_sub(written),
+        count(usage, "/input_tokens")
+            .saturating_sub(cached)
+            .saturating_sub(written),
         cached,
         written,
-        number(usage, "output_tokens"),
+        count(usage, "/output_tokens"),
     )
-    .with_reported_cost(reported)
+    .whole()
+    .with_reported_cost(reported);
+    // A cache write kept for longer than the default is billed above it.
+    for (path, term) in [
+        (
+            "/input_tokens_details/cache_write_tokens_details/ttl_12h_tokens",
+            "cache_write_ttl_12h",
+        ),
+        (
+            "/input_tokens_details/cache_write_tokens_details/ttl_30m_tokens",
+            "cache_write_ttl_30m",
+        ),
+        ("/input_tokens_details/audio_tokens", "audio_tokens"),
+        ("/output_tokens_details/audio_tokens", "audio_tokens"),
+        ("/input_tokens_details/image_tokens", "image_tokens"),
+        ("/output_tokens_details/image_tokens", "image_tokens"),
+    ] {
+        if count(usage, path) > 0 && !parsed.terms.extra_terms.iter().any(|t| t == term) {
+            parsed.terms.extra_terms.push(term.to_string());
+        }
+    }
+    crate::usage::with_envelope(parsed, response)
 }
 
 /// The most useful sentence in a failure event.

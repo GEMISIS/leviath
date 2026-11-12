@@ -147,6 +147,7 @@ fn every_frame() -> Vec<ServerEvent> {
             threshold_usd: 1.0,
             total_usd: 1.25,
             complete: false,
+            calls_in_flight: 1,
             stage: "build".to_string(),
         },
         ServerEvent::InteractionNeeded {

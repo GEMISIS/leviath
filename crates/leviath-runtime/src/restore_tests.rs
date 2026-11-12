@@ -620,18 +620,20 @@ fn a_resumed_run_keeps_its_blueprints_routing() {
     );
 }
 
-/// A layout-8 run file written before `routing.on_unmatched` existed, held
-/// mid-stage when its daemon was killed, resumes with its routing as it was
-/// and the default for the new key. Its spec frame encodes again to exactly
-/// the bytes on disk, so the key did not move the binary layout.
+/// A run file written before `routing.on_unmatched` existed, held mid-stage
+/// when its daemon was killed, resumes with its routing as it was and the
+/// default for the new key. Its spec frame encodes again to exactly the
+/// bytes on disk, so the key did not move the binary layout.
 ///
-/// The fixture's blueprint sets `[graph] routing = { retry_attempts = 2 }`
-/// and `routing = { on_error = "fail" }` on its `verify` stage.
+/// The fixture was written by a layout-8 build and upgraded to this build's
+/// layout, which copies a spec frame byte for byte. Its blueprint sets
+/// `[graph] routing = { retry_attempts = 2 }` and
+/// `routing = { on_error = "fail" }` on its `verify` stage.
 #[test]
-fn a_layout_8_run_file_from_before_on_unmatched_resumes_unchanged() {
+fn a_run_file_from_before_on_unmatched_resumes_unchanged() {
     use crate::runfile::codec::{FrameKind, encode, frame_at};
     use crate::spec::graph::{OnRoutingError, OnUnmatched, RoutingDef};
-    let bytes = include_bytes!("runfile/fixtures/layout-8-routing.lvr");
+    let bytes = include_bytes!("runfile/fixtures/layout-9-routing.lvr");
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join(leviath_core::files::RUN_FILE), bytes).unwrap();
 

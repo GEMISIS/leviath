@@ -106,8 +106,7 @@ fn spend(
         priced_usd,
         reported_calls: 0,
         computed_calls: u32::from(!exact),
-        unpriced_calls: n32(unpriced),
-        cost_unknown: cost.is_none() && unpriced == 0,
+        unknown: leviath_core::cost::UnknownCalls::default().reconciled(unpriced, cost.is_some()),
     }
 }
 
@@ -166,7 +165,7 @@ pub(crate) fn from_meta(state: &mut RunState, meta: &RunMeta, graph: &RunGraph) 
             meta.cache_write_tokens,
             (meta.cost_priced_usd, meta.cost_usd),
             meta.cost_is_exact,
-            meta.unpriced_calls,
+            meta.unknown_calls,
         ),
         tool_calls: meta.tool_calls as u64,
     };
@@ -417,7 +416,7 @@ fn visit(v: &StageVisitRecord, at: i64) -> VisitRecord {
             v.cache_write_tokens,
             (v.cost_priced_usd, v.cost_usd),
             v.cost_is_exact,
-            v.unpriced_calls,
+            v.unknown_calls,
         ),
         clock: clock(v.active, Some(v.entered_at), v.left_at.unwrap_or(at)),
     }
@@ -449,7 +448,7 @@ fn ledger(r: &OldStage, meta: &RunMeta) -> Option<StageRecord> {
             r.cache_write_tokens,
             (r.cost_priced_usd, r.cost_usd),
             r.cost_is_exact,
-            r.unpriced_calls,
+            r.unknown_calls,
         ),
         models: r
             .models

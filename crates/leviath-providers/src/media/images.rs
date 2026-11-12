@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 use crate::pricing::UnitPrice;
 use crate::provider::{InferenceRequest, InferenceResponse, ProviderError, Result};
 use crate::responses::client::Endpoint;
+use leviath_core::cost::{CallCost, CostUnknown};
 
 /// How a vendor wants a reference image in an edit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -266,11 +267,34 @@ pub(crate) async fn run(
             .and_then(Value::as_f64)
             .map(|cost| cost / per_usd)
     });
-    let cost = reported
-        .or_else(|| route.unit.map(|u| u.cost(parts.len() as f64)))
-        .or_else(|| token_cost(route.tokens.as_ref(), &reply));
+    // The provider's own figure first. Then the per-image price times the
+    // images that came back, for a reply that shows nothing the flat price
+    // leaves out. Then the reply's tokens at the model's rates.
+    let cost = match (reported, route.unit) {
+        (Some(usd), _) => CallCost::Reported(usd),
+        (None, Some(_)) if tiered(request, &reply) => {
+            CallCost::Unknown(CostUnknown::UnmodelledTerms)
+        }
+        (None, Some(unit)) => super::unit_cost(Some(unit), Some(parts.len() as f64)),
+        (None, None) => match token_cost(route.tokens.as_ref(), &reply) {
+            Some(usd) => CallCost::Computed(usd),
+            None if route.tokens.is_none() => CallCost::Unknown(CostUnknown::NoPrice),
+            None => CallCost::Unknown(CostUnknown::NoUsage),
+        },
+    };
     let summary = super::summary(&format!("{}/{}", route.provider, request.model), &parts);
     Ok(super::response(summary, parts, cost))
+}
+
+/// Whether the call asked for, or the reply names, a quality or a size: a
+/// per-image price is for the model's ordinary image, and a model that
+/// takes either prices the others apart.
+fn tiered(request: &InferenceRequest, reply: &Value) -> bool {
+    ["quality", "size"].iter().any(|key| {
+        let asked = request.extra.get(*key).and_then(Value::as_str);
+        let made = reply.get(*key).and_then(Value::as_str);
+        asked.or(made).is_some_and(|value| value != "auto")
+    })
 }
 
 /// What a reply's `usage` costs at `rates`: input and output tokens, as the
@@ -452,10 +476,68 @@ mod tests {
             .await
             .expect("an image");
         assert_eq!(response.parts[0].mime_type.as_str(), "image/png");
-        assert_eq!(response.tokens_used.reported_cost_usd, Some(6.0));
+        assert_eq!(response.tokens_used.priced_cost(None), Some(6.0));
         assert!(!bodies.lock().unwrap()[0].contains("response_format"));
         assert_eq!(token_cost(None, &reply), None);
         assert_eq!(token_cost(openai.tokens.as_ref(), &json!({})), None);
+    }
+
+    /// A flat per-image price is for the model's ordinary image. A call that
+    /// asked for a quality or a size, or a reply that names one, was billed
+    /// on terms the flat price leaves out; `auto` is the ordinary image.
+    #[tokio::test]
+    async fn an_image_at_a_quality_or_size_the_flat_price_leaves_out_is_unknown() {
+        use leviath_core::cost::{CallCost, CostUnknown};
+        let image = json!({ "data": [ { "b64_json": "UE5H" } ] });
+        let sized = json!({ "size": "1536x1024", "data": [ { "b64_json": "UE5H" } ] });
+        let auto = json!({ "quality": "auto", "data": [ { "b64_json": "UE5H" } ] });
+        let (url, _) = spawn_mock_sequence(vec![
+            (200, "OK", image.to_string().into_bytes()),
+            (200, "OK", sized.to_string().into_bytes()),
+            (200, "OK", auto.to_string().into_bytes()),
+            (200, "OK", image.to_string().into_bytes()),
+            (200, "OK", image.to_string().into_bytes()),
+        ])
+        .await;
+        let flat = route(EditShape::Xai, false);
+        let mut asked = request("draw", 0);
+        asked.extra = json!({ "quality": "high" });
+        let mut costs = Vec::new();
+        for request in [&asked, &request("draw", 0), &request("draw", 0)] {
+            let response = run(&endpoint(&url), &flat, request)
+                .await
+                .expect("an image");
+            costs.push(response.tokens_used.cost(None));
+        }
+        assert_eq!(
+            costs,
+            [
+                CallCost::Unknown(CostUnknown::UnmodelledTerms),
+                CallCost::Unknown(CostUnknown::UnmodelledTerms),
+                CallCost::Computed(0.01),
+            ]
+        );
+
+        // No per-image price and no token rates: nothing to price it by.
+        let mut bare = route(EditShape::Xai, false);
+        bare.unit = None;
+        let response = run(&endpoint(&url), &bare, &request("draw", 0))
+            .await
+            .expect("an image");
+        assert_eq!(
+            response.tokens_used.cost(None),
+            CallCost::Unknown(CostUnknown::NoPrice)
+        );
+
+        // Token rates, and a reply that says nothing of the tokens it used.
+        bare.tokens = Some(crate::ModelPricing::flat(2.0, 8.0));
+        let response = run(&endpoint(&url), &bare, &request("draw", 0))
+            .await
+            .expect("an image");
+        assert_eq!(
+            response.tokens_used.cost(None),
+            CallCost::Unknown(CostUnknown::NoUsage)
+        );
     }
 
     #[tokio::test]
@@ -476,7 +558,7 @@ mod tests {
         assert_eq!(response.parts.len(), 2);
         assert_eq!(response.parts[0].bytes, b"JPEG");
         assert_eq!(response.parts[1].name.as_deref(), Some("image-2.png"));
-        assert_eq!(response.tokens_used.reported_cost_usd, Some(0.04));
+        assert_eq!(response.tokens_used.priced_cost(None), Some(0.04));
         let body: Value = serde_json::from_str(&bodies.lock().unwrap()[0]).unwrap();
         assert_eq!(body["response_format"], "b64_json");
         assert_eq!(body["n"], 2);
@@ -504,7 +586,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            priced.tokens_used.reported_cost_usd,
+            priced.tokens_used.priced_cost(None),
             Some(0.01),
             "the unit price, no ticks read"
         );

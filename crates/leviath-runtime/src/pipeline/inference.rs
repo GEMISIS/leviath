@@ -727,7 +727,10 @@ type InferenceQuery = (
     Option<&'static SystemBlockHashes>,
     Option<&'static crate::pipeline::PromptCalibration>,
     Option<&'static CaptureModelInput>,
-    Option<&'static crate::inference_call::RemoteJobs>,
+    (
+        Option<&'static crate::inference_call::RemoteJobs>,
+        Option<&'static crate::open_calls::OpenCalls>,
+    ),
     Option<&'static crate::components::PromptFrame>,
 );
 
@@ -818,7 +821,7 @@ pub(crate) fn dispatch_inference(
             block_prefix,
             calibration,
             capture,
-            remote_jobs,
+            (remote_jobs, open_calls),
             shown,
         )| {
             crate::tick_scope::run_agent_parallel(entity, &par_commands, &mut || {
@@ -1026,6 +1029,17 @@ pub(crate) fn dispatch_inference(
                     hydration,
                     journal,
                     jobs: remote_jobs.map(|j| j.0.clone()),
+                    // The call is the run's next iteration of this stage,
+                    // which is what its answer is recorded as.
+                    ticket: Some(crate::open_calls::CallTicket::new(
+                        &stage,
+                        entity,
+                        open_calls,
+                        crate::runfile::record::InferenceKind::Stage,
+                        (&state.current_stage, &state.current_visit),
+                        state.iteration + 1,
+                    )),
+                    provider_name: si.provider_name.clone(),
                 };
                 // A job the call submits wakes the world, so the run's file
                 // records it at once rather than when the call ends.

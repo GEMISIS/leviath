@@ -245,11 +245,10 @@ pub(crate) struct StateSpend {
     pub(crate) reported_calls: i32,
     /// Calls whose cost was computed from a price table.
     pub(crate) computed_calls: i32,
-    /// Calls nothing could price.
-    pub(crate) unpriced_calls: i32,
-    /// Whether what it cost is not known though no call was counted as
-    /// unpriced: a record from an earlier release that named no cost.
-    pub(crate) cost_unknown: bool,
+    /// Calls whose cost is unknown.
+    pub(crate) unknown_calls: i32,
+    /// Why, for each reason that has calls.
+    pub(crate) unknown: Vec<crate::commands::serve::graphql::types::run::UnknownCost>,
 }
 
 impl From<&Spend> for StateSpend {
@@ -262,8 +261,8 @@ impl From<&Spend> for StateSpend {
             priced_usd: Decimal(s.priced_usd),
             reported_calls: saturating(s.reported_calls),
             computed_calls: saturating(s.computed_calls),
-            unpriced_calls: saturating(s.unpriced_calls),
-            cost_unknown: s.cost_unknown,
+            unknown_calls: saturating(s.unknown_calls()),
+            unknown: crate::commands::serve::graphql::types::run::unknown_costs(&s.unknown),
         }
     }
 }
@@ -953,6 +952,49 @@ pub(crate) struct RunState {
     /// call made again after a restart polls rather than paying for again.
     /// Empty between calls.
     pub(crate) remote_jobs: Vec<RemoteJob>,
+    /// The model calls it has sent that are not yet accounted for: one in
+    /// flight, or one cut off whose cost is still being looked up.
+    pub(crate) open_calls: Vec<OpenCall>,
+}
+
+/// A model call a run has sent that is not yet accounted for.
+#[mirror(no_filter)]
+#[derive(Debug, SimpleObject)]
+pub(crate) struct OpenCall {
+    /// The attempt's id.
+    pub(crate) attempt: String,
+    /// Which kind of call it is: `stage`, `compaction`, `title` or `routing`.
+    pub(crate) kind: String,
+    /// The stage it was made for. Null for a call no stage owns.
+    pub(crate) stage: Option<String>,
+    /// The visit of that stage it was made in, by the visit's id. Empty for
+    /// a call no stage owns.
+    pub(crate) visit: String,
+    /// The iteration it was made in.
+    pub(crate) iteration: i32,
+    /// The model it was sent to, as `provider/model`.
+    pub(crate) model: String,
+    /// The provider's own id for it, once it has given one.
+    pub(crate) provider_call_id: Option<String>,
+    /// When it was sent.
+    pub(crate) opened_at: Timestamp,
+}
+
+/// A run's open calls, as the schema lists them.
+pub(crate) fn open_calls(calls: &[leviath_runtime::state::OpenCallState]) -> Vec<OpenCall> {
+    calls
+        .iter()
+        .map(|call| OpenCall {
+            attempt: call.attempt.clone(),
+            kind: call.kind.label().to_string(),
+            stage: call.stage.as_ref().map(ToString::to_string),
+            visit: call.visit.clone(),
+            iteration: saturating(call.iteration),
+            model: call.model.to_string(),
+            provider_call_id: call.provider_call_id.clone(),
+            opened_at: Timestamp(call.opened_at),
+        })
+        .collect()
 }
 
 /// A remote job a run's model call submitted: a Meshy task, a video.
@@ -1052,6 +1094,7 @@ impl From<&CoreState> for RunState {
             written_bytes: big(s.written),
             last_progress_at: s.last_progress_at.map(Timestamp),
             remote_jobs: remote_jobs(&s.remote_jobs),
+            open_calls: open_calls(&s.open_calls),
         }
     }
 }

@@ -264,6 +264,14 @@ change_member!(
     }
 );
 change_member!(
+    /// The model calls the run has sent and not yet accounted for changed:
+    /// one went out, the provider named one, or one was accounted for.
+    OpenCallsChange {
+        /// The calls now.
+        open_calls: Vec<super::state::OpenCall>
+    }
+);
+change_member!(
     /// When the run last made progress, as its record keeps that apart from
     /// its last step, changed.
     LastProgressAtChange {
@@ -337,6 +345,8 @@ pub(crate) enum StateChange {
     LastProgressAt(LastProgressAtChange),
     /// The remote jobs its model call has submitted.
     RemoteJobs(RemoteJobsChange),
+    /// The model calls it has sent and not yet accounted for.
+    OpenCalls(OpenCallsChange),
 }
 
 impl From<&Change> for StateChange {
@@ -437,6 +447,9 @@ impl From<&Change> for StateChange {
             Change::RemoteJobs(jobs) => Self::RemoteJobs(RemoteJobsChange {
                 remote_jobs: super::state::remote_jobs(jobs),
             }),
+            Change::OpenCalls(calls) => Self::OpenCalls(OpenCallsChange {
+                open_calls: super::state::open_calls(calls),
+            }),
             Change::LastProgressAt(at) => Self::LastProgressAt(LastProgressAtChange {
                 last_progress_at: at.map(Timestamp),
             }),
@@ -487,6 +500,14 @@ pub(crate) struct InferenceStep {
     pub(crate) stage: Option<String>,
     /// The iteration it was made in.
     pub(crate) iteration: i32,
+    /// How the call ended: `answered`, `failed` after it was sent, or
+    /// `cut_off` by a deadline, a cancel or a daemon that stopped.
+    pub(crate) ending: String,
+    /// How its cost is known: `reported` by the provider, `computed` from
+    /// the rate table, or `unknown`, in which case `spend.unknown` says why.
+    pub(crate) cost_class: String,
+    /// The provider's own id for the call, when it gave one.
+    pub(crate) provider_call_id: Option<String>,
 }
 
 /// The run took an edge. One per edge taken, so a step that moved the run
@@ -657,6 +678,8 @@ impl From<&CoreEvent> for StepEvent {
                 kind,
                 stage,
                 iteration,
+                ending,
+                provider_call_id,
             } => Self::Inference(InferenceStep {
                 attempt: attempt.clone(),
                 model: model.to_string(),
@@ -665,6 +688,9 @@ impl From<&CoreEvent> for StepEvent {
                 kind: InferenceCallKind::from(*kind),
                 stage: stage.as_ref().map(ToString::to_string),
                 iteration: super::saturating(*iteration),
+                ending: ending.label().to_string(),
+                cost_class: spend.class().label().to_string(),
+                provider_call_id: provider_call_id.clone(),
             }),
             CoreEvent::Transition(taken) => Self::Transition(TransitionStep {
                 transition: StageTransition::from(taken),

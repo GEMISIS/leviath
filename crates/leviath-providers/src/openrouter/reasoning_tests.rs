@@ -442,6 +442,8 @@ fn a_name_two_ids_share_means_one_model_everywhere() {
             output_per_mtok: 0.0,
             long_context: None,
             unit: None,
+            cache_write_1h_per_mtok: None,
+            unpriced_above: None,
         }),
         ..Default::default()
     };
@@ -473,6 +475,8 @@ fn a_bare_name_finds_its_listed_price() {
         output_per_mtok: 2.0,
         long_context: None,
         unit: None,
+        cache_write_1h_per_mtok: None,
+        unpriced_above: None,
     };
     provider.learned.replace(std::collections::HashMap::from([(
         "acme/vision-1".to_string(),

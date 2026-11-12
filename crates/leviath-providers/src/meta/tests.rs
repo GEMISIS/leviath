@@ -4,8 +4,13 @@ use super::*;
 use crate::provider::{Message, MessageContent, ProviderError};
 use leviath_testkit::{spawn_mock_recorder, spawn_mock_sequence, spawn_mock_server};
 
+/// Meta, answering at `url`: a mock stands in for Meta's own endpoint, so
+/// Meta's published prices still apply to it.
 fn provider(url: &str) -> MetaProvider {
-    MetaProvider::new(reqwest::Client::new(), "meta-key".into()).with_base_url(Some(url.into()))
+    let mut meta = MetaProvider::new(reqwest::Client::new(), "meta-key".into())
+        .with_base_url(Some(url.into()));
+    meta.endpoint.list_priced = true;
+    meta
 }
 
 /// A stage's effort reaches Muse as `reasoning.effort`.
@@ -64,7 +69,7 @@ async fn an_inference_replays_meta_reasoning_and_drops_what_meta_refuses() {
         .expect("inference");
     assert_eq!(response.content, "done");
     assert_eq!(response.tokens_used.cached_tokens, 40);
-    assert_eq!(response.tokens_used.reported_cost_usd, None);
+    assert_eq!(response.tokens_used.priced_cost(None), None);
     let body: serde_json::Value = serde_json::from_str(&bodies.lock().unwrap()[0]).unwrap();
     assert_eq!(body["store"], false);
     assert_eq!(body["max_output_tokens"], 4096);
@@ -357,7 +362,7 @@ async fn a_media_model_runs_through_both_entry_points_and_the_listing_skips_a_na
     let buffered = meta.infer(&request("muse-image-1.0")).await.unwrap();
     assert_eq!(buffered.parts.len(), 1);
     assert_eq!(
-        buffered.tokens_used.reported_cost_usd,
+        buffered.tokens_used.priced_cost(None),
         Some(0.01),
         "priced per image"
     );

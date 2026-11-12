@@ -60,6 +60,7 @@ impl Provider for AnswersOnce {
                 cache_write_tokens: 0,
                 total_tokens: 10,
                 reported_cost_usd: None,
+                terms: Default::default(),
             },
             finish_reason: FinishReason::Stop,
             reasoning: None,

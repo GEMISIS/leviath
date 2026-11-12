@@ -42,6 +42,9 @@ pub(crate) struct TitleJob {
     pub request: InferenceRequest,
     /// The per-model pool permit, held for the call.
     pub permit: InferencePermit,
+    /// What each trip's call is accounted under, or `None` in a world with
+    /// nowhere to account to.
+    pub ticket: Option<crate::open_calls::CallTicket>,
 }
 
 /// The completed result of a title trip: the model's raw reply, or the
@@ -57,15 +60,10 @@ pub(crate) struct TitleOutcome {
     /// that is exactly the shape a reasoning model returns when it spends the
     /// budget thinking.
     pub finish_reason: Option<leviath_providers::FinishReason>,
-    /// What the call billed, when it completed. `None` for a call that failed
-    /// or timed out, which is the only case where nothing was served.
-    pub usage: Option<leviath_providers::TokenUsage>,
     /// The provider that served the call.
     pub provider_name: String,
     /// The model the call targeted.
     pub model: String,
-    /// That model's rates, resolved while the provider handle was in scope.
-    pub pricing: Option<leviath_providers::ModelPricing>,
 }
 
 /// A title call held on the run from its first trip until `collect_title`
@@ -93,6 +91,8 @@ pub(crate) struct TitleCall {
     policy: crate::inference_bridge::RetryPolicy,
     /// Where the schedule stands.
     clock: RetryClock,
+    /// What each trip's call is accounted under.
+    ticket: Option<crate::open_calls::CallTicket>,
 }
 
 /// One title trip: what its task needs and nothing it decides.
@@ -106,6 +106,8 @@ struct TitleAttempt {
     guard: bool,
     deadline: tokio::time::Instant,
     job_timeout: Duration,
+    /// What the call is accounted under.
+    ticket: Option<crate::open_calls::CallTicket>,
 }
 
 impl TitleCall {
@@ -129,11 +131,13 @@ impl TitleCall {
             model,
             request,
             permit,
+            ticket,
         } = job;
         let call = Self {
             provider,
             provider_name,
             model,
+            ticket,
             request: Arc::new(request),
             _permit: permit,
             clock: RetryClock::start(&policy),
@@ -154,6 +158,7 @@ impl TitleCall {
             guard,
             deadline: self.clock.deadline(),
             job_timeout: self.policy.job_timeout,
+            ticket: self.ticket.clone(),
         }
     }
 
@@ -171,6 +176,11 @@ impl TitleCall {
     ) {
         let lost = (sink.clone(), stage.wake.clone());
         let (lost_provider, lost_model) = (self.provider_name.clone(), self.model.clone());
+        let lost_call = crate::open_calls::LostCall {
+            ticket: self.ticket.clone(),
+            provider: self.provider.clone(),
+            runtime: stage.runtime.clone(),
+        };
         crate::lane_supervisor::spawn_supervised(
             &stage.runtime,
             "title",
@@ -180,15 +190,15 @@ impl TitleCall {
                 stage.wake.clone(),
             ),
             move |message| {
+                // A call the dead trip had sent is settled here, as one that
+                // was cut off.
+                lost_call.settle();
                 let _ = lost.0.send(TitleOutcome {
                     entity,
                     result: Err(ProviderError::Other(message)),
                     finish_reason: None,
-                    // Nothing was served, so nothing was billed.
-                    usage: None,
                     provider_name: lost_provider,
                     model: lost_model,
-                    pricing: None,
                 });
                 lost.1.notify_one();
             },
@@ -235,10 +245,8 @@ impl TitleCall {
             entity,
             result: Err(title_timed_out(self.policy.job_timeout)),
             finish_reason: None,
-            usage: None,
             provider_name: self.provider_name.clone(),
             model: self.model.clone(),
-            pricing: None,
         }
     }
 }
@@ -266,7 +274,10 @@ async fn run_title_attempt(
         guard,
         deadline,
         job_timeout,
+        ticket,
     } = attempt;
+    let sent =
+        crate::open_calls::Sent::new(ticket.as_ref(), provider.as_ref(), &provider_name, &model);
     let trip = async {
         // The same pre-flight guard as the stage lane, inside the same
         // deadline. A title request is a few hundred tokens and almost never
@@ -277,23 +288,33 @@ async fn run_title_attempt(
             crate::inference_bridge::guard_context_window(provider.as_ref(), &request, None)
                 .await?;
         }
-        provider.infer(&request).await
+        sent.begin(&leviath_core::execution::mint_attempt_id());
+        sent.scope(provider.infer(&request)).await
     };
     // The usage travels beside the reply rather than being folded into it: the
     // collect system wants the title, the run's accounting wants the tokens,
     // and dropping the half this channel had no use for is how the title call
     // came to be billed and counted nowhere.
-    let (result, usage, finish_reason) = match tokio::time::timeout_at(deadline, trip).await {
-        Ok(Ok(r)) => (Ok(r.content), Some(r.tokens_used), Some(r.finish_reason)),
-        Ok(Err(e)) => (Err(e), None, None),
-        Err(_) => (Err(title_timed_out(job_timeout)), None, None),
+    // Whatever comes back, the call is accounted for before the outcome is
+    // reported: a title the sanitizer rejects was still served and billed.
+    let (result, finish_reason) = match tokio::time::timeout_at(deadline, trip).await {
+        Ok(Ok(r)) => {
+            sent.answered(&r.tokens_used, &r.finish_reason);
+            (Ok(r.content), Some(r.finish_reason))
+        }
+        Ok(Err(e)) => {
+            sent.failed(&e).await;
+            (Err(e), None)
+        }
+        Err(_) => {
+            sent.cut_off().await;
+            (Err(title_timed_out(job_timeout)), None)
+        }
     };
     let _ = results.send(TitleOutcome {
         entity,
         result,
         finish_reason,
-        usage,
-        pricing: provider.pricing(&model),
         provider_name,
         model,
     });

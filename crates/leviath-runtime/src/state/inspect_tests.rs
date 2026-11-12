@@ -536,7 +536,7 @@ fn ledger() -> p::StageLedger {
     r.cost_priced_usd = 0.5;
     r.cost_is_exact = false;
     r.cost_usd = None;
-    r.unpriced_calls = 1;
+    r.unknown_calls = 1;
     r.computed_calls = 1;
     r.reported_calls = 2;
     r.models = vec![
@@ -698,10 +698,12 @@ async fn a_busy_run_reads_every_field_from_its_components() {
     let active = &s.ledger[1];
     assert_eq!(active.spend.computed_calls, 1);
     assert_eq!(active.spend.reported_calls, 2);
-    assert_eq!(active.spend.unpriced_calls, 1);
-    assert!(!active.spend.cost_unknown, "a call went unpriced");
-    assert!(s.ledger[3].spend.cost_unknown);
-    assert!(!s.ledger[0].spend.cost_unknown);
+    // Counted with no reason given: a call nothing priced.
+    assert_eq!(active.spend.unknown.no_price, 1);
+    assert_eq!(active.spend.unknown_calls(), 1);
+    // No cost and no call counted: recorded without one.
+    assert_eq!(s.ledger[3].spend.unknown.not_recorded, 1);
+    assert!(s.ledger[0].spend.is_exact());
     assert_eq!(active.models.len(), 2);
     assert_eq!(active.models[1].provider, None);
     assert_eq!(active.visits[0].clock.banked_secs, 4);

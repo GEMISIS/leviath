@@ -62,6 +62,7 @@ fn a_call_is_kept_whole() {
             transient: true,
             capacity: true,
             next: Retry::RenewedFiles,
+            sent: None,
         },
     ));
     assert_eq!(
@@ -71,6 +72,7 @@ fn a_call_is_kept_whole() {
             transient: true,
             capacity: true,
             next: RetryState::RenewedFiles,
+            sent: None,
         }
     );
     assert_eq!(count(usize::MAX), u32::MAX);

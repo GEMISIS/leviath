@@ -106,6 +106,92 @@ same list.
   field. `ApprovalGrant`, `GrantKey`, `GrantKeyKind`, `GrantBlocker`, `GrantBlockerReason`,
   `outside_path_key` and `outside_path_of` are new. `leviath_runtime::control_socket::Streamed::Event`
   holds its event in a `Box`, since an event carrying a request is larger by that field.
+- **Breaking.** A run's cost is exact or it says it is not. Every model call a run sends is
+  recorded, whether it answered, failed after it was sent, or was cut off by a deadline, a
+  cancel or a daemon that stopped, and each call's cost is in one of three classes: reported
+  (the provider stated the amount billed), computed (the reply's whole usage at the rate table)
+  or unknown, with the reason. Nothing is estimated: a run with one unknown call has no total.
+  A call that never left the machine costs nothing and is not counted (#1115).
+  - A failed, cut or cancelled call is settled where it ends. Usage the provider finished with
+    before the failure is its cost. OpenRouter's `GET /generation?id=` is read for the amount
+    charged, by the id in the call's first header; the whole lookup ends within 15 seconds. A
+    request refused outright with 401, 402, 404 or 429, with no reply opened and no usage
+    arrived, was never run and costs nothing; Google and OpenRouter charge no request they
+    answer with an error, at their own endpoints. Anything else is unknown, a status named
+    inside a reply that had begun (streamed, or an error inside a buffered reply) and a request
+    that was sent twice included.
+  - A call in flight is not unknown. While a run is going, a call that is out is counted in
+    `calls_in_flight` and nowhere else, `cost_usd` stays what the calls that landed came to, and
+    `cost_is_exact` is false until it lands: a run polled in the middle of a call shows a dollar
+    figure and a count. `calls_in_flight` is on the run record, each stage and each visit, REST
+    `tree-status` has it with `subtree_calls_in_flight` (also on `GET /api/runs/tree`), GraphQL
+    `CostBreakdown` has `callsInFlight`, and `lev stages` and the dashboard show the figure so
+    far with how many calls are in flight.
+  - A call still out on a run that has ended is `not_settled`, an unknown like any other, until
+    its cost is settled: a few seconds while a lookup runs, and until the next start when the
+    daemon stopped in the middle of one. A finished run stays loaded while a call of its own is
+    in flight, and for up to 30 seconds from when that call began to settle, and a paused run is
+    not paged out while a call of its own is out. A call that reports after its run was unloaded
+    is written to the run's file. A daemon that stops does not wait for a lookup in flight; the
+    call stays on the run's list in its file and is settled at the next start, for a finished
+    run as well as one that is brought back. One call is one record, whichever of those settles
+    it. A fork takes none of its source's calls or jobs.
+  - A figure Leviath worked out is never labelled as the provider's. Media costs computed from
+    unit prices (Veo, Sora, speech, transcription, Meta and Bedrock images, Lyria) are computed,
+    not reported, and are priced by what came back: the seconds a finished video says it has, or
+    that its MP4 plays for. A media reply with no quantity, and a reply with no usage at all, is
+    unknown rather than $0.
+  - The rate table prices only what it was written for. A row covers the model it names and its
+    dated snapshots, not a model that shares its family name. The table is the vendor's own
+    endpoint's: behind a `base_url` of your own, only a `[model_capabilities]` rate prices a
+    call. A reply that names a service tier other than the ordinary one, counts audio or image
+    tokens, or ran a server tool is unknown. Anthropic's hour-long cache write is priced at twice
+    the input rate. A reply is priced by the model it says answered. On OpenRouter with your own
+    upstream key, the cost is OpenRouter's fee plus the upstream's charge.
+  - `cost_is_exact` now means no call is unknown and none is in flight, where it meant every
+    call was reported.
+    `unpriced_calls` is `unknown_calls` on the run record, each stage and each visit, with
+    `unknown` beside it counting the calls by reason, and `reported_calls` and `computed_calls`
+    on the run. REST `tree-status` has `subtree_unknown_calls` and `subtree_unknown` in place of
+    `subtree_unpriced_calls`. GraphQL `CostBreakdown` has `reportedCalls`, `computedCalls`,
+    `unknownCalls`, `unknown { reason explanation calls }` and `includesChildren` in place of
+    `unpricedCalls`; a run's own `cost` leaves its child runs out and says so. The raw run-file
+    types have `StateSpend.unknownCalls` and `unknown` in place of `unpricedCalls` and
+    `costUnknown`, `ending`, `costClass` and `providerCallId` on an inference step, `sent` on a
+    failed attempt, and `openCalls` on a state.
+  - `lev stages` no longer marks a computed cost with `~`. It prints the run's own cost under
+    the table with what it rests on, and `--calls` lists every call. The dashboard header shows
+    a run's cost. A charge too small to show in four decimals is printed to six, so it does not
+    read as free.
+  - Run files move to layout 9. Layout 2 to 8 files are upgraded in place when the daemon
+    starts, the file as it was kept in the run's `legacy/` folder: each call a layout-8 file
+    recorded reads as answered, and a call it counted unpriced is unknown for want of a price.
+  - A summary made by a `summarize` context transform is billed to the run. Its calls were not
+    recorded at all.
+  - A media job that outlasts its stage's deadline is kept, and the call made again picks it up
+    rather than submitting, and paying for, another. The attempt that stopped waiting records
+    nothing and stays listed as the job's account, so one job is one cost: the attempt that
+    picks it up records what it came to, and a job the run gives up on (another model answered
+    in its place, the run ended or was continued, a finished run still held it when the daemon
+    started) is recorded once as a call that was cut off, `$0` on rates that charge nothing and
+    `no_lookup` otherwise. A run that has ended holds no job.
+  - The WebSocket `agent_spend` frame's `complete` now says whether the total is the run's
+    whole cost so far, the same question `cost_is_exact` answers: the cost of every call is
+    known and none is out. It used to say whether every call could be priced. The frame has
+    `calls_in_flight` beside it, and GraphQL's `SpendThresholdCrossedEvent` has `callsInFlight`.
+  - The run index is rebuilt once after the update, since what a run's summary says of its cost
+    changed meaning.
+- **Breaking, library.** `TokenUsage` has a `terms` field (`CallTerms`) and `cost()`, which
+  answers a `CallCost`. `CostTotals::unpriced_calls` is `unknown`, an `UnknownCalls`, and
+  `is_exact()` is true when it is empty. `ModelPricing` has `cache_write_1h_per_mtok` and
+  `unpriced_above`. `Provider` gains `call_usage` and `bills_no_error_answer`, both defaulted.
+  `leviath_providers::call_trace` and `leviath_providers::settle` are new, as is
+  `leviath_core::cost`. `StageCall` carries a `CallCost` in place of `cost_usd` and
+  `cost_reported`. In `leviath_runtime::state`, `Spend` holds `unknown` in place of
+  `unpriced_calls` and `cost_unknown`, `RunEvent::Inference` has `ending` and
+  `provider_call_id`, a failed `AttemptOutcomeState` has `sent`, and `RunState` has
+  `open_calls`. `RunMeta`, `StageRecord` and `StageVisitRecord` have `calls_in_flight`, and
+  `WorldEvent::Spend` has it too. `JobLog::keep` and `CallTrace::on_job` are new.
 - A stage that declares `image/png` and draws through OpenRouter's Images API gets a PNG. The
   declared type never reached the gateway, so `flux-3-image-klein` and `flux.2-flex` answered in
   their default JPEG. The first declared type whose format the model's entry in

@@ -9,10 +9,10 @@ use leviath_graphql_derive::mirror;
 use super::super::super::super::blocking::blocking;
 use super::super::super::super::core::segments::{self as core, SegmentRead};
 use super::super::super::error::IntoGraphql;
-use super::super::super::scalars::{BigInt, Decimal, Timestamp};
+use super::super::super::scalars::{BigInt, Timestamp};
 use super::super::run_detail::FinalOutput;
 use super::RunStatus;
-use super::support::{CostBreakdown, TokenUsage, as_i32};
+use super::support::{CostBreakdown, TokenUsage};
 use crate::runstate::RunMeta;
 
 /// The resolver state behind `RunSegment`: the segment and its answer.
@@ -99,13 +99,16 @@ impl RunSegment {
     /// What it cost itself, earlier segments left out.
     async fn cost(&self) -> CostBreakdown {
         let spend = &self.0.segment.spend;
-        let (cost_usd, cost_is_exact) = leviath_runtime::insert::place::cost(spend);
-        CostBreakdown {
-            cost_usd: cost_usd.map(Decimal),
-            cost_priced_usd: Decimal(spend.priced_usd),
-            cost_is_exact,
-            unpriced_calls: as_i32(spend.unpriced_calls as usize),
+        super::support::CostFigures {
+            cost_usd: spend.cost_usd(),
+            priced_usd: spend.priced_usd,
+            reported_calls: spend.reported_calls as usize,
+            computed_calls: spend.computed_calls as usize,
+            unknown: spend.unknown,
+            calls_in_flight: 0,
+            includes_children: false,
         }
+        .into()
     }
 
     /// The tool calls it made itself.

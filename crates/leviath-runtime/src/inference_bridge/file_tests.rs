@@ -165,6 +165,8 @@ fn setup(lost: usize, with_route: bool) -> Setup {
                 tool_catalog_version: "no-tools".to_string(),
             },
         }),
+        provider_name: String::new(),
+        ticket: None,
     };
     Setup {
         _dir: dir,
@@ -222,6 +224,9 @@ async fn a_gone_file_is_uploaded_again_and_the_call_retried_once() {
             transient: false,
             capacity: false,
             next: crate::runfile::record::Retry::RenewedFiles,
+            // The vendor answered that the file was gone, so the request
+            // went out.
+            sent: Some(true),
         },
     );
     assert_eq!(records[1].attempt, 2);

@@ -1300,6 +1300,7 @@ mod tests {
                 json: false,
                 regions: false,
                 visits: false,
+                calls: false,
             }),
             &MockRisky::default(),
         )

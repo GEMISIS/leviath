@@ -57,6 +57,7 @@ pub fn summary_of(spec: &RunSpec, state: &RunState, updated_at: i64) -> RunMeta 
             final_output: final_output.as_ref(),
             stage_models: leviath_core::run_meta::stage_models_of(&ledger.0),
             parked: Default::default(),
+            calls_out: state.open_calls.len(),
         },
         RunPosition {
             stage_index: place::stage_index(spec, state),
@@ -69,12 +70,6 @@ pub fn summary_of(spec: &RunSpec, state: &RunState, updated_at: i64) -> RunMeta 
     );
     if let Some(listed) = converted {
         meta.flags.empty_output = listed.empty_output;
-    }
-    // A cost an earlier release's record never named is not known, though
-    // no call was counted as unpriced.
-    if state.totals.spend.cost_unknown {
-        meta.cost_usd = None;
-        meta.cost_is_exact = false;
     }
     // A run that never entered a stage has no stage to name, though its
     // cursor has to point at one. A run from an earlier release that did not
@@ -126,6 +121,25 @@ pub fn context_snapshot(spec: &RunSpec, state: &RunState) -> ContextSnapshot {
 /// record kept none.
 pub fn stage_records(spec: &RunSpec, state: &RunState) -> Vec<StageRecord> {
     let mut records = place::stage_ledger(&standing(state)).0;
+    // A call that is out belongs to the stage and the visit it was made in,
+    // and neither reads as exact until it lands: in flight while the run is
+    // going, and not settled once the run has ended.
+    let ended = matches!(
+        state.status,
+        crate::state::RunStatus::Complete
+            | crate::state::RunStatus::Error(_)
+            | crate::state::RunStatus::Cancelled
+    );
+    for call in &state.open_calls {
+        let stage = records.iter_mut().find(|record| {
+            call.stage
+                .as_ref()
+                .is_some_and(|s| s.as_str() == record.name)
+        });
+        if let Some(record) = stage {
+            record.count_out(&call.visit, ended);
+        }
+    }
     for record in &mut records {
         record.active.get_or_insert_default();
         for visit in &mut record.visits {

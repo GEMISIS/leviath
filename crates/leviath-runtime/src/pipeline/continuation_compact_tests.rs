@@ -103,11 +103,7 @@ async fn a_continuation_summary_with_no_route_empties_the_region() {
 fn outcome(e: Entity, result: Result<Vec<(String, String)>, String>) -> CompactionOutcome {
     CompactionOutcome {
         entity: e,
-        usage: Vec::new(),
-        provider_name: "p".to_string(),
-        model: "m".to_string(),
         result: result.map_err(leviath_providers::ProviderError::Other),
-        pricing: None,
     }
 }
 

@@ -122,6 +122,7 @@ impl Provider for StubProvider {
                     cached_tokens: 0,
                     cache_write_tokens: 0,
                     reported_cost_usd: None,
+                    terms: Default::default(),
                 },
                 finish_reason: FinishReason::Complete,
                 reasoning: None,

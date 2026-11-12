@@ -1192,6 +1192,7 @@ mod tests {
             clock_now: 0,
             graph: None,
             accepts_messages: true,
+            cost: String::new(),
         }
     }
 

@@ -23,9 +23,10 @@
 //! first, and a run file an alpha build wrote in an earlier binary layout is
 //! upgraded, when this build carries the converter.
 //!
-//! A start reads only the runs that have not finished, found through the run
-//! index, so a home with a thousand finished runs starts as fast as an empty
-//! one.
+//! A start reads only the runs that have not finished, and the finished ones
+//! whose file still lists a model call as out, found through the run index,
+//! so a home with a thousand finished runs starts as fast as an empty one.
+//! A call a finished run still lists is settled then: nothing else would.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -200,7 +201,9 @@ pub(crate) fn resume_all(
     // file does not read is listed, failed and saying why, rather than left
     // out of the listing with its file looking unfinished.
     let mut held = Vec::new();
-    let found: Vec<Resumable> = crate::run_index::unfinished(runs_dir)
+    let on_disk = crate::run_index::recoverable(runs_dir);
+    let found: Vec<Resumable> = on_disk
+        .unfinished
         .iter()
         .filter_map(|dir| {
             read_run(dir)
@@ -234,12 +237,27 @@ pub(crate) fn resume_all(
         }
     }
     relink_tree(world, &placed);
+    settle_finished(world, &on_disk.unsettled);
     Recovered {
         reloaded: placed
             .into_iter()
             .map(|p| (p.spec.run_id.to_string(), world.own_agent(p.entity)))
             .collect(),
         held,
+    }
+}
+
+/// Settle the calls each finished run in `dirs` still lists as out. Such a
+/// call was out when a daemon stopped, or when the run was unloaded, and a
+/// finished run is never brought back, so this is where it is asked after
+/// and written to the run's file. Until then the run does not read as
+/// exact. A run whose file no longer reads is left as it is.
+fn settle_finished(world: &PipelineWorld, dirs: &[std::path::PathBuf]) {
+    for dir in dirs {
+        let Ok(tail) = crate::runstate::run_file::tail_in(dir) else {
+            continue;
+        };
+        world.settle_recorded_calls(&run_id_of(dir), &tail.state);
     }
 }
 

@@ -60,17 +60,102 @@ pub(crate) struct TokenUsage {
 }
 
 /// Spend for a run, a stage, or a subtree roll-up.
+///
+/// Every call that has landed is in one of three classes: the provider
+/// reported what it billed, the cost was computed from the call's whole
+/// usage and the rate table, or the cost is unknown. A total exists only
+/// while no call is unknown. A call still in flight is in none of them and
+/// in no figure: it is counted in `callsInFlight` until it lands.
 #[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct CostBreakdown {
-    /// Null is unknown, never free: some call in the run went unpriced.
+    /// Null is unknown, never free: the cost of some call could not be
+    /// learned. `unknown` says why.
     pub(crate) cost_usd: Option<Decimal>,
-    /// The priced subtotal, kept even while `costUsd` is null.
+    /// The subtotal of the calls with a figure, kept even while `costUsd` is
+    /// null.
     pub(crate) cost_priced_usd: Decimal,
-    /// True when every priced call carried the provider's own figure.
+    /// True when `costUsd` is the whole cost: the cost of every call is
+    /// known, reported by the provider or computed from the rate table, and
+    /// no call is in flight.
     pub(crate) cost_is_exact: bool,
-    /// Calls no provider priced.
-    pub(crate) unpriced_calls: i32,
+    /// Calls that are out and have not landed yet, on a run that is still
+    /// going. `costUsd` is what the calls that landed came to. A call still
+    /// out on a run that has ended is in `unknown` as `not_settled` instead.
+    /// Always 0 on a segment: calls in flight are counted on the run.
+    pub(crate) calls_in_flight: i32,
+    /// Calls whose cost the provider reported.
+    pub(crate) reported_calls: i32,
+    /// Calls whose cost was computed from the rate table.
+    pub(crate) computed_calls: i32,
+    /// Calls whose cost is unknown.
+    pub(crate) unknown_calls: i32,
+    /// Why, for each reason that has calls.
+    pub(crate) unknown: Vec<UnknownCost>,
+    /// Whether the figures cover the runs below this one too. False on a
+    /// run, a stage and a segment, which count their own calls; true on a
+    /// subtree roll-up.
+    pub(crate) includes_children: bool,
+}
+
+/// Calls whose cost is unknown for one reason.
+#[mirror(list)]
+#[derive(Debug, SimpleObject)]
+pub(crate) struct UnknownCost {
+    /// The reason's name: `no_usage`, `no_price`, `unmodelled_terms`,
+    /// `no_lookup`, `lookup_unanswered`, `not_recorded` or `not_settled`.
+    pub(crate) reason: String,
+    /// The reason in plain words.
+    pub(crate) explanation: String,
+    /// How many calls.
+    pub(crate) calls: i32,
+}
+
+/// What a spend's figures were read from.
+pub(crate) struct CostFigures {
+    /// The total, when every call has a figure.
+    pub(crate) cost_usd: Option<f64>,
+    /// The subtotal of the calls with one.
+    pub(crate) priced_usd: f64,
+    /// Calls the provider priced.
+    pub(crate) reported_calls: usize,
+    /// Calls priced from the rate table.
+    pub(crate) computed_calls: usize,
+    /// Calls with no figure, by reason.
+    pub(crate) unknown: leviath_core::cost::UnknownCalls,
+    /// Calls that are out and have not landed yet.
+    pub(crate) calls_in_flight: usize,
+    /// Whether the figures cover the runs below too.
+    pub(crate) includes_children: bool,
+}
+
+impl From<CostFigures> for CostBreakdown {
+    fn from(f: CostFigures) -> Self {
+        Self {
+            cost_usd: f.cost_usd.map(Decimal),
+            cost_priced_usd: Decimal(f.priced_usd),
+            cost_is_exact: f.unknown.is_empty() && f.calls_in_flight == 0,
+            calls_in_flight: i32::try_from(f.calls_in_flight).unwrap_or(i32::MAX),
+            reported_calls: i32::try_from(f.reported_calls).unwrap_or(i32::MAX),
+            computed_calls: i32::try_from(f.computed_calls).unwrap_or(i32::MAX),
+            unknown_calls: i32::try_from(f.unknown.total()).unwrap_or(i32::MAX),
+            unknown: unknown_costs(&f.unknown),
+            includes_children: f.includes_children,
+        }
+    }
+}
+
+/// Each reason that has calls, with how many.
+pub(crate) fn unknown_costs(unknown: &leviath_core::cost::UnknownCalls) -> Vec<UnknownCost> {
+    unknown
+        .reasons()
+        .into_iter()
+        .map(|(reason, calls)| UnknownCost {
+            reason: reason.label().to_string(),
+            explanation: reason.reason().to_string(),
+            calls: i32::try_from(calls).unwrap_or(i32::MAX),
+        })
+        .collect()
 }
 
 /// Elapsed working time: banked spans plus the one in progress.
@@ -100,7 +185,8 @@ pub(crate) struct RunTreeStatus {
     /// Token roll-up over the whole subtree, this run included.
     pub(crate) rollup: TokenUsage,
     /// Spend over the whole subtree, this run included. `costUsd` is null
-    /// once any run in it has an unpriced call; the rest add up regardless.
+    /// once any run in it has a call whose cost is unknown; the rest add up
+    /// regardless.
     pub(crate) cost: CostBreakdown,
     /// Every run's `workingSecs` added up, this run included. Agent-seconds:
     /// two workers busy side by side for a minute count two minutes.

@@ -87,11 +87,13 @@ pub(crate) fn attempt(a: &AttemptRecord) -> AttemptState {
                 transient,
                 capacity,
                 next,
+                sent,
             } => AttemptOutcomeState::Failed {
                 kind: kind.clone(),
                 transient: *transient,
                 capacity: *capacity,
                 next: retry(*next),
+                sent: *sent,
             },
         },
         finish_reason: some(&a.finish_reason),
@@ -140,6 +142,19 @@ pub(crate) fn question_kind(kind: &InteractionKind) -> QuestionKind {
 impl From<super::record::InferenceKind> for crate::state::journal::CallKind {
     fn from(k: super::record::InferenceKind) -> Self {
         use super::record::InferenceKind as K;
+        match k {
+            K::Stage => Self::Stage,
+            K::Compaction => Self::Compaction,
+            K::Title => Self::Title,
+            K::Routing => Self::Routing,
+        }
+    }
+}
+
+/// The kind of model call a run's state lists, as a usage record names it.
+impl From<crate::state::journal::CallKind> for super::record::InferenceKind {
+    fn from(k: crate::state::journal::CallKind) -> Self {
+        use crate::state::journal::CallKind as K;
         match k {
             K::Stage => Self::Stage,
             K::Compaction => Self::Compaction,

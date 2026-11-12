@@ -72,10 +72,12 @@ fn spend() -> Spend {
         cached_tokens: 10,
         cache_write_tokens: 5,
         priced_usd: 0.25,
+        unknown: leviath_core::cost::UnknownCalls {
+            no_price: 3,
+            ..Default::default()
+        },
         reported_calls: 1,
         computed_calls: 2,
-        unpriced_calls: 3,
-        cost_unknown: false,
     }
 }
 
@@ -670,6 +672,16 @@ fn state() -> CoreState {
         written: 600,
         last_progress_at: Some(1_700),
         remote_jobs: [("meshy/rig/task".to_string(), "task-1".to_string())].into(),
+        open_calls: vec![leviath_runtime::state::OpenCallState {
+            attempt: "a7".into(),
+            kind: Default::default(),
+            stage: Some(StageName::new("plan").expect("a name")),
+            visit: "v-1".into(),
+            iteration: 2,
+            model: ModelRef::parse("mock/gpt-mock").expect("a model"),
+            provider_call_id: Some("gen-7".into()),
+            opened_at: 1_650,
+        }],
     }
 }
 
@@ -789,6 +801,7 @@ fn delta() -> CoreDelta {
             Change::Written(600),
             Change::LastProgressAt(Some(1_700)),
             Change::RemoteJobs(s.remote_jobs.clone()),
+            Change::OpenCalls(s.open_calls.clone()),
         ],
         events: vec![
             RunEvent::Inference {
@@ -799,6 +812,8 @@ fn delta() -> CoreDelta {
                 kind: Default::default(),
                 stage: None,
                 iteration: 0,
+                ending: Default::default(),
+                provider_call_id: None,
             },
             RunEvent::Failover {
                 from: ModelRef::parse("mock/a").expect("a model"),
@@ -868,6 +883,7 @@ fn kept_facts() -> Vec<RunEvent> {
         transient: true,
         capacity: false,
         next,
+        sent: None,
     };
     let mut events = vec![
         attempt(AttemptOutcomeState::Succeeded, Some(CaptureState::Retained)),
@@ -1223,7 +1239,7 @@ async fn every_field_of_every_converted_type_resolves() {
     assert_eq!(wedged["phase"]["reason"], "no way out", "{wedged}");
 
     let step = &json["deltas"][0];
-    assert_eq!(step["changes"].as_array().map(Vec::len), Some(33));
+    assert_eq!(step["changes"].as_array().map(Vec::len), Some(34));
     assert_eq!(step["changes"][27]["files"]["stages"][0]["index"], 0);
     assert_eq!(step["changes"][28]["blobs"][0]["mimeType"], "image/png");
     assert_eq!(step["changes"][29]["grants"]["stageIndex"], 1);
@@ -1235,6 +1251,10 @@ async fn every_field_of_every_converted_type_resolves() {
     assert_eq!(full["lastProgressAt"], 1_700);
     assert_eq!(step["changes"][32]["remoteJobs"][0]["job"], "task-1");
     assert_eq!(full["remoteJobs"][0]["step"], "meshy/rig/task");
+    assert_eq!(step["changes"][33]["openCalls"][0]["attempt"], "a7");
+    assert_eq!(full["openCalls"][0]["providerCallId"], "gen-7");
+    assert_eq!(full["openCalls"][0]["model"], "mock/gpt-mock");
+    assert_eq!(full["openCalls"][0]["stage"], "plan");
     assert_eq!(step["changes"][24]["checkpoint"]["document"], "the plan");
     assert_eq!(full["checkpoint"]["round"], 2);
     assert_eq!(step["changes"][25]["held"][0]["code"], "UNAVAILABLE");

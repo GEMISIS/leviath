@@ -31,7 +31,7 @@ fn the_published_schemas_match_this_build() {
 /// The hash of the binary samples below as this build encodes them. When it
 /// changes, the binary layout changed: bump `LAYOUT_VERSION`, then record
 /// the new hash here.
-const LAYOUT_HASH: &str = "0105a37c57a8db0851093fc1b1b3a4214bd308f641ed7e834dab0ba41cb924a1";
+const LAYOUT_HASH: &str = "cd1c9cf947d1cc5bec1d0b88c5d13e07d3aeeda71ff5dea3b7906334b6493126";
 
 /// A fully populated sample of every frame type, so a change to any type's
 /// binary encoding changes the bytes.
@@ -138,7 +138,7 @@ fn the_binary_layout_matches_its_version() {
 /// The hash of [`structure`] over every frame type's schema, the frame kinds
 /// and the layout version. When it changes, a frame type changed shape: the
 /// message in [`the_frame_types_keep_their_structure`] says what to do.
-const STRUCTURE_HASH: &str = "5b301882a754f7f2c44434dab6c4550abf3ad1934ea3d91b73e5182937d4339a";
+const STRUCTURE_HASH: &str = "627a376bb1eef711a33a89fad7c9136e7c1a0ee5219de38992b5fac345526fa7";
 
 /// Keywords that only document a schema: how the readable form reads and what
 /// a field means. Postcard writes none of them.
@@ -242,8 +242,8 @@ fn the_fingerprint_names_this_layout() {
     assert_eq!(
         (super::LAYOUT_VERSION, hex::encode(super::FINGERPRINT)),
         (
-            8,
-            "507deb68ad34875226943112da903bed80610e25cb45a64030092f67e3f606ff".to_string()
+            9,
+            "b392f90395f7e65b4db25ea759a99c0b080884d2589282e94a06863f5abd5f7d".to_string()
         ),
     );
 }

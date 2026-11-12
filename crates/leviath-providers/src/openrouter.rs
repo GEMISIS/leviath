@@ -8,11 +8,15 @@ mod audio;
 #[cfg(feature = "openrouter")]
 mod catalog;
 #[cfg(feature = "openrouter")]
+mod generation;
+#[cfg(feature = "openrouter")]
 mod images;
 #[cfg(feature = "openrouter")]
 mod prefix;
 #[cfg(feature = "openrouter")]
 mod video;
+#[cfg(feature = "openrouter")]
+mod zdr;
 
 use crate::capabilities::{Match, Row};
 use crate::provider::{LimitsSource, ModelCapabilities};
@@ -35,6 +39,9 @@ use {
     std::collections::HashMap,
     std::pin::Pin,
 };
+/// OpenRouter's own endpoint.
+#[cfg(feature = "openrouter")]
+const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
 /// Send an assistant turn's reasoning back on it, the way OpenRouter documents
 /// for keeping a model's thinking across a tool call: its `reasoning_details`,
@@ -188,7 +195,7 @@ impl OpenRouterProvider {
         Self {
             client,
             api_key,
-            base_url: "https://openrouter.ai/api/v1".to_string(),
+            base_url: DEFAULT_BASE_URL.to_string(),
             rate_limiter: None,
             capability_overrides: HashMap::new(),
             warned_unknown: Default::default(),
@@ -746,47 +753,6 @@ impl OpenRouterProvider {
         .await
     }
 
-    /// GET `/endpoints/zdr`: every endpoint with a zero-retention policy,
-    /// remembered as the set of model ids that have at least one. Answers
-    /// how many models that is.
-    pub async fn read_zdr_endpoints(&self) -> Result<usize> {
-        let body = crate::provider::fetch_listing(
-            &self.client,
-            &format!("{}/endpoints/zdr", self.base_url),
-            &self.listing_headers(),
-            Some(crate::provider::SIDE_CALL_TIMEOUT_SECS),
-        )
-        .await?;
-        let rows = body
-            .get("data")
-            .and_then(|d| d.as_array())
-            .ok_or_else(|| ProviderError::InvalidResponse("Missing 'data' array".to_string()))?;
-        let models: std::collections::HashSet<String> = rows
-            .iter()
-            .filter_map(|row| row.get("model_id")?.as_str().map(str::to_string))
-            .collect();
-        let count = models.len();
-        *self
-            .zdr_models
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(models);
-        Ok(count)
-    }
-
-    /// Whether `model` has a zero-retention endpoint, once the list has
-    /// been read: `None` before then. A variant suffix (`:free`, `:nitro`)
-    /// names a routing preference on the same model, so it is dropped for
-    /// the lookup when the full id is not listed.
-    pub fn has_zdr_endpoint(&self, model: &str) -> Option<bool> {
-        let listed = self
-            .zdr_models
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let models = listed.as_ref()?;
-        let plain = model.split_once(':').map_or(model, |(id, _)| id);
-        Some(models.contains(model) || models.contains(plain))
-    }
-
     /// The id the listing keys the model `spelled` by: the full gateway id
     /// (`anthropic/claude-sonnet-5.5`) for a bare name, as `serves_model`
     /// resolves it, else the name as written.
@@ -866,6 +832,7 @@ impl Provider for OpenRouterProvider {
             images::Sent::Chat(response) => response,
             images::Sent::Drawn(drawn) => return Ok(drawn),
         };
+        generation::note(&response);
 
         let response_body: serde_json::Value = crate::provider::decode_json(response).await?;
 
@@ -919,6 +886,7 @@ impl Provider for OpenRouterProvider {
             images::Sent::Chat(response) => response,
             images::Sent::Drawn(drawn) => return Ok(crate::media::one_chunk(drawn)),
         };
+        generation::note(&response);
 
         // Reuse OpenAI SSE parser since the format is identical
         let peer = leviath_net::read_caps::peer_of(&response);
@@ -949,6 +917,19 @@ impl Provider for OpenRouterProvider {
             self.rate_limiter.as_ref(),
             Box::pin(stream),
         ))
+    }
+
+    async fn call_usage(&self, call_id: &str, _model: &str) -> Option<Result<crate::TokenUsage>> {
+        self.generation_usage(call_id).await
+    }
+
+    /// OpenRouter charges a request when it finishes and does not charge a
+    /// failed one, so a request it answered with an error status made no
+    /// generation and cost nothing. Those are OpenRouter's terms for its own
+    /// endpoint: an error from whatever answers at another `base_url` is not
+    /// OpenRouter's, and says nothing of what was charged.
+    fn bills_no_error_answer(&self) -> bool {
+        self.base_url.trim_end_matches('/') == DEFAULT_BASE_URL
     }
 
     async fn count_tokens(&self, text: &str, _model: &str) -> usize {

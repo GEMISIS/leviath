@@ -127,6 +127,27 @@ async fn a_video_is_started_polled_downloaded_and_priced_as_reported() {
     );
 }
 
+/// A job run on the account's own upstream key reports OpenRouter's fee
+/// alone, which is not what the clip cost.
+#[tokio::test]
+async fn a_video_made_on_the_accounts_own_key_has_no_whole_figure() {
+    let (url, _) = spawn_mock_sequence(vec![
+        accepted(),
+        status(json!({ "id": "job1", "status": "completed",
+            "usage": { "cost": 0.01, "is_byok": true } })),
+        (200, "OK", b"MP4".to_vec()),
+    ])
+    .await;
+    let response = provider(&url)
+        .infer(&request(OMNI, "a paper boat", video_stage()))
+        .await
+        .expect("a video");
+    assert_eq!(
+        response.tokens_used.cost(None),
+        leviath_core::cost::CallCost::Unknown(leviath_core::cost::CostUnknown::UnmodelledTerms)
+    );
+}
+
 /// The streaming path hands the clip on in its one chunk, and a job that
 /// reports no cost is recorded without one.
 #[tokio::test]

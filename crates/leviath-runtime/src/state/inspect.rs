@@ -127,6 +127,10 @@ pub fn inspect(world: &World, entity: Entity) -> Option<RunState> {
             .get::<crate::inference_call::RemoteJobs>(entity)
             .map(|j| j.0.jobs())
             .unwrap_or_default(),
+        open_calls: world
+            .get::<crate::open_calls::OpenCalls>(entity)
+            .map(crate::open_calls::OpenCalls::to_state)
+            .unwrap_or_default(),
     })
 }
 
@@ -311,9 +315,17 @@ fn clock_of(active: Option<leviath_core::run_meta::ActiveClock>) -> Clock {
 }
 
 /// A spend from the ledger's figures: its tokens, its priced subtotal, its
-/// calls as `[reported, computed, unpriced]`, and the cost it lists. A cost
-/// listed as unknown with no call unpriced is one its record never named.
-fn spend_of(tokens: [usize; 4], priced_usd: f64, calls: [usize; 3], cost: Option<f64>) -> Spend {
+/// calls as `[reported, computed, unknown]` with the reasons for the unknown
+/// ones, and the cost it lists. A record that counts unknown calls without
+/// reasons, or lists no cost with none counted, is reconciled
+/// ([`leviath_core::cost::UnknownCalls::reconciled`]).
+fn spend_of(
+    tokens: [usize; 4],
+    priced_usd: f64,
+    calls: [usize; 3],
+    unknown: leviath_core::cost::UnknownCalls,
+    cost: Option<f64>,
+) -> Spend {
     Spend {
         prompt_tokens: tokens[0] as u64,
         completion_tokens: tokens[1] as u64,
@@ -322,8 +334,7 @@ fn spend_of(tokens: [usize; 4], priced_usd: f64, calls: [usize; 3], cost: Option
         priced_usd,
         reported_calls: calls[0] as u32,
         computed_calls: calls[1] as u32,
-        unpriced_calls: calls[2] as u32,
-        cost_unknown: cost.is_none() && calls[2] == 0,
+        unknown: unknown.reconciled(calls[2], cost.is_some()),
     }
 }
 
@@ -350,7 +361,8 @@ fn stage_record_of(r: &leviath_core::run_meta::StageRecord) -> Option<StageRecor
                 r.cache_write_tokens,
             ],
             r.cost_priced_usd,
-            [r.reported_calls, r.computed_calls, r.unpriced_calls],
+            [r.reported_calls, r.computed_calls, r.unknown_calls],
+            r.unknown,
             r.cost_usd,
         ),
         models: r
@@ -378,7 +390,8 @@ fn stage_record_of(r: &leviath_core::run_meta::StageRecord) -> Option<StageRecor
                         v.cache_write_tokens,
                     ],
                     v.cost_priced_usd,
-                    [v.reported_calls, v.computed_calls, v.unpriced_calls],
+                    [v.reported_calls, v.computed_calls, v.unknown_calls],
+                    v.unknown,
                     v.cost_usd,
                 ),
                 clock: clock_of(v.active),
@@ -771,8 +784,7 @@ fn totals_of(t: &crate::persistence::TokenTotals) -> Totals {
             priced_usd: t.cost.priced_usd,
             reported_calls: t.cost.reported_calls as u32,
             computed_calls: t.cost.computed_calls as u32,
-            unpriced_calls: t.cost.unpriced_calls as u32,
-            cost_unknown: false,
+            unknown: t.cost.unknown,
         },
         tool_calls: t.tool_calls as u64,
     }

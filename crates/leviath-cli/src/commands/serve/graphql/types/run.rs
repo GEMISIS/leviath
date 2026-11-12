@@ -25,7 +25,7 @@ use super::super::filter::{MatchCx, run_relations};
 use super::super::paging::digest::canonical;
 use super::super::paging::order::{OrderDirection, Term};
 use super::super::paging::page::{page, weight};
-use super::super::scalars::{BigInt, Cursor, Decimal, Timestamp};
+use super::super::scalars::{BigInt, Cursor, Timestamp};
 use super::blueprint::Blueprint;
 use super::interaction::{Interaction, InteractionFilter, InteractionOrder, InteractionOutput};
 use super::run_detail::{
@@ -47,7 +47,9 @@ use support::{
     LogStageOptions, LogStream, RunTreeStatus, as_i32, bounded_page, signed, snapshot_point,
     tail_logs, unfiltered_history,
 };
-pub(crate) use support::{CostBreakdown, MetadataEntry, TokenUsage, WorkingClock};
+pub(crate) use support::{
+    CostBreakdown, CostFigures, MetadataEntry, TokenUsage, UnknownCost, WorkingClock, unknown_costs,
+};
 
 mod reads;
 mod segments;
@@ -191,12 +193,19 @@ impl Run {
 
     /// Spend roll-up for the whole run.
     async fn cost(&self) -> CostBreakdown {
-        CostBreakdown {
-            cost_usd: self.meta.cost_usd.map(Decimal),
-            cost_priced_usd: Decimal(self.meta.cost_priced_usd),
-            cost_is_exact: self.meta.cost_is_exact,
-            unpriced_calls: as_i32(self.meta.unpriced_calls),
+        CostFigures {
+            cost_usd: self.meta.cost_usd,
+            priced_usd: self.meta.cost_priced_usd,
+            reported_calls: self.meta.reported_calls,
+            computed_calls: self.meta.computed_calls,
+            unknown: self
+                .meta
+                .unknown
+                .reconciled(self.meta.unknown_calls, self.meta.cost_usd.is_some()),
+            calls_in_flight: self.meta.calls_in_flight,
+            includes_children: false,
         }
+        .into()
     }
 
     /// Whether the run was spawned unattended, so approvals resolve without
@@ -450,12 +459,16 @@ impl Run {
                 cached_tokens: BigInt(rollup.cached_tokens as i64),
                 cache_write_tokens: BigInt(rollup.cache_write_tokens as i64),
             },
-            cost: CostBreakdown {
-                cost_usd: rollup.cost_usd.map(Decimal),
-                cost_priced_usd: Decimal(rollup.cost_priced_usd),
-                cost_is_exact: rollup.cost_is_exact,
-                unpriced_calls: as_i32(rollup.unpriced_calls),
-            },
+            cost: CostFigures {
+                cost_usd: rollup.cost_usd,
+                priced_usd: rollup.cost_priced_usd,
+                reported_calls: rollup.reported_calls,
+                computed_calls: rollup.computed_calls,
+                unknown: rollup.unknown,
+                calls_in_flight: rollup.calls_in_flight,
+                includes_children: true,
+            }
+            .into(),
             working_secs: BigInt(rollup.working_secs as i64),
             working_now: as_i32(rollup.working_now),
             depth: as_i32(rollup.depth),

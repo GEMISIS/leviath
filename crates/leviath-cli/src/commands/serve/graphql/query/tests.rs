@@ -2154,13 +2154,11 @@ async fn the_tree_status_adds_up_the_subtree_spend() {
     crate::runstate::with_isolated_runs_dir_async("graphql-tree-cost", |_d| async move {
         create_run(&priced("root", None, 0.05)).expect("run written");
         create_run(&priced("worker-a", Some("root"), 0.10)).expect("run written");
-        let mut estimated = priced("worker-b", Some("root"), 0.20);
-        estimated.cost_is_exact = false;
-        create_run(&estimated).expect("run written");
+        create_run(&priced("worker-b", Some("root"), 0.20)).expect("run written");
 
         let answer = run_query(
             r#"{ run(id: "root") { treeStatus { cost {
-                   costUsd costPricedUsd costIsExact unpricedCalls } } } }"#,
+                   costUsd costPricedUsd costIsExact unknownCalls } } } }"#,
         )
         .await;
         assert!(answer.errors.is_empty(), "{:?}", answer.errors);
@@ -2172,10 +2170,10 @@ async fn the_tree_status_adds_up_the_subtree_spend() {
             "{cost}"
         );
         assert_eq!(
-            cost["costIsExact"], false,
-            "one worker's figure is an estimate"
+            cost["costIsExact"], true,
+            "no call in the subtree is unknown"
         );
-        assert_eq!(cost["unpricedCalls"], 0);
+        assert_eq!(cost["unknownCalls"], 0);
     })
     .await;
 }
@@ -2190,12 +2188,22 @@ async fn one_unpriced_call_below_makes_the_subtree_cost_unknown() {
         let mut helper = priced("helper", Some("worker"), 0.0);
         helper.cost_usd = None;
         helper.cost_priced_usd = 0.25;
-        helper.unpriced_calls = 2;
+        helper.unknown_calls = 2;
+        helper.unknown.no_lookup = 2;
         create_run(&helper).expect("run written");
 
         let answer = run_query(
-            r#"{ run(id: "root") { treeStatus { cost {
-                   costUsd costPricedUsd costIsExact unpricedCalls } } } }"#,
+            r#"{ run(id: "root") {
+                   cost { includesChildren unknownCalls }
+                   treeStatus { cost {
+                     costUsd costPricedUsd costIsExact unknownCalls includesChildren
+                     reportedCalls computedCalls unknown { reason explanation calls } } } }
+                 unknown: runs(filter: { cost: { unknown: { some: {
+                     reason: { eq: "no_lookup" }, calls: { gte: 2 } } } } }) {
+                   results { id } }
+                 unanswered: runs(filter: { finalOutput: { isNull: true },
+                     cost: { unknown: { some: { reason: { eq: "no_lookup" } } } } }) {
+                   total } }"#,
         )
         .await;
         assert!(answer.errors.is_empty(), "{:?}", answer.errors);
@@ -2209,11 +2217,27 @@ async fn one_unpriced_call_below_makes_the_subtree_cost_unknown() {
             (decimal(&cost["costPricedUsd"]) - 0.40).abs() < 1e-9,
             "{cost}"
         );
-        assert_eq!(cost["unpricedCalls"], 2);
+        assert_eq!(cost["unknownCalls"], 2);
         assert_eq!(
             cost["costIsExact"], false,
             "a run of unknown cost is not exact"
         );
+        // The figure says whose calls it covers, and why the unknown ones are.
+        assert_eq!(cost["includesChildren"], true);
+        assert_eq!(json["run"]["cost"]["includesChildren"], false);
+        assert_eq!(json["run"]["cost"]["unknownCalls"], 0);
+        assert_eq!(cost["unknown"][0]["reason"], "no_lookup");
+        assert_eq!(cost["unknown"][0]["calls"], 2);
+        assert_eq!(
+            cost["unknown"][0]["explanation"],
+            leviath_core::cost::CostUnknown::NoLookup.reason()
+        );
+        // And a run can be found by why its cost is unknown.
+        let found = json["unknown"]["results"].as_array().expect("a list");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0]["id"], "helper");
+        // The same beside a filter that has to open the run to answer.
+        assert_eq!(json["unanswered"]["total"], 1);
     })
     .await;
 }

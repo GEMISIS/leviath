@@ -618,11 +618,19 @@ impl Provider for XaiProvider {
             return Some(crate::ModelPricing::flat(0.0, 0.0));
         }
         let id = self.canonical(model);
-        self.capability_overrides
+        let at_vendor = self.endpoint.list_priced;
+        let declared = self
+            .capability_overrides
             .get(model)
-            .and_then(ModelCapabilityOverride::pricing)
-            .or_else(|| self.learned.get(&id).and_then(|m| m.pricing))
-            .or_else(|| crate::pricing::published_rates(PROVIDER_NAME, &id))
+            .and_then(ModelCapabilityOverride::pricing);
+        // After a declaration, the listing's own prices: they are this
+        // endpoint's, wherever it is. The published table is xAI's list
+        // price and stands for xAI alone.
+        let listed = self.learned.get(&id).and_then(|m| m.pricing);
+        match (declared, listed) {
+            (None, Some(listed)) => Some(listed),
+            (declared, _) => crate::pricing::rates_for(PROVIDER_NAME, &id, declared, at_vendor),
+        }
     }
 }
 

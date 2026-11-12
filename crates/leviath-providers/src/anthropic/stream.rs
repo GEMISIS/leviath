@@ -22,14 +22,54 @@ pub(super) fn anthropic_sse_stream<S>(inner: S) -> crate::provider::stream::Fram
 where
     S: Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
 {
-    let mut open_tool_block: Option<usize> = None;
+    let mut turn = Turn::default();
     crate::provider::stream::FramedStream::new(
         inner,
-        Box::new(move |buffer: &mut String| {
-            parse_sse_event(buffer, &mut open_tool_block).map(Some)
-        }),
+        Box::new(move |buffer: &mut String| parse_turn_event(buffer, &mut turn).map(Some)),
         None,
     )
+}
+
+/// What a stream's parser carries from one event to the next.
+#[derive(Debug, Default)]
+pub(super) struct Turn {
+    /// The call being streamed now.
+    pub(super) open_tool_block: Option<usize>,
+    /// The `usage` object `message_start` carried: the input and cache
+    /// counts, which the closing event repeats only in part.
+    pub(super) started: Option<serde_json::Value>,
+}
+
+/// [`parse_turn_event`] for a caller that carries only the open tool block
+/// between events.
+#[cfg(test)]
+pub(super) fn parse_sse_event(
+    buffer: &mut String,
+    open_tool_block: &mut Option<usize>,
+) -> Option<Result<StreamChunk>> {
+    let mut turn = Turn {
+        open_tool_block: *open_tool_block,
+        started: None,
+    };
+    let parsed = parse_turn_event(buffer, &mut turn);
+    *open_tool_block = turn.open_tool_block;
+    parsed
+}
+
+/// `closing`, the `usage` of a `message_delta`, laid over `started`, the
+/// `usage` of the `message_start` before it: each field the closing event
+/// carries with a value replaces the opening one's, and each it leaves out
+/// or sends as `null` stands as it was.
+fn overlaid(started: Option<&serde_json::Value>, closing: &serde_json::Value) -> serde_json::Value {
+    let mut whole = started
+        .and_then(serde_json::Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let said = closing.as_object().into_iter().flatten();
+    for (field, value) in said.filter(|(_, value)| !value.is_null()) {
+        whole.insert(field.clone(), value.clone());
+    }
+    serde_json::Value::Object(whole)
 }
 
 /// The content-block index an event names, when it names one. Anthropic
@@ -42,17 +82,18 @@ fn event_block_index(json: &serde_json::Value) -> Option<usize> {
         .map(|i| i as usize)
 }
 
-/// Parse a single SSE event from the buffer, consuming it if found.
-/// `open_tool_block` is the call being streamed now; see the field it names.
+/// Parse a single SSE event from the buffer, consuming it if found. `turn`
+/// is what the events before it left: the call being streamed now, and the
+/// usage the message opened with.
 ///
 /// `None` until a whole event has arrived, and for an event that carries
 /// nothing the collector needs. `Some(Err(..))` for Anthropic's own `error`
 /// event, which is the stream failing with the API's words: dropped, it left
 /// the stream to end with no stop reason, and that read as a connection that
 /// had died rather than as the overload or refusal it was.
-pub(super) fn parse_sse_event(
+pub(super) fn parse_turn_event(
     buffer: &mut String,
-    open_tool_block: &mut Option<usize>,
+    turn: &mut Turn,
 ) -> Option<Result<StreamChunk>> {
     // `None` until a whole event has arrived; the caller polls again with
     // more bytes.
@@ -87,7 +128,7 @@ pub(super) fn parse_sse_event(
         )));
     }
 
-    parse_event(&event_type, &json, open_tool_block).map(Ok)
+    parse_event(&event_type, &json, turn).map(Ok)
 }
 
 /// The error an in-stream `error` event stands for.
@@ -120,11 +161,7 @@ fn status_error(status: u16, failure: FailureKind, kind: &str, message: &str) ->
 /// One parsed event as a chunk, or `None` for one that carries nothing the
 /// collector needs. An event or a block this build does not read is said out
 /// loud before it is skipped, so a missing answer has a line in the log.
-fn parse_event(
-    event_type: &str,
-    json: &serde_json::Value,
-    open_tool_block: &mut Option<usize>,
-) -> Option<StreamChunk> {
+fn parse_event(event_type: &str, json: &serde_json::Value, turn: &mut Turn) -> Option<StreamChunk> {
     match event_type {
         "content_block_delta" => {
             let delta = json.get("delta")?;
@@ -170,7 +207,9 @@ fn parse_event(
                             // open, and never a fresh number: an index of its
                             // own splits one call into an id with no arguments
                             // and arguments with no id.
-                            index: event_block_index(json).or(*open_tool_block).unwrap_or(0),
+                            index: event_block_index(json)
+                                .or(turn.open_tool_block)
+                                .unwrap_or(0),
                             id: None,
                             name: None,
                             arguments_delta: partial.to_string(),
@@ -211,8 +250,8 @@ fn parse_event(
                     // The number the event carries, else the one after the last
                     // tool block: a second call must not overwrite the first.
                     let idx = event_block_index(json)
-                        .unwrap_or_else(|| open_tool_block.map_or(0, |open| open + 1));
-                    *open_tool_block = Some(idx);
+                        .unwrap_or_else(|| turn.open_tool_block.map_or(0, |open| open + 1));
+                    turn.open_tool_block = Some(idx);
                     Some(StreamChunk {
                         reasoning_delta: None,
                         delta: String::new(),
@@ -250,44 +289,62 @@ fn parse_event(
                 .and_then(|s| s.as_str())
                 .unwrap_or("end_turn");
 
-            let usage = json.get("usage");
-            let output_tokens = usage
-                .and_then(|u| u.get("output_tokens"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize;
+            // The last word on what the call used. Anthropic repeats the
+            // input counts here once anything moved them after the message
+            // began (a server tool reads more input), and then this event is
+            // the running total: what it says laid over what the message
+            // opened with, since it may repeat the input count and leave the
+            // cache counts out. With the output count alone it is the slice
+            // `message_start` left out.
+            let usage = json.get("usage").unwrap_or(&serde_json::Value::Null);
+            let repeats_input = usage.get("input_tokens").is_some_and(|n| !n.is_null());
+            let tokens = match repeats_input {
+                true => usage_of(&overlaid(turn.started.as_ref(), usage)).whole(),
+                false => usage_of(usage),
+            };
 
             Some(StreamChunk {
                 reasoning_delta: None,
                 delta: String::new(),
                 tool_calls: Vec::new(),
-                tokens: Some(TokenUsage::new(0, 0, 0, output_tokens)),
+                tokens: Some(tokens),
                 finish_reason: Some(AnthropicProvider::parse_stop_reason(stop_reason)),
                 reasoning: None,
                 parts: Vec::new(),
             })
         }
         "message_start" => {
-            // Extract input token count from message_start
-            let usage = json.get("message").and_then(|m| m.get("usage"));
-            let input_tokens = usage
-                .and_then(|u| u.get("input_tokens"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize;
-            let cached = usage
-                .and_then(|u| u.get("cache_read_input_tokens"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize;
-            let cache_write = usage
-                .and_then(|u| u.get("cache_creation_input_tokens"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize;
+            // The input counts, and Anthropic's own id for the call, which
+            // nothing can be looked up by but which says which call it was.
+            let message = json.get("message").unwrap_or(&serde_json::Value::Null);
+            if let Some(id) = message.get("id").and_then(|v| v.as_str()) {
+                crate::call_trace::note_call_id(id);
+            }
+            let opened = message.get("usage").unwrap_or(&serde_json::Value::Null);
+            turn.started = Some(opened.clone());
+            let mut tokens = usage_of(opened);
+            // The output count here is the few tokens written so far; the
+            // call's own comes with `message_delta`.
+            tokens = TokenUsage {
+                terms: tokens.terms.clone(),
+                ..TokenUsage::new(
+                    tokens.prompt_tokens,
+                    tokens.cached_tokens,
+                    tokens.cache_write_tokens,
+                    0,
+                )
+            };
+            tokens.terms.model = message
+                .get("model")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
 
-            if input_tokens > 0 || cached > 0 || cache_write > 0 {
+            if tokens.total_tokens > 0 {
                 Some(StreamChunk {
                     reasoning_delta: None,
                     delta: String::new(),
                     tool_calls: Vec::new(),
-                    tokens: Some(TokenUsage::new(input_tokens, cached, cache_write, 0)),
+                    tokens: Some(tokens),
                     finish_reason: None,
                     reasoning: None,
                     parts: Vec::new(),
@@ -307,4 +364,50 @@ fn parse_event(
             None
         }
     }
+}
+
+/// A `usage` object as Anthropic writes it, on a reply or on a stream event.
+///
+/// `input_tokens` is already exclusive of both cache counts, so it is the
+/// fresh figure [`TokenUsage`] wants. Beside the counts: how many of the
+/// cache writes were made to last an hour (billed above the five-minute
+/// write), the service tier the call was served on, and what the call was
+/// billed on that token rates do not cover: a server tool it ran, a region
+/// or a speed with a price of its own.
+pub(crate) fn usage_of(usage: &serde_json::Value) -> TokenUsage {
+    use crate::usage::count;
+    let mut parsed = TokenUsage::new(
+        count(usage, "/input_tokens"),
+        count(usage, "/cache_read_input_tokens"),
+        count(usage, "/cache_creation_input_tokens"),
+        count(usage, "/output_tokens"),
+    );
+    parsed.terms.cache_write_1h_tokens = count(usage, "/cache_creation/ephemeral_1h_input_tokens");
+    parsed.terms.service_tier = usage
+        .get("service_tier")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    for (path, term) in [
+        (
+            "/server_tool_use/web_search_requests",
+            "web_search_requests",
+        ),
+        ("/server_tool_use/web_fetch_requests", "web_fetch_requests"),
+    ] {
+        if count(usage, path) > 0 {
+            parsed.terms.extra_terms.push(term.to_string());
+        }
+    }
+    // A region or a speed other than the ordinary one multiplies every rate.
+    for (key, ordinary) in [
+        ("inference_geo", ["global", "not_available"]),
+        ("speed", ["standard", "standard"]),
+    ] {
+        if let Some(value) = usage.get(key).and_then(|v| v.as_str())
+            && !ordinary.contains(&value)
+        {
+            parsed.terms.extra_terms.push(format!("{key}:{value}"));
+        }
+    }
+    parsed
 }

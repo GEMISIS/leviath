@@ -101,6 +101,10 @@ pub(crate) struct CallFailure {
     pub(crate) capacity: bool,
     /// What happened next.
     pub(crate) next: RetryDecision,
+    /// Whether the request went out before it failed. False for one that
+    /// never left this machine, which cost nothing; null where nothing could
+    /// say.
+    pub(crate) sent: Option<bool>,
 }
 
 /// A model call, in full.
@@ -143,6 +147,7 @@ impl From<&AttemptState> for AttemptStep {
                 transient,
                 capacity,
                 next,
+                sent,
             } => (
                 AttemptOutcomeKind::Failed,
                 Some(CallFailure {
@@ -154,6 +159,7 @@ impl From<&AttemptState> for AttemptStep {
                         RetryState::SameModel => RetryDecision::SameModel,
                         RetryState::RenewedFiles => RetryDecision::RenewedFiles,
                     },
+                    sent: *sent,
                 }),
             ),
         };

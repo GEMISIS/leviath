@@ -51,7 +51,7 @@ impl From<&str> for ModelLimitsSource {
 /// billed by the image, the second of video, the clip or the character.
 ///
 /// Absent where the price file has no entry for the model, which is why a run
-/// can report an unpriced call rather than a cost of zero.
+/// can report a call whose cost is unknown rather than a cost of zero.
 #[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct ModelPricing {

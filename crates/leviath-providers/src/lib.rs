@@ -13,6 +13,7 @@
 pub mod anthropic;
 pub mod bedrock;
 pub(crate) mod call_ids;
+pub mod call_trace;
 pub mod capabilities;
 pub mod capability_cache;
 pub mod codex;
@@ -58,9 +59,11 @@ pub mod rate_limit;
 pub mod responses;
 pub mod retention;
 pub mod rhai_provider;
+pub mod settle;
 pub(crate) mod text_tools;
 pub use text_tools::flatten_tool_turns;
 pub mod tokenizer;
+mod usage;
 pub mod xai;
 
 #[cfg(test)]
@@ -70,6 +73,7 @@ mod test_support;
 pub use anthropic::AnthropicProvider;
 #[cfg(feature = "bedrock")]
 pub use bedrock::BedrockProvider;
+pub use call_trace::CallTrace;
 pub use capabilities::{LimitsSource, ModelCapabilities, ModelCapabilityOverride, ModelMime};
 pub use capability_cache::{CapabilityCache, CheckOutcome, ProviderCheck};
 #[cfg(feature = "openai-subscription")]
@@ -79,6 +83,7 @@ pub use endpoint::EndpointProvider;
 #[cfg(feature = "google")]
 pub use gemini::GeminiProvider;
 pub use learned::{LearnedModel, LearnedModels};
+pub use leviath_core::cost::{CallCost, CostClass, CostUnknown, UnknownCalls};
 #[cfg(feature = "meshy")]
 pub use meshy::MeshyProvider;
 pub use oauth::{ProviderAuthStore, ProviderGrant};
@@ -88,7 +93,7 @@ pub use ollama::OllamaProvider;
 pub use openai::OpenAIProvider;
 #[cfg(feature = "openrouter")]
 pub use openrouter::OpenRouterProvider;
-pub use pricing::{CostTotals, ModelPricing};
+pub use pricing::{CallTerms, CostTotals, ModelPricing};
 pub use provider::{
     ContentBlock, DEFAULT_INFERENCE_TIMEOUT_SECS, FailureKind, FinishReason, InferenceRequest,
     InferenceResponse, Message, MessageContent, ModelInfo, OPENING_TURN, OUTPUT_MIMES_KEY,

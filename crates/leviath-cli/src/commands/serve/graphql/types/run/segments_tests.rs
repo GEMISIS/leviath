@@ -85,7 +85,7 @@ async fn a_segment_reads_its_own_spend_answer_and_files() {
         reads,
         "{ segments { index current stage startedAt startedSeq lastSeq status forkedFrom
            usage { promptTokens completionTokens cachedTokens cacheWriteTokens }
-           cost { costUsd costPricedUsd costIsExact unpricedCalls }
+           cost { costUsd costPricedUsd costIsExact unknownCalls }
            toolCallCount finalOutput { content format stage submittedAt truncated } artifacts } }",
     )
     .await;
@@ -97,7 +97,8 @@ async fn a_segment_reads_its_own_spend_answer_and_files() {
     assert_eq!(first["status"], "COMPLETE");
     assert_eq!(first["forkedFrom"], "src-1");
     assert_eq!(first["usage"]["promptTokens"], 12);
-    assert_eq!(first["cost"]["costIsExact"], false);
+    assert_eq!(first["cost"]["costIsExact"], true);
+    assert_eq!(first["cost"]["unknownCalls"], 0);
     assert_eq!(first["toolCallCount"], 4);
     assert_eq!(first["finalOutput"]["content"], "red");
     assert_eq!(first["artifacts"][0], "cape.png");

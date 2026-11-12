@@ -250,6 +250,10 @@ pub(crate) struct InferenceCall {
     renew_next: bool,
     /// The run's log of the remote jobs the call submits.
     jobs: Option<leviath_providers::jobs::JobLog>,
+    /// What each trip's call is accounted under.
+    ticket: Option<crate::open_calls::CallTicket>,
+    /// The provider's name as the run's configuration has it.
+    provider_name: String,
 }
 
 impl InferenceCall {
@@ -268,6 +272,8 @@ impl InferenceCall {
             hydration,
             journal,
             jobs,
+            ticket,
+            provider_name,
         } = job;
         let call = Self {
             provider,
@@ -285,6 +291,8 @@ impl InferenceCall {
             renewed_files: false,
             renew_next: false,
             jobs,
+            ticket,
+            provider_name,
         };
         (call, refused)
     }
@@ -317,6 +325,8 @@ impl InferenceCall {
             deadline: self.clock.deadline(),
             job_timeout: self.policy.job_timeout,
             jobs: self.jobs.clone(),
+            ticket: self.ticket.clone(),
+            provider_name: self.provider_name.clone(),
         }
     }
 
@@ -336,6 +346,11 @@ impl InferenceCall {
         // reports one in its place.
         let lost_outcomes = outcomes.clone();
         let lost_wake = stage.wake.clone();
+        let lost_call = crate::open_calls::LostCall {
+            ticket: self.ticket.clone(),
+            provider: self.provider.clone(),
+            runtime: stage.runtime.clone(),
+        };
         crate::lane_supervisor::spawn_supervised(
             &stage.runtime,
             self.lane.name(),
@@ -346,14 +361,16 @@ impl InferenceCall {
                 cancel.clone(),
             ),
             move |message| {
+                // A call the dead trip had sent is still on the run's list
+                // of calls out, with nothing left to end it: it is settled
+                // here, as a call that was cut off.
+                lost_call.settle();
                 let _ = lost_outcomes.send(InferenceOutcome {
                     entity,
                     result: Err(ProviderError::Other(message)),
                     attempt_id: String::new(),
                     // The trip never got to measure itself.
                     latency: Duration::ZERO,
-                    // ...and never reached a provider, so it billed nothing
-                    // and needs no rates.
                     pricing: None,
                     attempt: None,
                 });
@@ -391,10 +408,13 @@ impl InferenceCall {
         };
         if next == Next::Done {
             outcome.latency = self.clock.elapsed();
-            // The call is over, answered or failed: the jobs it submitted are
-            // spent, and the run's file drops them on the step that records
-            // how it ended.
-            if let Some(jobs) = &self.jobs {
+            // An answered call's jobs are spent, and the run's file drops
+            // them on the step that records the answer. A failed call keeps
+            // the ones it still names: the provider is still running them
+            // (one it said failed is forgotten where it said so), and the
+            // run made to try again picks them up rather than paying for
+            // new ones.
+            if let (Some(jobs), true) = (&self.jobs, outcome.result.is_ok()) {
                 jobs.clear();
             }
         }

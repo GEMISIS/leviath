@@ -28,6 +28,13 @@ use crate::media::{self, Poll, images};
 #[cfg(feature = "openai")]
 use crate::provider::{InferenceRequest, InferenceResponse, ProviderError, Result};
 #[cfg(feature = "openai")]
+use leviath_core::cost::{CallCost, CostUnknown};
+
+/// The sizes a video model's per-second price is for. A larger frame is
+/// billed at a higher rate, which the per-second row does not carry.
+#[cfg(feature = "openai")]
+const ORDINARY_VIDEO_SIZES: [&str; 2] = ["720x1280", "1280x720"];
+#[cfg(feature = "openai")]
 use crate::responses::client::Endpoint;
 
 /// What a media model does.
@@ -377,6 +384,23 @@ async fn video(
     let response =
         crate::provider::check_http_response(response, endpoint.rate_limiter.as_ref()).await?;
     let bytes = media::body_bytes(response).await;
+    // The job is done, so OpenAI has billed it: by the length it made, at the
+    // size it made it. A size other than the ordinary one has a price of its
+    // own, which the per-second row is not.
+    let length = done.get("seconds").and_then(|s| {
+        s.as_str()
+            .and_then(|s| s.parse().ok())
+            .or_else(|| s.as_f64())
+    });
+    let ordinary_size = done
+        .get("size")
+        .and_then(Value::as_str)
+        .is_none_or(|size| ORDINARY_VIDEO_SIZES.contains(&size));
+    let cost = match ordinary_size {
+        true => media::unit_cost(billing.unit, length),
+        false => CallCost::Unknown(CostUnknown::UnmodelledTerms),
+    };
+    media::job_done(cost);
     // The job holding a copy at OpenAI is not needed once the file is read,
     // or could not be. A failed delete leaves it to expire, which OpenAI does
     // on its own.
@@ -386,15 +410,6 @@ async fn video(
     }
     bytes.map(|bytes| {
         let parts = vec![media::typed_blob("video/mp4", bytes, "video.mp4")];
-        let length = done
-            .get("seconds")
-            .and_then(|s| {
-                s.as_str()
-                    .and_then(|s| s.parse().ok())
-                    .or_else(|| s.as_f64())
-            })
-            .unwrap_or(0.0);
-        let cost = billing.unit.map(|u| u.cost(length));
         let summary = crate::jobs::noted(media::summary(&route(request), &parts), [note]);
         media::response(summary, parts, cost)
     })
@@ -463,13 +478,14 @@ async fn speech(
         vec![leviath_core::mime::Blob::new(mime, media::body_bytes(response).await?).named(&name)];
     // `tts-1` bills the characters sent; `gpt-4o-mini-tts` bills the seconds
     // of audio made, which the reply does not count, so they are read from
-    // the file. A file whose length cannot be read leaves the call unpriced.
-    let cost = billing.unit.and_then(|unit| match unit.unit {
-        crate::pricing::PriceUnit::AudioHour => {
-            media::audio_seconds(&parts[0]).map(|seconds| unit.cost(seconds / 3600.0))
+    // the file. A file whose length cannot be read leaves the cost unknown.
+    let quantity = match billing.unit.map(|unit| unit.unit) {
+        Some(crate::pricing::PriceUnit::AudioHour) => {
+            media::audio_seconds(&parts[0]).map(|seconds| seconds / 3600.0)
         }
-        _ => Some(unit.cost(text.chars().count() as f64 / 1_000_000.0)),
-    });
+        _ => Some(text.chars().count() as f64 / 1_000_000.0),
+    };
+    let cost = media::unit_cost(billing.unit, quantity);
     Ok(media::response(
         media::summary(&route(request), &parts),
         parts,
@@ -535,14 +551,17 @@ async fn transcribe(
         .trim()
         .to_string();
     let cost = match reply.pointer("/usage/type").and_then(Value::as_str) {
-        Some("tokens") => images::token_cost(billing.tokens.as_ref(), &reply),
+        Some("tokens") => match images::token_cost(billing.tokens.as_ref(), &reply) {
+            Some(usd) => CallCost::Computed(usd),
+            None => CallCost::Unknown(CostUnknown::NoPrice),
+        },
         _ => {
-            let seconds = reply
+            let hours = reply
                 .pointer("/usage/seconds")
                 .or_else(|| reply.get("duration"))
                 .and_then(Value::as_f64)
-                .unwrap_or(0.0);
-            billing.unit.map(|u| u.cost(seconds / 3600.0))
+                .map(|seconds| seconds / 3600.0);
+            media::unit_cost(billing.unit, hours)
         }
     };
     let transcript = serde_json::to_vec_pretty(&reply).expect("a JSON value serialises");

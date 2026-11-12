@@ -146,11 +146,18 @@ impl Dashboard {
             } else {
                 String::new()
             };
+            // The run's own calls, in dollars, when it has sent any: a
+            // figure, or `$?` for a cost that is unknown.
+            let cost_part = match agent.cost.is_empty() {
+                true => String::new(),
+                false => format!("  cost {}", agent.cost),
+            };
             format!(
-                "  ·  total {}↑ {}↓{}",
+                "  ·  total {}↑ {}↓{}{}",
                 format_tokens(agent.tokens_in),
                 format_tokens(agent.tokens_out),
                 cache_part,
+                cost_part,
             )
         } else {
             String::new()
@@ -239,6 +246,7 @@ mod tests {
             clock_now: 0,
             graph: None,
             accepts_messages: true,
+            cost: String::new(),
         }
     }
 
@@ -279,6 +287,25 @@ mod tests {
             .unwrap();
         let buf = rendered_buffer(&terminal);
         assert!(buf.contains("2 broken scripts"), "{buf}");
+    }
+
+    /// A run that has sent a call shows what its own calls cost, beside its
+    /// token totals.
+    #[test]
+    fn render_info_strip_shows_the_runs_cost() {
+        let backend = TestBackend::new(160, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-cost", AgentDisplayStatus::Complete);
+        agent.cost = "$? (1 unknown)".to_string();
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 160, 4);
+                dash.render_info_strip(f, area, &agent, 160);
+            })
+            .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("cost $? (1 unknown)"), "{buf}");
     }
 
     /// And a healthy run carries no badge at all.

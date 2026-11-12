@@ -46,14 +46,16 @@ pub enum WorldEvent {
         threshold_usd: f64,
         /// What the run has spent in total, in dollars.
         total_usd: f64,
-        /// Whether every call behind that total could be priced. When false
-        /// the real figure is higher by however much went unpriced.
-        ///
-        /// Not the same question as `RunMeta::cost_is_exact`, which asks
-        /// whether the priced calls carried the provider's own figure rather
-        /// than one reconstructed from rate cards. A total can be complete and
-        /// still be a reconstruction, so neither answers for the other.
+        /// Whether that total is the run's whole cost so far: the cost of
+        /// every call is known and no call is out. When false the real
+        /// figure is higher, by what the calls with an unknown cost were
+        /// charged and by what the calls still out come to. The same answer
+        /// as `RunMeta::cost_is_exact`.
         complete: bool,
+        /// Calls that are out and have not landed yet. They are not in the
+        /// total. The same count as `RunMeta::calls_in_flight`.
+        #[serde(default)]
+        calls_in_flight: usize,
         /// The stage the run was in when it crossed - the one doing the
         /// spending. The full per-stage breakdown is in the run's stage ledger.
         stage: String,
@@ -474,8 +476,8 @@ pub(super) struct Emitted {
     /// and because it makes the comparison exact - a sub-cent call still counts
     /// instead of rounding away.
     pub(super) cost_micros: u64,
-    /// Whether that figure covers every call. A run with unpriced calls has
-    /// spent at least this much, and the event says which it is.
+    /// Whether that figure covers every call. A run with a call whose cost is
+    /// unknown has spent at least this much, and the event says which it is.
     pub(super) cost_complete: bool,
     pub(super) terminal: bool,
     /// Why the run is parked, so a change of reason counts as a change worth
@@ -533,6 +535,7 @@ mod spend_tests {
             threshold_usd: 25.0,
             total_usd: 27.5,
             complete: true,
+            calls_in_flight: 0,
             stage: "analyze".into(),
         };
         assert_eq!(event.run_id(), "run-spendy");

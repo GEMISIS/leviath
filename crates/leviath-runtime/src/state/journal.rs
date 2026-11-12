@@ -88,6 +88,9 @@ pub enum AttemptOutcomeState {
         capacity: bool,
         /// What happened next.
         next: RetryState,
+        /// Whether the request went out before it failed: `Some(false)` for
+        /// one that never left this machine, `None` where nothing could say.
+        sent: Option<bool>,
     },
 }
 
@@ -211,6 +214,55 @@ impl CallKind {
             Self::Routing => "routing",
         }
     }
+}
+
+/// How a model call that was sent ended.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CallEnding {
+    /// The provider answered.
+    #[default]
+    Answered,
+    /// The provider, or the way to it, failed the call after it was sent.
+    Failed,
+    /// The run stopped waiting for it: a deadline, a cancel, a daemon that
+    /// stopped while it was out.
+    CutOff,
+}
+
+impl CallEnding {
+    /// The ending as one lowercase word: `answered`, `failed`, `cut_off`.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Answered => "answered",
+            Self::Failed => "failed",
+            Self::CutOff => "cut_off",
+        }
+    }
+}
+
+/// A model call that has been sent and is not yet accounted for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct OpenCallState {
+    /// The attempt's id, minted before the request went out.
+    pub attempt: String,
+    /// Which kind of call it is.
+    pub kind: CallKind,
+    /// The stage it was made for. `None` for a call no stage owns.
+    pub stage: Option<crate::spec::names::StageName>,
+    /// The visit of that stage it was made in, by the visit's id. Empty for
+    /// a call no stage owns.
+    pub visit: String,
+    /// The iteration it was made in.
+    pub iteration: u32,
+    /// The model it was sent to.
+    pub model: crate::spec::names::ModelRef,
+    /// The provider's own id for it, once the provider has given one.
+    pub provider_call_id: Option<String>,
+    /// When it was sent, in unix seconds.
+    pub opened_at: i64,
 }
 
 /// What changed a run's context.

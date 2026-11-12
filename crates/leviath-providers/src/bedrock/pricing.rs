@@ -86,6 +86,8 @@ impl Partial {
             output_per_mtok: output,
             long_context: None,
             unit: None,
+            cache_write_1h_per_mtok: None,
+            unpriced_above: None,
         })
     }
 }

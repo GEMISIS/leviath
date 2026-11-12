@@ -588,6 +588,7 @@ type TitleQuery = (
     Entity,
     &'static mut RunMetadata,
     &'static mut TitleCandidates,
+    Option<&'static crate::open_calls::OpenCalls>,
 );
 
 /// Dispatch system: start the title call for each [`PendingTitle`] run, on the
@@ -626,7 +627,7 @@ pub(crate) fn dispatch_title(
         )
     };
     let now = services.now();
-    for (entity, mut meta, mut chain) in agents.iter_mut() {
+    for (entity, mut meta, mut chain, open_calls) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
         if !enabled {
             tracing::debug!(run_id = %meta.run_id, "titling is switched off; skipping");
@@ -701,6 +702,17 @@ pub(crate) fn dispatch_title(
                 model,
                 request,
                 permit,
+                // No stage of its own: titling runs once at spawn, beside
+                // the run rather than inside any of its stages, and is billed
+                // to the run.
+                ticket: Some(crate::open_calls::CallTicket::new(
+                    &stage,
+                    entity,
+                    open_calls,
+                    crate::runfile::record::InferenceKind::Title,
+                    ("", ""),
+                    0,
+                )),
             },
             retry,
             &stage,
@@ -777,11 +789,7 @@ pub(crate) fn expire_title_hold(
 ///
 /// `&'static` is bevy's `WorldQuery` convention, not a claim about
 /// lifetimes: the borrow is bound when the query is fetched.
-type CollectTitleQuery = (
-    &'static mut RunMetadata,
-    Option<&'static mut crate::persistence::TokenTotals>,
-    &'static TitleCandidates,
-);
+type CollectTitleQuery = (&'static mut RunMetadata, &'static TitleCandidates);
 
 /// Collect system: store each finished title into its run's metadata.
 ///
@@ -805,12 +813,11 @@ pub(crate) fn collect_title(
     mut agents: Query<CollectTitleQuery, With<AwaitingTitle>>,
     mut calls: Query<&mut TitleCall>,
     stage: Option<Res<InferenceStage>>,
-    persist: Option<Res<crate::pipeline::JournalSender>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
     while let Ok(outcome) = results.0.try_recv() {
-        let Ok((mut meta, mut totals, chain)) = agents.get_mut(outcome.entity) else {
+        let Ok((mut meta, chain)) = agents.get_mut(outcome.entity) else {
             continue; // stale: agent cancelled/despawned since dispatch
         };
         crate::tick_scope::enter(outcome.entity);
@@ -825,33 +832,8 @@ pub(crate) fn collect_title(
         {
             continue;
         }
-        // Counted before the reply is examined. A title the sanitizer rejects
-        // was still served and still billed, and a run that reports less
-        // because its title came back empty would be reporting the one thing
-        // this cannot depend on.
-        if let Some(usage) = &outcome.usage {
-            crate::inference_usage::record_call(
-                totals.as_deref_mut(),
-                // No ledger: with no stage to name, this call belongs to the run
-                // and to no stage of it. Handing one over would match nothing
-                // anyway, and asking for it would put a component in this
-                // query for the sake of a lookup that cannot hit.
-                None,
-                persist.as_deref(),
-                Some(&meta),
-                &crate::inference_usage::CallUsage {
-                    kind: crate::runfile::record::InferenceKind::Title,
-                    // No stage of its own: titling runs once at spawn, beside
-                    // the run rather than inside any of its stages.
-                    stage: "",
-                    iteration: 0,
-                    provider: &outcome.provider_name,
-                    model: &outcome.model,
-                    usage,
-                    pricing: outcome.pricing,
-                },
-            );
-        }
+        // What the call cost is already the run's: the trip that made it
+        // reported it (see `open_calls`), whatever is made of the reply here.
         commands.entity(outcome.entity).remove::<AwaitingTitle>();
         // A failed call is the one outcome another provider can do better on,
         // so it is the one that moves down the chain. Re-arming `PendingTitle`
@@ -948,6 +930,7 @@ mod tests {
                         cached_tokens: 0,
                         cache_write_tokens: 0,
                         reported_cost_usd: None,
+                        terms: Default::default(),
                     },
                     finish_reason: self.finish_reason.clone(),
                     reasoning: None,
@@ -1053,6 +1036,7 @@ mod tests {
             wake: Arc::new(Notify::new()),
             runtime: Handle::current(),
             stream_inference: true,
+            spend: crate::open_calls::tests::sink(),
         });
         world.insert_resource(TitleSink(title_tx));
         (world, title_rx)
@@ -1305,6 +1289,7 @@ mod tests {
                     cached_tokens: 0,
                     cache_write_tokens: 0,
                     reported_cost_usd: None,
+                    terms: Default::default(),
                 },
                 finish_reason: leviath_providers::FinishReason::Complete,
                 reasoning: None,
@@ -1442,6 +1427,7 @@ mod tests {
                 model: "m".to_string(),
                 request: title_request("task", "flaky", "m"),
                 permit: pools.try_acquire("p", "m").expect("free"),
+                ticket: None,
             },
             crate::inference_bridge::RetryPolicy {
                 job_timeout: std::time::Duration::from_millis(100),
@@ -1488,6 +1474,7 @@ mod tests {
                 model: "m".to_string(),
                 request: title_request("task", "mock", "m"),
                 permit: pools.try_acquire("p", "m").expect("free"),
+                ticket: None,
             },
             instant_retry(),
             tx,
@@ -1562,6 +1549,7 @@ mod tests {
                 // the request on the counting side of the line.
                 request: title_request(&"t".repeat(2_000), "mock", "m"),
                 permit: pools.try_acquire("p", "m").expect("free"),
+                ticket: None,
             },
             instant_retry(),
             tx,
@@ -1582,7 +1570,6 @@ mod tests {
             !provider.inferred.load(std::sync::atomic::Ordering::SeqCst),
             "refused before the call, not after it"
         );
-        assert!(outcome.usage.is_none(), "nothing was served");
         // The provider would have answered had the request reached it, so the
         // refusal above is the guard's doing and not the mock's.
         let answered = provider
@@ -1616,6 +1603,7 @@ mod tests {
                 model: "m".to_string(),
                 request: title_request("task", "mock", "m"),
                 permit: pools.try_acquire("p", "m").expect("free"),
+                ticket: None,
             },
             instant_retry(),
             tx,
@@ -1722,10 +1710,8 @@ mod tests {
             entity: e,
             result: Ok("Second Time Lucky".to_string()),
             finish_reason: Some(leviath_providers::FinishReason::Complete),
-            usage: None,
             provider_name: "live".to_string(),
             model: "m2".to_string(),
-            pricing: None,
         })
         .unwrap();
         world.insert_resource(TitleResults(rx));
@@ -1876,6 +1862,7 @@ mod tests {
                 model: "m".to_string(),
                 request: title_request("task", "mock", "m"),
                 permit: pools.try_acquire("p", "m").expect("free"),
+                ticket: None,
             },
             crate::inference_bridge::RetryPolicy {
                 job_timeout: std::time::Duration::from_millis(5),
@@ -2119,10 +2106,8 @@ mod tests {
             entity: ghost,
             result: Ok("t".to_string()),
             finish_reason: Some(leviath_providers::FinishReason::Complete),
-            usage: None,
             provider_name: "mock".to_string(),
             model: "m".to_string(),
-            pricing: None,
         })
         .unwrap();
         world.insert_resource(TitleResults(rx));
@@ -2572,101 +2557,6 @@ mod tests {
         assert_eq!(sanitize_title("<reasoning>no closing tag here"), "");
     }
 
-    /// The title call bills like any other, so its usage has to ride the
-    /// outcome channel beside the reply the collector wants. Dropping it leaves
-    /// a run's reported spend short by one call it definitely made.
-    #[test]
-    fn a_title_call_is_counted_against_the_run_that_paid_for_it() {
-        let mut world = World::new();
-        let entity = world
-            .spawn((
-                metadata(Some("mock/m")),
-                awaiting(),
-                TitleCandidates::default(),
-                crate::persistence::TokenTotals::default(),
-            ))
-            .id();
-        let (tx, rx) = mpsc::unbounded_channel();
-        tx.send(TitleOutcome {
-            entity,
-            result: Ok("Release notes".to_string()),
-            finish_reason: Some(leviath_providers::FinishReason::Complete),
-            usage: Some(leviath_providers::TokenUsage {
-                prompt_tokens: 900,
-                completion_tokens: 12,
-                cached_tokens: 3,
-                cache_write_tokens: 4,
-                total_tokens: 912,
-                reported_cost_usd: None,
-            }),
-            provider_name: "mock".to_string(),
-            model: "m".to_string(),
-            pricing: None,
-        })
-        .unwrap();
-        world.insert_resource(TitleResults(rx));
-        run_collect(&mut world);
-
-        let totals = world
-            .get::<crate::persistence::TokenTotals>(entity)
-            .expect("totals");
-        assert_eq!(totals.prompt_tokens, 900);
-        assert_eq!(totals.completion_tokens, 12);
-        assert_eq!(totals.cached_tokens, 3);
-        assert_eq!(totals.cache_write_tokens, 4);
-        // And the reply still lands - counting it did not cost the feature.
-        assert_eq!(
-            world.get::<RunMetadata>(entity).unwrap().title.as_deref(),
-            Some("Release notes")
-        );
-    }
-
-    /// A reply the sanitizer throws away was still served and still billed.
-    /// Counting only titles that survive would make a run's reported cost
-    /// depend on whether the model happened to answer usefully.
-    #[test]
-    fn a_rejected_title_is_still_counted() {
-        let mut world = World::new();
-        let entity = world
-            .spawn((
-                metadata(Some("mock/m")),
-                awaiting(),
-                TitleCandidates::default(),
-                crate::persistence::TokenTotals::default(),
-            ))
-            .id();
-        let (tx, rx) = mpsc::unbounded_channel();
-        tx.send(TitleOutcome {
-            entity,
-            // Sanitizes to nothing, so no title is stored.
-            result: Ok("   ".to_string()),
-            finish_reason: Some(leviath_providers::FinishReason::Complete),
-            usage: Some(leviath_providers::TokenUsage {
-                prompt_tokens: 500,
-                completion_tokens: 1,
-                cached_tokens: 0,
-                cache_write_tokens: 0,
-                total_tokens: 501,
-                reported_cost_usd: None,
-            }),
-            provider_name: "mock".to_string(),
-            model: "m".to_string(),
-            pricing: None,
-        })
-        .unwrap();
-        world.insert_resource(TitleResults(rx));
-        run_collect(&mut world);
-
-        assert!(world.get::<RunMetadata>(entity).unwrap().title.is_none());
-        assert_eq!(
-            world
-                .get::<crate::persistence::TokenTotals>(entity)
-                .unwrap()
-                .prompt_tokens,
-            500
-        );
-    }
-
     /// A call that never reached a provider has nothing to attribute. Reporting
     /// a zero-token call would put a point on a token chart for a request that
     /// was never made.
@@ -2686,10 +2576,8 @@ mod tests {
             entity,
             result: Err(ProviderError::Other("down".to_string())),
             finish_reason: None,
-            usage: None,
             provider_name: "mock".to_string(),
             model: "m".to_string(),
-            pricing: None,
         })
         .unwrap();
         world.insert_resource(TitleResults(rx));

@@ -344,6 +344,9 @@ pub(crate) struct DashboardAgent {
     pub tokens_out: usize,
     /// Cumulative tokens read from provider cache.
     pub cached_tokens: usize,
+    /// What the run's own calls have cost: the figure, or `$?` with how many
+    /// calls are unknown. Empty before the run has sent a call.
+    pub cost: String,
     /// Inference turns taken in the current stage.
     pub iteration: usize,
     /// Rhai scripts this run needed and could not use.
@@ -807,6 +810,7 @@ mod tests {
             clock_now: 0,
             graph: None,
             accepts_messages: true,
+            cost: String::new(),
         };
         let cloned = agent.clone();
         assert_eq!(cloned.id, "run-1");

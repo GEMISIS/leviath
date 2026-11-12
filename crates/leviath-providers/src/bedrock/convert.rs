@@ -453,6 +453,20 @@ pub(super) fn parse_stop_reason(reason: &str) -> FinishReason {
     }
 }
 
+/// `usage` with the service tier the reply's envelope says the call was
+/// served on (`serviceTier`, as a word or as `{ "type": ... }`): Bedrock
+/// prices its priority and flex tiers apart from the ordinary one.
+pub(super) fn served_on(mut usage: TokenUsage, envelope: &Value) -> TokenUsage {
+    let tier = envelope.get("serviceTier");
+    let word = tier
+        .and_then(Value::as_str)
+        .or_else(|| tier.and_then(|t| t.get("type")).and_then(Value::as_str));
+    if let Some(word) = word {
+        usage.terms.service_tier = Some(word.to_string());
+    }
+    usage
+}
+
 /// A `usage` object as [`TokenUsage`].
 ///
 /// Bedrock's `inputTokens` is the fresh figure: the two cache counts are
@@ -528,7 +542,7 @@ pub(super) fn parse_response(body: &Value) -> Result<InferenceResponse> {
         reasoning_summary: None,
         content,
         tool_calls,
-        tokens_used: parse_usage(body.get("usage")),
+        tokens_used: served_on(parse_usage(body.get("usage")), body),
         finish_reason: parse_stop_reason(stop_reason),
         reasoning: reasoning_blob(&reasoning),
         parts: Vec::new(),
@@ -539,6 +553,22 @@ pub(super) fn parse_response(body: &Value) -> Result<InferenceResponse> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tier a call was served on comes as a word or as an object naming
+    /// it, and a reply that names none leaves the usage as it was.
+    #[test]
+    fn the_tier_a_call_was_served_on_is_read_off_the_envelope() {
+        let usage = || TokenUsage::new(1, 0, 0, 1);
+        let word = served_on(usage(), &serde_json::json!({ "serviceTier": "flex" }));
+        assert_eq!(word.terms.service_tier.as_deref(), Some("flex"));
+        let object = served_on(
+            usage(),
+            &serde_json::json!({ "serviceTier": { "type": "priority" } }),
+        );
+        assert_eq!(object.terms.service_tier.as_deref(), Some("priority"));
+        let none = served_on(usage(), &serde_json::json!({}));
+        assert_eq!(none.terms.service_tier, None);
+    }
     use crate::provider::{SystemBlock, Tool};
 
     fn caps() -> ModelCapabilities {

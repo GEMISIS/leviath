@@ -372,6 +372,41 @@ fn a_continuation_with_nothing_to_summarize_asks_for_none() {
     assert!(world.get::<PendingEdgeCompact>(entity).is_none());
 }
 
+/// A job the segment that ended left running is not the next segment's to
+/// pick up. The run is placed holding none, and the call that stood for the
+/// job is still on its list, to be recorded as given up.
+#[test]
+fn a_continued_run_holds_none_of_the_jobs_its_last_segment_left() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = finished(RunStatus::Complete);
+    state.remote_jobs = [("p/m/video".to_string(), "job-1".to_string())].into();
+    state.open_calls = vec![crate::state::OpenCallState {
+        attempt: "stood".into(),
+        kind: Default::default(),
+        stage: None,
+        visit: String::new(),
+        iteration: 1,
+        model: crate::spec::names::ModelRef::parse("p/m").unwrap(),
+        provider_call_id: Some("job-1".into()),
+        opened_at: 1,
+    }];
+    let prepared = prepare(dir.path(), resumable(state), message("m"), None).unwrap();
+    let mut world = World::new();
+    let entity = place(&mut world, prepared, crate::spec::env::Bindings::new());
+    let held = world
+        .get::<crate::inference_call::RemoteJobs>(entity)
+        .unwrap();
+    assert!(held.0.jobs().is_empty(), "the job is not this segment's");
+    let open = world.get::<crate::open_calls::OpenCalls>(entity).unwrap();
+    let listed = open.calls();
+    assert_eq!(listed.len(), 1);
+    assert!(listed[0].carries, "still standing for it, until recorded");
+    // The run is going and no longer holds the job: it is given up.
+    let given = open.give_up(false, &held.0.jobs(), 9);
+    assert_eq!(given.calls.len(), 1);
+    assert_eq!(given.calls[0].job.as_deref(), Some("job-1"));
+}
+
 /// A run placed with its continuation's message still waiting (a restart
 /// came between) asks again for the summaries the continuation wanted.
 #[test]
@@ -511,6 +546,19 @@ fn a_fork_writes_a_new_run_and_leaves_its_source_alone() {
     state
         .children
         .push(crate::spec::names::RunId::new("c-1").unwrap());
+    // A call the source had out when it was cut off, and a job it holds:
+    // both are the source's own.
+    state.open_calls = vec![crate::state::OpenCallState {
+        attempt: "cut".into(),
+        kind: Default::default(),
+        stage: None,
+        visit: String::new(),
+        iteration: 1,
+        model: crate::spec::names::ModelRef::parse("mock/m").unwrap(),
+        provider_call_id: Some("gen-1".into()),
+        opened_at: 3,
+    }];
+    state.remote_jobs = [("p/m/video".to_string(), "job-1".to_string())].into();
     let mut source = resumable(state);
     source.code = crate::runfile::reader_tests::code();
     let forked = fork(
@@ -526,6 +574,10 @@ fn a_fork_writes_a_new_run_and_leaves_its_source_alone() {
         source.spec.run_id.to_string()
     );
     assert_eq!(forked.state.totals, Default::default());
+    // The fork is charged for nothing the source sent.
+    assert!(forked.state.open_calls.is_empty());
+    assert!(forked.state.remote_jobs.is_empty());
+    assert_eq!(source.state.open_calls.len(), 1, "the source keeps its own");
     assert!(forked.state.children.is_empty());
     assert!(forked.state.final_output.is_none());
     assert_eq!(forked.state.context, source.state.context);
@@ -533,6 +585,7 @@ fn a_fork_writes_a_new_run_and_leaves_its_source_alone() {
     assert!(crate::runfile::blob_path(&new_dir, &blob).is_file());
     let read = crate::restore::read_for_resume(&new_dir).unwrap().unwrap();
     assert_eq!(read.state.status, RunStatus::Complete);
+    assert!(read.state.open_calls.is_empty() && read.state.remote_jobs.is_empty());
     assert_eq!(read.spec.run_id.as_str(), "new-1");
     // The source is as it was.
     assert_eq!(

@@ -426,8 +426,7 @@ fn spend(tokens: u64) -> Spend {
         priced_usd: 0.5,
         reported_calls: 1,
         computed_calls: 1,
-        unpriced_calls: 0,
-        cost_unknown: false,
+        unknown: Default::default(),
     }
 }
 
@@ -475,7 +474,10 @@ fn mid_run() -> RunState {
             status: StageStatus::Active,
             entered: true,
             spend: Spend {
-                unpriced_calls: 1,
+                unknown: leviath_core::cost::UnknownCalls {
+                    no_price: 1,
+                    ..Default::default()
+                },
                 ..spend(20)
             },
             clock: Clock {
@@ -703,9 +705,10 @@ fn a_mid_run_state_is_placed_exactly() {
     assert_eq!(ledger[0].visit_count, 1);
     assert_eq!(ledger[0].visits[0].left_at, Some(2));
     assert_eq!(ledger[0].visits[0].active.unwrap().banked_secs, 5);
+    // Every call in it has a figure, one reported and one computed.
     assert_eq!(
         (ledger[0].cost_usd, ledger[0].cost_is_exact),
-        (Some(0.5), false)
+        (Some(0.5), true)
     );
     assert_eq!(ledger[0].models[0].provider, "p");
     assert_eq!(ledger[0].region_tokens["task"], 12);

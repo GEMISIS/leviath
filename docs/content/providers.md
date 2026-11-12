@@ -1041,14 +1041,25 @@ writes its result to an S3 bucket, which a Bedrock API key cannot read.
 **xAI, Grok and Meta** have their own image, video and speech models; see [xAI](#xai) and
 [Meta](#meta).
 
-**Cost.** A media model is priced the way its vendor bills it. When the reply counts tokens, the
-tokens are the bill: OpenAI's image models, Gemini's image and speech models, and the `gpt-4o`
-transcription models. Otherwise the shipped price table gives a unit price per image, per second
-of video, per hour of audio, per million characters or per music clip. Those unit prices are read
-from LiteLLM by `cargo xtask prices`, which a weekly job runs. `gpt-4o-mini-tts` is billed by the
-second of audio it makes, and its reply does not say how long that is. Leviath reads the length
-from the MP3 or WAV it returns. A format it cannot measure (Opus, AAC, FLAC) leaves the call
-unpriced.
+**Cost.** A media model is priced the way its vendor bills it, by what came back and never by
+what was asked for. When the reply counts tokens, the tokens are the bill: OpenAI's image models,
+Gemini's image and speech models, and the `gpt-4o` transcription models. Otherwise the shipped
+price table gives a unit price per image, per second of video, per hour of audio, per million
+characters or per music clip. Those unit prices are read from LiteLLM by `cargo xtask prices`,
+which a weekly job runs. A cost worked out this way is recorded as computed, apart from the
+amounts a provider states itself (OpenRouter, xAI), which are recorded as reported.
+
+A video is billed by the seconds it plays: the finished job says how long that is on OpenAI and
+xAI, and Leviath reads it from the MP4 that comes back on Veo. `gpt-4o-mini-tts` is billed by the
+second of audio it makes, read from the MP3 or WAV it returns. A reply that names no length, a
+format that cannot be measured (Opus, AAC, FLAC), a video made at a larger frame than the
+per-second price is for, and an image asked for at a `quality` or `size` of its own all leave the
+call's cost unknown rather than priced at the flat rate.
+
+A job's cost is recorded by the attempt that sees it through. A job that outlasts its stage's
+deadline, or whose poll drops, is not forgotten: the provider is still running and billing it,
+so the attempt that stopped waiting records nothing, the job stays on the run, and the call made
+again picks it back up and records what it cost. Until then the run's cost is not exact.
 
 **Not offered here.** The realtime and live models (`gpt-realtime-*`, `gemini-*-live*`,
 `lyria-realtime-exp`) speak a streaming socket rather than a request.

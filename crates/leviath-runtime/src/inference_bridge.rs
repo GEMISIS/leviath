@@ -376,6 +376,13 @@ pub(crate) struct InferenceJob {
     /// The run's log of the remote jobs this call submits, which each trip
     /// runs inside, or `None` for a lane whose calls keep none (routing).
     pub jobs: Option<leviath_providers::jobs::JobLog>,
+    /// What each trip's call is accounted under, or `None` in a world with
+    /// nowhere to account to.
+    pub ticket: Option<crate::open_calls::CallTicket>,
+    /// The provider's name as the run's configuration has it, which is what
+    /// the call's cost is recorded under: the handle names itself, and that
+    /// is not always the name it is registered by.
+    pub provider_name: String,
 }
 
 /// What a call needs to record each of its attempts.
@@ -566,6 +573,7 @@ pub(crate) fn failed(
         transient: error.is_transient(),
         capacity: error.retry_advice().capacity,
         next,
+        sent: error.request_sent(),
     }
 }
 
@@ -740,12 +748,13 @@ pub(crate) struct InferenceOutcome {
     /// world replaces it with the whole call's, retries and backoff included,
     /// once it settles the call (see [`crate::inference_call`]).
     pub latency: std::time::Duration,
-    /// What the provider charges for the model this job called.
+    /// What the provider charges for the model that answered this job.
     ///
     /// Resolved here for the same reason `latency` is: this is the last place
     /// the `Arc<dyn Provider>` exists. By the time the outcome reaches the ECS
     /// only the provider's *name* survives, and a name cannot be asked its
-    /// rates. Used only when the response carried no cost of its own.
+    /// rates. The run's own account of the call is the trip's (see
+    /// [`crate::open_calls`]); this prices the same reply for telemetry.
     pub pricing: Option<leviath_providers::ModelPricing>,
     /// What the trip that produced this outcome reported about itself, for
     /// the world to journal and decide on. `None` when no trip was made: a
@@ -802,6 +811,11 @@ pub(crate) struct InferenceAttempt {
     pub job_timeout: Duration,
     /// The run's log of the remote jobs the call submits.
     pub jobs: Option<leviath_providers::jobs::JobLog>,
+    /// What the call is accounted under.
+    pub ticket: Option<crate::open_calls::CallTicket>,
+    /// The provider's name as the run's configuration has it, which is what
+    /// the call is recorded under.
+    pub provider_name: String,
 }
 
 /// What a trip came back with before it is reported: what the provider
@@ -813,9 +827,14 @@ type Trip = Result<(Result<InferenceResponse, ProviderError>, AttemptReport), Pr
 ///
 /// Meant to be spawned by the world, which holds the call and its pool permit
 /// for as long as it takes. A cancel drops the trip, aborting the request in
-/// flight, and reports nothing: the agent is already terminal, and the world
-/// frees the permit. If the results receiver has been dropped (the world is
-/// shutting down) the send is a harmless no-op.
+/// flight, and reports no outcome: the agent is already terminal, and the
+/// world frees the permit. If the results receiver has been dropped (the world
+/// is shutting down) the send is a harmless no-op.
+///
+/// However the trip ends, a call whose request was handed to the provider is
+/// accounted for before this returns: an answer by what it used, and a
+/// failure, a deadline or a cancel by what [`crate::open_calls::Sent`] can
+/// learn of it, which may wait a short while on the provider's own record.
 pub(crate) async fn run_attempt(
     attempt: InferenceAttempt,
     results: UnboundedSender<InferenceOutcome>,
@@ -836,8 +855,16 @@ pub(crate) async fn run_attempt(
         deadline,
         job_timeout,
         jobs,
+        ticket,
+        provider_name,
     } = attempt;
-    let pricing = provider.pricing(&request.model);
+    let sent = crate::open_calls::Sent::new(
+        ticket.as_ref(),
+        provider.as_ref(),
+        &provider_name,
+        &request.model,
+    )
+    .with_jobs(jobs.as_ref());
     // Refused before anything leaves the machine, uploads included.
     if let Some(refusal) = refused {
         let _ = results.send(InferenceOutcome {
@@ -875,6 +902,8 @@ pub(crate) async fn run_attempt(
         // the journal: the answer's own consequences name the attempt that
         // carried it.
         let id = leviath_core::execution::mint_attempt_id();
+        // From here the provider may bill the call, whatever comes back.
+        sent.begin(&id);
         // Timed around the call alone, so a provider answering slowly reads
         // differently from a run sitting out a backoff.
         let started = std::time::Instant::now();
@@ -891,10 +920,11 @@ pub(crate) async fn run_attempt(
             }
         };
         // Inside the run's job log, so a provider that polls a job it
-        // submitted picks it back up rather than paying for it again.
+        // submitted picks it back up rather than paying for it again, and
+        // inside the call's own trace, so what it learns of itself is kept.
         let answer = match jobs {
-            Some(jobs) => jobs.scope(call).await,
-            None => call.await,
+            Some(jobs) => sent.scope(jobs.scope(call)).await,
+            None => sent.scope(call).await,
         };
         let report = AttemptReport {
             id,
@@ -905,18 +935,30 @@ pub(crate) async fn run_attempt(
         Trip::Ok((answer, report))
     };
     // A cancel drops the trip - aborting the in-flight HTTP request rather
-    // than waiting out the deadline - and reports nothing.
+    // than waiting out the deadline - and reports no outcome. The call it cut
+    // off is still accounted for.
     let trip = tokio::select! {
         biased;
-        _ = cancel.cancelled() => return,
-        trip = tokio::time::timeout_at(deadline, trip) => trip,
+        _ = cancel.cancelled() => None,
+        trip = tokio::time::timeout_at(deadline, trip) => Some(trip),
     };
+    let Some(trip) = trip else {
+        sent.cut_off().await;
+        return;
+    };
+    let mut pricing = None;
     let (result, attempt_id, report) = match trip {
-        Ok(Ok((Ok(response), report))) => (Ok(response), report.id.clone(), Some(report)),
+        Ok(Ok((Ok(response), report))) => {
+            pricing = sent.answered(&response.tokens_used, &response.finish_reason);
+            (Ok(response), report.id.clone(), Some(report))
+        }
         // A failure names no attempt here: nothing downstream of a failed
         // call asks which trip refused it, and the attempt records are where
         // that question is answered.
-        Ok(Ok((Err(e), report))) => (Err(e), String::new(), Some(report)),
+        Ok(Ok((Err(e), report))) => {
+            sent.failed(&e).await;
+            (Err(e), String::new(), Some(report))
+        }
         Ok(Err(e)) => (Err(e), String::new(), None),
         // A timeout, said the same way the provider's own would have said it.
         // `ProviderError::Other` is neither transient nor `Unreachable`, so
@@ -926,7 +968,10 @@ pub(crate) async fn run_attempt(
         // - the *worse* of the two - kills it outright and throws away every
         // stage it finished. The wall is the same wall; only which timer
         // noticed differs.
-        Err(_elapsed) => (Err(job_timed_out(job_timeout)), String::new(), None),
+        Err(_elapsed) => {
+            sent.cut_off().await;
+            (Err(job_timed_out(job_timeout)), String::new(), None)
+        }
     };
     let _ = results.send(InferenceOutcome {
         entity,
@@ -1012,6 +1057,7 @@ mod tests {
                 cached_tokens: 0,
                 cache_write_tokens: 0,
                 reported_cost_usd: None,
+                terms: Default::default(),
             },
             finish_reason: leviath_providers::FinishReason::Complete,
             reasoning: None,
@@ -1022,7 +1068,7 @@ mod tests {
     /// A provider that returns a fixed success or error for `infer` (avoids
     /// cloning `ProviderError`, which isn't `Clone`).
     enum Fixed {
-        Ok(InferenceResponse),
+        Ok(Box<InferenceResponse>),
         Err(String),
     }
 
@@ -1033,7 +1079,7 @@ mod tests {
             _req: &InferenceRequest,
         ) -> leviath_providers::Result<InferenceResponse> {
             match self {
-                Fixed::Ok(r) => Ok(r.clone()),
+                Fixed::Ok(r) => Ok((**r).clone()),
                 Fixed::Err(m) => Err(ProviderError::Other(m.clone())),
             }
         }
@@ -1065,6 +1111,8 @@ mod tests {
             stream: false,
             hydration: None,
             journal: None,
+            provider_name: String::new(),
+            ticket: None,
         }
     }
 
@@ -1097,6 +1145,8 @@ mod tests {
             stream: false,
             hydration: None,
             journal: None,
+            provider_name: String::new(),
+            ticket: None,
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
         let cancel = crate::cancel::CancelToken::new();
@@ -1182,6 +1232,8 @@ mod tests {
             stream: false,
             hydration: None,
             journal: None,
+            provider_name: String::new(),
+            ticket: None,
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
         let policy = RetryPolicy {
@@ -1233,7 +1285,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let wake = Arc::new(Notify::new());
         run_inference_job(
-            job(Arc::new(Fixed::Ok(response("hi")))),
+            job(Arc::new(Fixed::Ok(Box::new(response("hi"))))),
             tx,
             wake.clone(),
             RetryPolicy::default(),
@@ -1426,6 +1478,8 @@ mod tests {
             stream: false,
             hydration: None,
             journal: None,
+            provider_name: String::new(),
+            ticket: None,
         }
     }
 
@@ -1621,7 +1675,7 @@ mod tests {
     async fn fixed_provider_metadata_is_exercised() {
         // Covers the mock's non-`infer` trait methods (the pipeline resolves
         // these off the provider elsewhere; here we just keep them measured).
-        let p = Fixed::Ok(response("x"));
+        let p = Fixed::Ok(Box::new(response("x")));
         assert_eq!(p.name(), "fixed");
         assert_eq!(p.count_tokens("t", "m").await, 1);
         assert_eq!(p.max_context_tokens("m"), 100_000);
@@ -1635,7 +1689,7 @@ mod tests {
         let wake = Arc::new(Notify::new());
         // Must not panic even though the send fails.
         run_inference_job(
-            job(Arc::new(Fixed::Ok(response("x")))),
+            job(Arc::new(Fixed::Ok(Box::new(response("x"))))),
             tx,
             wake,
             RetryPolicy::default(),
@@ -1776,6 +1830,8 @@ mod tests {
             stream: true,
             hydration: None,
             journal: None,
+            provider_name: String::new(),
+            ticket: None,
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
         run_inference_job(
@@ -1815,6 +1871,8 @@ mod tests {
             stream: false,
             hydration: None,
             journal: None,
+            provider_name: String::new(),
+            ticket: None,
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
         run_inference_job(
@@ -1967,12 +2025,20 @@ mod tests {
     }
 
     /// What one failed attempt reads as.
-    fn failure(kind: &str, transient: bool, capacity: bool, next: Retry) -> AttemptOutcome {
+    /// A failed attempt as its record keeps it, `sent` being what the error
+    /// said of its request.
+    fn failure(
+        kind: &str,
+        (transient, capacity): (bool, bool),
+        next: Retry,
+        sent: Option<bool>,
+    ) -> AttemptOutcome {
         AttemptOutcome::Failed {
             kind: kind.to_string(),
             transient,
             capacity,
             next,
+            sent,
         }
     }
 
@@ -1984,7 +2050,7 @@ mod tests {
         let mut answer = response("cut short");
         answer.finish_reason =
             leviath_providers::FinishReason::Unknown("content_filter".to_string());
-        let (job, mut lane) = journaled_job(Arc::new(Fixed::Ok(answer)));
+        let (job, mut lane) = journaled_job(Arc::new(Fixed::Ok(Box::new(answer))));
         let (tx, mut rx) = mpsc::unbounded_channel();
         run_inference_job(
             job,
@@ -2046,11 +2112,11 @@ mod tests {
         // reached-the-provider schedule; a 429 is both.
         assert_eq!(
             records[0].outcome,
-            failure("timeout", true, false, Retry::SameModel)
+            failure("timeout", (true, false), Retry::SameModel, None)
         );
         assert_eq!(
             records[1].outcome,
-            failure("", true, true, Retry::SameModel)
+            failure("", (true, true), Retry::SameModel, Some(true))
         );
         assert_eq!(records[2].outcome, AttemptOutcome::Succeeded);
         // Only the attempt that answered says how the answer ended.
@@ -2096,7 +2162,7 @@ mod tests {
         assert_eq!(records.len(), 1, "{records:?}");
         assert_eq!(
             records[0].outcome,
-            failure("", false, false, Retry::Reported)
+            failure("", (false, false), Retry::Reported, None)
         );
     }
 

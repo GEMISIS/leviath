@@ -32,6 +32,8 @@ fn entry() -> crate::commands::serve::types::ModelEntry {
             output_per_mtok: 10.0,
             long_context: None,
             unit: None,
+            cache_write_1h_per_mtok: None,
+            unpriced_above: None,
         }),
         input_types: vec!["text/*".to_string(), "image/*".to_string()],
         output_types: vec!["text/*".to_string()],

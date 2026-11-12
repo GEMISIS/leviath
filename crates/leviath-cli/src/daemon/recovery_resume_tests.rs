@@ -1402,3 +1402,58 @@ async fn a_taint_gate_question_waiting_at_a_restart_is_asked_again_without_a_new
         );
     }
 }
+
+/// A finished run whose file still lists a model call as out is not brought
+/// back, and nothing else would ever settle that call: so a starting daemon
+/// settles it where the run is, on disk. Until then the run does not read
+/// as exact; afterwards the call is off its list and in its totals.
+#[tokio::test]
+async fn a_finished_run_with_a_call_still_out_is_settled_at_start() {
+    use leviath_runtime::state::OpenCallState;
+    let agent = tempfile::tempdir().unwrap();
+    let runs = tempfile::tempdir().unwrap();
+    let manifest = manifest_in(agent.path(), ASKER);
+    let run_id = run_on_disk(Config::default(), registry(), runs.path(), &manifest);
+    change(runs.path(), &run_id, |s| {
+        s.status = RunStatus::Cancelled;
+        s.open_calls = vec![OpenCallState {
+            attempt: "cut".into(),
+            kind: Default::default(),
+            stage: Some(s.cursor.stage.clone()),
+            visit: String::new(),
+            iteration: 1,
+            model: leviath_runtime::spec::names::ModelRef::parse("anthropic/m").unwrap(),
+            provider_call_id: None,
+            opened_at: 1,
+        }];
+    });
+    let dir = runs.path().join(&run_id);
+    let listed = crate::runstate::read_meta_from(&dir).expect("the run reads");
+    assert!(!listed.cost_is_exact, "a call is still out");
+    assert_eq!(listed.unknown.not_settled, 1);
+    // A directory with nothing readable in it is passed over.
+    settle_finished(
+        &world_for(&starter(Config::default(), registry(), runs.path())),
+        &[runs.path().join("no-such-run")],
+    );
+
+    let starter = starter(Config::default(), registry(), runs.path());
+    let mut world = world_for(&starter);
+    let recovered = resume_all(&mut world, &starter, runs.path());
+    assert!(
+        recovered.reloaded.is_empty(),
+        "a finished run stays on disk"
+    );
+
+    let settled = drive_until(&mut world, |_| {
+        crate::runstate::run_file::tail_in(&dir).is_ok_and(|tail| tail.state.open_calls.is_empty())
+    })
+    .await;
+    assert!(settled, "the call is off the run's list");
+    let after = crate::runstate::read_meta_from(&dir).expect("the run reads");
+    assert_eq!(after.unknown.not_settled, 0);
+    // The fake provider keeps no record of a call, so what it cost is
+    // unknown for good, and says why.
+    assert_eq!(after.unknown.no_lookup, 1);
+    assert_eq!(after.status, leviath_core::run_meta::RunStatus::Cancelled);
+}

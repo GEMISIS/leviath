@@ -258,6 +258,24 @@ fn clearing_forgets_every_job() {
     assert_eq!(log.version(), 1);
 }
 
+/// A run that waits on some of its jobs no longer keeps the ones it is
+/// told to, by id, and counts a change only when it forgot one.
+#[test]
+fn keeping_some_jobs_forgets_the_rest() {
+    let log = JobLog::new(
+        [
+            ("a".to_string(), "1".to_string()),
+            ("b".to_string(), "2".to_string()),
+        ]
+        .into(),
+    );
+    log.keep(&|_| true);
+    assert_eq!(log.version(), 0, "nothing forgotten");
+    log.keep(&|id| id == "2");
+    assert_eq!(log.jobs(), [("b".to_string(), "2".to_string())].into());
+    assert_eq!(log.version(), 1);
+}
+
 #[test]
 fn notes_follow_the_summary() {
     assert_eq!(noted("made it".into(), [None, None]), "made it");
@@ -268,4 +286,53 @@ fn notes_follow_the_summary() {
         ),
         "made it\none\ntwo"
     );
+}
+
+/// A job still running when its call stopped waiting is kept for the call
+/// made again, where one the provider said failed is forgotten; and a job is
+/// the id its call is known by.
+#[tokio::test]
+async fn a_job_that_outlasts_the_wait_is_kept_and_names_its_call() {
+    let log = JobLog::default();
+    let trace = crate::CallTrace::new();
+    let waited: Result<Ran<()>> = trace
+        .scope(log.scope(submit_or_resume(
+            "p/m/video",
+            || async { Ok("job-1".to_string()) },
+            |_id| async { Err(still_running("it did not finish".into())) },
+        )))
+        .await;
+    let error = waited.unwrap_err();
+    assert_eq!(error.request_sent(), Some(true));
+    assert_eq!(
+        log.jobs().get("p/m/video").map(String::as_str),
+        Some("job-1")
+    );
+    // The job names the call, and is not an id to look a bill up by.
+    assert_eq!(trace.seen().job.as_deref(), Some("job-1"));
+    assert_eq!(trace.seen().call_id, None);
+
+    // Made again, the call picks the same job up and is known by it.
+    let again = crate::CallTrace::new();
+    let ran = again
+        .scope(log.scope(submit_or_resume(
+            "p/m/video",
+            || async { panic!("the job it holds is not submitted again") },
+            |id| async move { Ok(id) },
+        )))
+        .await
+        .unwrap();
+    assert_eq!(ran.value, "job-1");
+    assert_eq!(again.seen().job.as_deref(), Some("job-1"));
+
+    // A job the provider said failed is forgotten.
+    let failed: Result<Ran<()>> = log
+        .scope(submit_or_resume(
+            "p/m/video",
+            || async { panic!("it holds one") },
+            |_id| async { Err(ProviderError::Other("the job failed".into())) },
+        ))
+        .await;
+    assert!(failed.is_err());
+    assert!(log.jobs().is_empty());
 }

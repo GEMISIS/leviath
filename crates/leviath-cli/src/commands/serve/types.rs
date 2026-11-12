@@ -957,13 +957,18 @@ pub(super) struct AgentTreeNode {
     pub(super) iteration: usize,
     pub(super) prompt_tokens: usize,
     pub(super) completion_tokens: usize,
-    /// What this one agent spent, or `null` when some call it made could not be
-    /// priced. Never `0` for unknown: a total that drops what it could not price
-    /// reads as authoritative and understates.
+    /// What this one agent spent on its own calls, its child runs left out,
+    /// or `null` when the cost of some call it made is unknown. Never `0` for
+    /// unknown: a total that drops what it could not price reads as
+    /// authoritative and understates.
     pub(super) cost_usd: Option<f64>,
     /// This agent and everything below it. `null` when anything in that subtree
     /// is unpriced, for the same reason.
     pub(super) subtree_cost_usd: Option<f64>,
+    /// Calls in this subtree that are out and have not landed yet. They are
+    /// in neither figure until they land, so a figure beside a non-zero count
+    /// is what has been spent so far.
+    pub(super) subtree_calls_in_flight: usize,
     pub(super) children: Vec<AgentTreeNode>,
 }
 
@@ -977,16 +982,24 @@ pub(super) struct TreeStatusNode {
     pub(super) completion_tokens: usize,
     pub(super) subtree_prompt_tokens: usize,
     pub(super) subtree_completion_tokens: usize,
-    /// What this one agent spent, or `null` when some call it made could not be
-    /// priced.
+    /// What this one agent spent on its own calls, its child runs left out,
+    /// or `null` when the cost of some call it made is unknown.
     pub(super) cost_usd: Option<f64>,
     /// This agent and everything below it, which is the number somebody asking
     /// "what did this run cost" means. `null` when anything in the subtree is
     /// unpriced.
     pub(super) subtree_cost_usd: Option<f64>,
-    /// Calls in this subtree that carried no price. Non-zero is why
+    /// Calls in this subtree whose cost is unknown. Non-zero is why
     /// `subtree_cost_usd` is `null`, and says how much of the total is missing.
-    pub(super) subtree_unpriced_calls: usize,
+    pub(super) subtree_unknown_calls: usize,
+    /// Why, by reason: how many of those calls each reason accounts for.
+    pub(super) subtree_unknown: leviath_core::cost::UnknownCalls,
+    /// This agent's own calls that are out and have not landed yet. They are
+    /// not in `cost_usd` until they land.
+    pub(super) calls_in_flight: usize,
+    /// The same count for this agent and everything below it. While it is
+    /// not zero, `subtree_cost_usd` is what the subtree has spent so far.
+    pub(super) subtree_calls_in_flight: usize,
     /// Every run in this subtree's working seconds, added up at the moment
     /// the request was answered. Agent-seconds: two workers busy side by side
     /// for a minute count two minutes.

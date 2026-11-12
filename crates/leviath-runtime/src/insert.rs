@@ -86,6 +86,12 @@ pub fn insert(
         crate::inference_call::RemoteJobs(leviath_providers::jobs::JobLog::new(
             state.remote_jobs.clone(),
         )),
+        crate::open_calls::OpenCalls::for_run(
+            spec.run_id.as_str(),
+            &state.open_calls,
+            &state.remote_jobs,
+            chrono::Utc::now().timestamp(),
+        ),
     ));
     place::spec_components(&mut entity, &spec, &setup);
     place::optional_state(&mut entity, state);

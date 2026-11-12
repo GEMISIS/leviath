@@ -417,7 +417,7 @@ Everything else reads a file in the run's directory, and only when you ask for i
   run(id: "coder-1788924523-abc123") {
     id title status task ageSecs workingSecs iteration toolCallCount
     usage { promptTokens completionTokens cachedTokens }
-    cost { costUsd costPricedUsd costIsExact unpricedCalls }
+    cost { costUsd costPricedUsd costIsExact reportedCalls computedCalls unknownCalls unknown { reason calls } }
     currentStage { name index of }
     waitReason { reason needsAPerson blocker remedy outstanding }
     flags { emptyOutput producedOutput maxIterationsHit modifiedFileCount }
@@ -490,7 +490,7 @@ That is not the same question as "no stage ran on anything else", which is `none
       depth
       descendantCount
       rollup { promptTokens completionTokens }
-      cost { costUsd costPricedUsd unpricedCalls }
+      cost { costUsd costPricedUsd unknownCalls includesChildren }
       workingSecs
       workingNow
     }
@@ -512,9 +512,15 @@ same sort keys and the same cursors. `treeStatus` answers "what did this fan-out
 walking it: the roll-up covers every run below, at any depth. A parent that spent little and whose
 fifty workers spent a great deal is not a cheap run.
 
-`cost` is the whole subtree's spend. `costUsd` is null once any run in it has an unpriced call,
-because a sum of only the priced part would look right and be too low. `costPricedUsd` and
-`unpricedCalls` still add up, so the priced part and what is missing are both there.
+`cost` is the whole subtree's spend, and `includesChildren` is true on it. A run's own `cost`
+counts that run's calls alone, and says so with `includesChildren: false`. `costUsd` is null once
+any run in the subtree has a call whose cost is unknown, because a sum of only the rest would
+look right and be too low. `costPricedUsd` and `unknownCalls` still add up, so what is known and
+what is missing are both there, and `unknown { reason explanation calls }` says why.
+
+A call in flight is not unknown. While workers are mid-call `costUsd` is what has landed so far,
+`callsInFlight` counts the calls that are out, and `costIsExact` is false until they land. The
+same three fields read the same way on a run's own `cost` and on each stage.
 
 `workingSecs` adds up every run's own `workingSecs` at the moment of the request. It counts
 agent-seconds, so two workers busy side by side for a minute count two minutes. `workingNow` is how
