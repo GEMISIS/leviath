@@ -685,6 +685,88 @@ mod tests {
         );
     }
 
+    /// A tool approval carries what approving it for the stage or the run
+    /// would record, key by key, beside the labels that name the same keys;
+    /// one that records nothing carries the word that stops it and why.
+    #[tokio::test]
+    async fn the_open_request_carries_what_an_approval_records() {
+        use leviath_core::interaction::{GrantBlocker, GrantBlockerReason, GrantKeys};
+        let shown_for = |keys: GrantKeys| async move {
+            let (control, _dir, _srv) = fake_daemon(move |_| ControlResponse::Interactions {
+                interactions: vec![(
+                    "a1".to_string(),
+                    InteractionRequest::tool_approval(
+                        "ask-1",
+                        "shell",
+                        serde_json::json!({"command": "cp a b && test -x /abs/tool"}),
+                        "s",
+                        &keys,
+                    ),
+                )],
+            });
+            let req = Request::builder()
+                .method("GET")
+                .uri("/api/runs/a1/interaction")
+                .body(Body::empty())
+                .unwrap();
+            let resp = app_with(control).oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(resp.into_body(), 65536).await.unwrap();
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+        };
+
+        let path_key = leviath_core::interaction::outside_path_key("test", "/abs/tool");
+        let shown = shown_for(GrantKeys::same(&[
+            "shell:cp a".to_string(),
+            path_key.clone(),
+        ]))
+        .await;
+        assert_eq!(
+            shown["grant"]["run"],
+            serde_json::json!([
+                {"key": "shell:cp a", "kind": "program", "label": "cp a",
+                 "program": "cp a", "path": null},
+                {"key": path_key, "kind": "outside_path",
+                 "label": "test with /abs/tool (outside the working directory)",
+                 "program": "test", "path": "/abs/tool"},
+            ])
+        );
+        assert_eq!(shown["grant"]["stage"], shown["grant"]["run"]);
+        assert_eq!(shown["grant"]["blocked"], serde_json::json!([]));
+        assert_eq!(
+            shown["answer_options"][2]["label"],
+            "Allow cp a, test with /abs/tool (outside the working directory) for this run"
+        );
+
+        let shown = shown_for(GrantKeys {
+            stage: Vec::new(),
+            run: Vec::new(),
+            blocked: vec![GrantBlocker {
+                word: "$G".to_string(),
+                reason: GrantBlockerReason::ProgramFromVariable,
+                detail: "`$G` names the program at run time".to_string(),
+            }],
+        })
+        .await;
+        assert_eq!(
+            shown["grant"],
+            serde_json::json!({
+                "stage": [],
+                "run": [],
+                "blocked": [{
+                    "word": "$G",
+                    "reason": "program_from_variable",
+                    "detail": "`$G` names the program at run time",
+                }],
+            })
+        );
+        assert_eq!(
+            shown["answer_options"][2]["label"],
+            "Allow for this run (nothing reusable: `$G` names the program at run time - it will \
+             ask again)"
+        );
+    }
+
     // ─── send_message ────────────────────────────────────────────────────────
     #[tokio::test]
     async fn send_message_delivered() {

@@ -202,13 +202,40 @@ command for `bash`/`shell`, the path for the file tools). The prompt offers five
   run's record with the rest of the tool result.
 
 The two scoped options name what they grant, because a grant is not keyed on the tool. They name
-only the commands in the line that still need approving: the ones the safe list already runs are
-left out, so `cat notes.md && sed -n 1,5p notes.md` offers `Allow sed for this run`. Approving
-`make && cargo build` for the run grants `make` and `cargo build`, not "the shell": a later
-`make && curl evil` still asks, because `curl` was never approved. Approving `cargo build` does
-not approve `cargo publish`. A line the parser cannot read as a list of commands (a backtick, a
-heredoc, an `eval`, a program named by a variable) has nothing reusable to grant, and the prompt
-says so.
+every command in the line that still needs approving, however many there are. The ones the safe
+list already runs are left out, so `cat notes.md && sed -n 1,5p notes.md` offers
+`Allow sed for this run`. Approving `make && cargo build` for the run grants `make` and
+`cargo build`, not "the shell": a later `make && curl evil` still asks, because `curl` was never
+approved. Approving `cargo build` does not approve `cargo publish`.
+
+A line that hands a program one exact path outside the working directory, as a word of its own,
+names that too. `test -x /opt/tools/godot` offers
+`Allow test with /opt/tools/godot (outside the working directory) for this run`. Approving it
+covers `test` with that path for the rest of the run and nothing else. Another path asks, a path
+under or above it asks, and another program with the same path asks. The path is granted as the
+file it is, with symlinks and `..` resolved, so a second spelling of the same file is covered and
+a symlink that gets pointed somewhere new is not. The safe list never covers a path outside, and
+`outside_workdir = "deny"` refuses the line whatever was granted.
+
+Some lines have nothing reusable to grant: a line the parser cannot read as a list of commands (a
+backtick, an `eval`), a program named by a variable, a word the shell expands at run time, a path
+outside the working directory in an option or a redirect. The prompt says so, and says why, naming
+the word:
+
+```
+Allow for this run (nothing reusable: `$GODOT` names the program at run time - it will ask again)
+```
+
+Write the program out, or the path as a plain word, and the same line can be approved for the
+run. [Built-in tools](/docs/tools#where-a-safe-listed-read-may-look) lists what counts as a path
+and what the check lets through.
+
+Every client gets the same list as data. An open tool approval carries `grant`: every key an
+approval for the stage and for the run would record, each with its kind and the program and path
+it names, and each word that keeps the line from recording anything, with a reason. It is on
+`GET /api/runs/{id}/interaction`, in `lev interactions --json`, on `InteractionOutput.grant` over
+GraphQL, and in the `interaction_needed` event. `lev interactions <id>` lays it out a key to a
+line, and the dashboard's prompt grows so every option shows in full.
 
 The two options can name different things. Say `node` was approved for the stage earlier, and the
 model now runs `node --check app.js && npm test`. Only `npm test` still needs approving, so the

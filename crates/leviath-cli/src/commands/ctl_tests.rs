@@ -1383,6 +1383,80 @@ fn the_full_view_shows_arguments_body_and_the_answer_line() {
     assert!(!out.contains("body:"), "{out}");
 }
 
+/// The full view lays out what an approval would record, a key to a line,
+/// for each scope that records anything, and the `--json` listing carries the
+/// same list as data.
+#[test]
+fn the_full_view_lists_every_key_an_approval_records() {
+    use leviath_core::interaction::{GrantBlocker, GrantBlockerReason, GrantKeys};
+    let path_key = leviath_core::interaction::outside_path_key("test", "/abs/tool");
+    let keys = GrantKeys {
+        stage: vec!["shell:npm test".to_string()],
+        run: vec![
+            "shell:node".to_string(),
+            "shell:npm test".to_string(),
+            path_key,
+        ],
+        blocked: Vec::new(),
+    };
+    let req = InteractionRequest::tool_approval(
+        "run-approve-1",
+        "bash",
+        serde_json::json!({"command": "node x && npm test && test -x /abs/tool"}),
+        "implement",
+        &keys,
+    );
+    let out = format_interaction_detail("agent-x", &req);
+    assert!(
+        out.contains(
+            "\n  an approval for this stage records:\n    npm test\n  an approval for this run \
+             records:\n    node\n    npm test\n    test with /abs/tool (outside the working \
+             directory)\n  required: yes"
+        ),
+        "{out}"
+    );
+    assert!(!out.contains("records nothing"), "{out}");
+    let listed: serde_json::Value =
+        serde_json::from_str(&interactions_json(&[("agent-x".to_string(), req)])).unwrap();
+    assert_eq!(listed[0]["grant"]["run"][2]["kind"], "outside_path");
+    assert_eq!(listed[0]["grant"]["run"][2]["path"], "/abs/tool");
+    assert_eq!(listed[0]["grant"]["stage"][0]["label"], "npm test");
+
+    // A call that records nothing says which word stops it.
+    let keys = GrantKeys {
+        stage: Vec::new(),
+        run: Vec::new(),
+        blocked: vec![GrantBlocker {
+            word: "$G".to_string(),
+            reason: GrantBlockerReason::ProgramFromVariable,
+            detail: "`$G` names the program at run time".to_string(),
+        }],
+    };
+    let req = InteractionRequest::tool_approval(
+        "run-approve-2",
+        "bash",
+        serde_json::json!({"command": "$G --version"}),
+        "implement",
+        &keys,
+    );
+    let out = format_interaction_detail("agent-x", &req);
+    assert!(
+        out.contains(
+            "\n  an approval for the stage or the run records nothing:\n    `$G` names the \
+             program at run time\n  required: yes"
+        ),
+        "{out}"
+    );
+    assert!(!out.contains("records:"), "{out}");
+    let listed: serde_json::Value =
+        serde_json::from_str(&interactions_json(&[("agent-x".to_string(), req)])).unwrap();
+    assert_eq!(listed[0]["grant"]["blocked"][0]["word"], "$G");
+    assert_eq!(
+        listed[0]["grant"]["blocked"][0]["reason"],
+        "program_from_variable"
+    );
+}
+
 // ─── a held run's question ────────────────────────────────────────────────
 
 /// A run held off this machine with `question` open on its file, and a live

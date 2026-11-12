@@ -1348,6 +1348,7 @@ mod tests {
             stage_name: "main".to_string(),
             body: None,
             body_format: interaction::BodyFormat::Plain,
+            grant: None,
         });
         agent.waiting_prompt = Some("Pick one".to_string());
         dash.agents.push(agent);
@@ -1978,6 +1979,7 @@ mod tests {
             stage_name: "main".to_string(),
             body: Some("draft".to_string()),
             body_format: interaction::BodyFormat::Plain,
+            grant: None,
         });
         agent.waiting_prompt = Some("Edit this".to_string());
         dash.agents.push(agent);

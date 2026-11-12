@@ -84,6 +84,28 @@ type AnsweredStepOutput {
 }
 
 """
+What approving a tool call for its stage or for the run would record:
+every key, for each scope, and what keeps the call from recording any.
+
+The `allow-stage` and `allow-run` options name the same keys in their
+labels. This is the list to lay out when a label is too long to show.
+"""
+type ApprovalGrantOutput {
+	"Every key an approval for the stage records."
+	stage: [GrantKeyOutput!]!
+	"""
+	Every key an approval for the run records. It also holds what only a
+	stage grant covers so far, since that grant ends with its stage.
+	"""
+	run: [GrantKeyOutput!]!
+	"""
+	Why an approval records nothing: one entry per word that stops it.
+	Empty when `stage` or `run` is not, and when there is nothing to say.
+	"""
+	blocked: [GrantBlockerOutput!]!
+}
+
+"""
 How far an approval that settled an ask reached.
 
 The REST journal and the answer routes write this scope's widest value as
@@ -5404,6 +5426,105 @@ type GlobCallOutput implements ToolCall {
 }
 
 """
+One word of a shell line that keeps the line from being granted for a
+stage or for the run, and why. Change the word and the line can be.
+"""
+type GrantBlockerOutput {
+	"""
+	The word, as the line spells it with its quotes removed. Empty when no
+	single word is to blame.
+	"""
+	word: String!
+	"Why it cannot be granted."
+	reason: GrantBlockerReason!
+	"The same, as one clause a person can read."
+	detail: String!
+}
+
+"""
+Why a shell line records nothing when it is approved for a stage or for
+the run.
+"""
+enum GrantBlockerReason {
+	"""
+	A word names a path outside the working directory where no key can
+	name it: in an option, a redirect, a URL or a `cd`.
+	"""
+	OUTSIDE_WORKDIR
+	"""
+	A word is expanded by the shell at run time, so what it will be is not
+	in the line.
+	"""
+	EXPANDED_AT_RUN_TIME
+	"The program is named through a variable or a substitution."
+	PROGRAM_FROM_VARIABLE
+	"""
+	A word names paths that cannot be listed ahead of time: a glob or a
+	brace list that reaches outside, another user's home, anything after
+	the line leaves the working directory.
+	"""
+	UNPLACEABLE_PATH
+	"""
+	The program runs a command put together at run time (`eval`,
+	`source`).
+	"""
+	RUNS_ASSEMBLED_COMMAND
+	"The word installs code to run later (`trap`, `alias`, `function`)."
+	INSTALLS_CODE
+	"""
+	A flag lets an otherwise read-only program write a file or run
+	another program.
+	"""
+	ESCAPE_FLAG
+	"The line cannot be read as a list of commands."
+	UNREADABLE_LINE
+	"Nothing in the line runs a program."
+	NOTHING_RUNS
+}
+
+"What kind of thing one key of a grant names."
+enum GrantKeyKind {
+	"A tool, by name: every call of it."
+	TOOL
+	"""
+	A program a shell line runs, with the subcommand that narrows it when
+	it has one.
+	"""
+	PROGRAM
+	"A variable a shell line binds."
+	VARIABLE
+	"A file a shell line writes through a redirect."
+	WRITE
+	"One path outside the working directory, handed to one program."
+	OUTSIDE_PATH
+}
+
+"""
+One key an approval for a stage or for the run would record. A later call
+runs without asking only when every key it needs is on the safe list or
+was recorded this way.
+"""
+type GrantKeyOutput {
+	"The key itself, as the run's grants hold it."
+	key: String!
+	"What kind of thing it names."
+	kind: GrantKeyKind!
+	"How the option's label names it."
+	label: String!
+	"""
+	The program, for a `PROGRAM` key and an `OUTSIDE_PATH` key. Null
+	otherwise.
+	"""
+	program: String
+	"""
+	The path, for a `WRITE` key and an `OUTSIDE_PATH` key. An outside
+	path is absolute, with its symlinks resolved: it is the file the grant
+	covers, however a later call spells it. Null otherwise.
+	"""
+	path: String
+}
+
+"""
 A person approved a call for the run or its stage, or a stage grant
 ended.
 """
@@ -6378,6 +6499,14 @@ type InteractionOutput {
 	edit-text ask, which is answered with `text`, and once settled.
 	"""
 	answerOptions: [AnswerOptionOutput!]!
+	"""
+	What approving the call for its stage or for the run would record, key
+	by key, and which words of a shell line keep it from recording
+	anything. The `allow-stage` and `allow-run` options name the same keys
+	in their labels. Null for every kind of ask but a tool approval, and
+	null once settled.
+	"""
+	grant: ApprovalGrantOutput
 	"""
 	The call awaiting approval, typed. Null for every other kind of ask,
 	and null once settled: the journal keeps the tool's name, not its

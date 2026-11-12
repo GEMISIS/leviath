@@ -217,6 +217,165 @@ impl From<leviath_core::interaction::AnswerOption> for AnswerOptionOutput {
     }
 }
 
+/// What kind of thing one key of a grant names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
+pub(crate) enum GrantKeyKind {
+    /// A tool, by name: every call of it.
+    Tool,
+    /// A program a shell line runs, with the subcommand that narrows it when
+    /// it has one.
+    Program,
+    /// A variable a shell line binds.
+    Variable,
+    /// A file a shell line writes through a redirect.
+    Write,
+    /// One path outside the working directory, handed to one program.
+    OutsidePath,
+}
+
+impl From<leviath_core::interaction::GrantKeyKind> for GrantKeyKind {
+    fn from(kind: leviath_core::interaction::GrantKeyKind) -> Self {
+        use leviath_core::interaction::GrantKeyKind as Core;
+        match kind {
+            Core::Tool => Self::Tool,
+            Core::Program => Self::Program,
+            Core::Variable => Self::Variable,
+            Core::Write => Self::Write,
+            Core::OutsidePath => Self::OutsidePath,
+        }
+    }
+}
+
+/// One key an approval for a stage or for the run would record. A later call
+/// runs without asking only when every key it needs is on the safe list or
+/// was recorded this way.
+#[derive(Debug, Clone, SimpleObject)]
+pub(crate) struct GrantKeyOutput {
+    /// The key itself, as the run's grants hold it.
+    pub(crate) key: String,
+    /// What kind of thing it names.
+    pub(crate) kind: GrantKeyKind,
+    /// How the option's label names it.
+    pub(crate) label: String,
+    /// The program, for a `PROGRAM` key and an `OUTSIDE_PATH` key. Null
+    /// otherwise.
+    pub(crate) program: Option<String>,
+    /// The path, for a `WRITE` key and an `OUTSIDE_PATH` key. An outside
+    /// path is absolute, with its symlinks resolved: it is the file the grant
+    /// covers, however a later call spells it. Null otherwise.
+    pub(crate) path: Option<String>,
+}
+
+impl From<leviath_core::interaction::GrantKey> for GrantKeyOutput {
+    fn from(key: leviath_core::interaction::GrantKey) -> Self {
+        Self {
+            key: key.key,
+            kind: key.kind.into(),
+            label: key.label,
+            program: key.program,
+            path: key.path,
+        }
+    }
+}
+
+/// Why a shell line records nothing when it is approved for a stage or for
+/// the run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
+pub(crate) enum GrantBlockerReason {
+    /// A word names a path outside the working directory where no key can
+    /// name it: in an option, a redirect, a URL or a `cd`.
+    OutsideWorkdir,
+    /// A word is expanded by the shell at run time, so what it will be is not
+    /// in the line.
+    ExpandedAtRunTime,
+    /// The program is named through a variable or a substitution.
+    ProgramFromVariable,
+    /// A word names paths that cannot be listed ahead of time: a glob or a
+    /// brace list that reaches outside, another user's home, anything after
+    /// the line leaves the working directory.
+    UnplaceablePath,
+    /// The program runs a command put together at run time (`eval`,
+    /// `source`).
+    RunsAssembledCommand,
+    /// The word installs code to run later (`trap`, `alias`, `function`).
+    InstallsCode,
+    /// A flag lets an otherwise read-only program write a file or run
+    /// another program.
+    EscapeFlag,
+    /// The line cannot be read as a list of commands.
+    UnreadableLine,
+    /// Nothing in the line runs a program.
+    NothingRuns,
+}
+
+impl From<leviath_core::interaction::GrantBlockerReason> for GrantBlockerReason {
+    fn from(reason: leviath_core::interaction::GrantBlockerReason) -> Self {
+        use leviath_core::interaction::GrantBlockerReason as Core;
+        match reason {
+            Core::OutsideWorkdir => Self::OutsideWorkdir,
+            Core::ExpandedAtRunTime => Self::ExpandedAtRunTime,
+            Core::ProgramFromVariable => Self::ProgramFromVariable,
+            Core::UnplaceablePath => Self::UnplaceablePath,
+            Core::RunsAssembledCommand => Self::RunsAssembledCommand,
+            Core::InstallsCode => Self::InstallsCode,
+            Core::EscapeFlag => Self::EscapeFlag,
+            Core::UnreadableLine => Self::UnreadableLine,
+            Core::NothingRuns => Self::NothingRuns,
+        }
+    }
+}
+
+/// One word of a shell line that keeps the line from being granted for a
+/// stage or for the run, and why. Change the word and the line can be.
+#[derive(Debug, Clone, SimpleObject)]
+pub(crate) struct GrantBlockerOutput {
+    /// The word, as the line spells it with its quotes removed. Empty when no
+    /// single word is to blame.
+    pub(crate) word: String,
+    /// Why it cannot be granted.
+    pub(crate) reason: GrantBlockerReason,
+    /// The same, as one clause a person can read.
+    pub(crate) detail: String,
+}
+
+/// What approving a tool call for its stage or for the run would record:
+/// every key, for each scope, and what keeps the call from recording any.
+///
+/// The `allow-stage` and `allow-run` options name the same keys in their
+/// labels. This is the list to lay out when a label is too long to show.
+#[derive(Debug, Clone, SimpleObject)]
+pub(crate) struct ApprovalGrantOutput {
+    /// Every key an approval for the stage records.
+    pub(crate) stage: Vec<GrantKeyOutput>,
+    /// Every key an approval for the run records. It also holds what only a
+    /// stage grant covers so far, since that grant ends with its stage.
+    pub(crate) run: Vec<GrantKeyOutput>,
+    /// Why an approval records nothing: one entry per word that stops it.
+    /// Empty when `stage` or `run` is not, and when there is nothing to say.
+    pub(crate) blocked: Vec<GrantBlockerOutput>,
+}
+
+impl From<leviath_core::interaction::ApprovalGrant> for ApprovalGrantOutput {
+    fn from(grant: leviath_core::interaction::ApprovalGrant) -> Self {
+        let keys = |keys: Vec<leviath_core::interaction::GrantKey>| {
+            keys.into_iter().map(GrantKeyOutput::from).collect()
+        };
+        Self {
+            stage: keys(grant.stage),
+            run: keys(grant.run),
+            blocked: grant
+                .blocked
+                .into_iter()
+                .map(|b| GrantBlockerOutput {
+                    word: b.word,
+                    reason: b.reason.into(),
+                    detail: b.detail,
+                })
+                .collect(),
+        }
+    }
+}
+
 /// The resolver state behind `InteractionOutput`: one question, open or
 /// settled.
 #[derive(Debug)]
@@ -238,6 +397,10 @@ pub(crate) struct Interaction {
     /// Every option the ask lists, with the word that answers with it. Empty
     /// for a text ask, and once settled.
     pub(crate) answer_options: Vec<AnswerOptionOutput>,
+    /// What approving the call for its stage or the run would record, for an
+    /// open tool approval. Null for every other ask, and once settled. Boxed:
+    /// every open ask an event carries has this field.
+    pub(crate) grant: Option<Box<ApprovalGrantOutput>>,
     /// The call awaiting approval, typed. Null once settled: the journal keeps
     /// the tool's name, not its arguments.
     pub(crate) tool_call: Option<Box<super::tool_calls::ToolCall>>,
@@ -290,9 +453,13 @@ impl Interaction {
             .into_iter()
             .map(AnswerOptionOutput::from)
             .collect();
+        let grant = request
+            .grant
+            .map(|grant| Box::new(ApprovalGrantOutput::from(*grant)));
         Self {
             run_id,
             answer_options,
+            grant,
             id: request.id,
             kind: (&request.kind).into(),
             prompt: request.prompt,
@@ -327,6 +494,7 @@ impl Interaction {
             body: None,
             options: question.options.clone(),
             answer_options: Vec::new(),
+            grant: None,
             tool_call: None,
             tool_name: None,
             stage_name: held.stage.clone(),
@@ -348,6 +516,7 @@ impl Interaction {
             body: None,
             options: Vec::new(),
             answer_options: Vec::new(),
+            grant: None,
             tool_call: None,
             tool_name: record.tool,
             stage_name: record.stage,
@@ -420,6 +589,16 @@ impl Interaction {
     #[filter(skip)]
     async fn answer_options(&self) -> &[AnswerOptionOutput] {
         &self.answer_options
+    }
+
+    /// What approving the call for its stage or for the run would record, key
+    /// by key, and which words of a shell line keep it from recording
+    /// anything. The `allow-stage` and `allow-run` options name the same keys
+    /// in their labels. Null for every kind of ask but a tool approval, and
+    /// null once settled.
+    #[filter(skip)]
+    async fn grant(&self) -> Option<&ApprovalGrantOutput> {
+        self.grant.as_deref()
     }
 
     /// The call awaiting approval, typed. Null for every other kind of ask,

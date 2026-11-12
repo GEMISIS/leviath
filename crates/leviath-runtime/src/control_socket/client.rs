@@ -889,8 +889,8 @@ pub enum Streamed {
     /// first subscription, after the cursor for one it picked up. A daemon
     /// too old to number its events never says.
     Opened(super::EventCursor),
-    /// An event.
-    Event(WorldEvent),
+    /// An event. Boxed: an event is many times the size of the other two.
+    Event(Box<WorldEvent>),
     /// The daemon numbered this many events the stream never got: its
     /// recorder fell behind, or a pick-up asked for more than it keeps.
     Missed(u64),
@@ -913,7 +913,7 @@ impl WorldEventStream {
     pub async fn next(&mut self) -> Option<WorldEvent> {
         loop {
             if let Streamed::Event(event) = self.next_item().await? {
-                return Some(event);
+                return Some(*event);
             }
         }
     }
@@ -930,7 +930,7 @@ impl WorldEventStream {
             return Some(Streamed::Opened(cursor));
         }
         if let Some(event) = self.held.take() {
-            return Some(Streamed::Event(event));
+            return Some(Streamed::Event(Box::new(event)));
         }
         loop {
             let line = self.lines.next_line().await.ok().flatten()?;
@@ -955,7 +955,7 @@ impl WorldEventStream {
                 _ => 0,
             };
             match (missed, event) {
-                (0, Some(event)) => return Some(Streamed::Event(event)),
+                (0, Some(event)) => return Some(Streamed::Event(Box::new(event))),
                 (0, None) => {}
                 (missed, event) => {
                     self.held = event;

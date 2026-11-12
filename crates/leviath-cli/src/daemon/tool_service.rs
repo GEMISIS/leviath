@@ -671,7 +671,7 @@ pub(crate) fn decide_call(
     // What a shell line names outside the workdir, or why its words cannot
     // say. Refused outright where `outside_workdir` resolves to deny, which no
     // launch flag lifts; under `ask` a line that names somewhere outside is
-    // covered by nothing below, and asks.
+    // covered only by a grant of exactly what it names, and asks otherwise.
     let may_read = |p: &std::path::Path| state.builtins.may_read(p);
     let outside =
         crate::tools::outside_workdir(&tc.name, &tc.arguments, state.builtins.workdir(), &may_read);
@@ -685,7 +685,12 @@ pub(crate) fn decide_call(
     }
     // A write after a move this cannot follow is refused by the fence above,
     // so every call that reaches here has its writes placed.
-    let placed = outside.is_empty();
+    // What a scoped approval of the call records: what it runs, then each
+    // exact path it hands a program outside the workdir. Nothing at all when
+    // the line holds a word no key can name (an expansion, a path in an
+    // option), because a grant of the rest would go on to cover a line nobody
+    // saw: such a line is approved once or not at all.
+    let approval_keys = outside.grant_keys(approval_keys);
     let policy = resolve(&tc.name, is_builtin);
     // A shell redirect writes a file, and no tool name says so. Clamping by
     // the write tool's own policy is what stops `echo x > f` being a spelling
@@ -726,12 +731,12 @@ pub(crate) fn decide_call(
     let safe = state.safe_keys.get();
     let is_safe = |k: &str| safe.contains(k);
     let is_granted = |k: &str| ctx.grants.granted(k);
-    // A line that names a path outside the workdir is covered by neither:
-    // `cat` being safe means reading the project, and a grant was for what
-    // the person saw.
+    // A key naming a path outside the workdir is never the safe list's to
+    // cover: `cat` being safe means reading the project, and such a path is
+    // covered only by a grant of that program with that path.
     let policy = match policy {
         ToolPolicy::Ask
-            if placed && crate::shell_keys::all_covered(&approval_keys, &is_safe, &is_granted) =>
+            if crate::shell_keys::all_covered(&approval_keys, &is_safe, &is_granted) =>
         {
             ToolPolicy::Allow
         }
@@ -763,19 +768,15 @@ pub(crate) fn decide_call(
         // approval for the stage records what nothing covers now; one for the
         // run also records what only a stage grant covers, because that grant
         // ends with the stage and the line would ask again in the next one.
-        // A line reading outside the workdir records nothing: approving
-        // `cat src/a /etc/hosts` is approving that read, and a grant of
-        // `cat src/a` would go on to cover `cat src/a ~/.aws/credentials`. So
-        // it is approved once or not at all.
+        // A line with no keys records nothing, and says which of its words
+        // stopped it.
         ToolPolicy::Ask => ToolVerdict::Ask {
-            keys: match placed {
-                true => GrantKeys {
-                    stage: crate::shell_keys::uncovered_keys(&approval_keys, &is_safe, &is_granted),
-                    run: crate::shell_keys::uncovered_keys(&approval_keys, &is_safe, &|k| {
-                        ctx.grants.granted_for_run(k)
-                    }),
-                },
-                false => GrantKeys::default(),
+            keys: GrantKeys {
+                stage: crate::shell_keys::uncovered_keys(&approval_keys, &is_safe, &is_granted),
+                run: crate::shell_keys::uncovered_keys(&approval_keys, &is_safe, &|k| {
+                    ctx.grants.granted_for_run(k)
+                }),
+                blocked: outside.blocked,
             },
             charge,
         },
@@ -3722,9 +3723,9 @@ pub(crate) mod tests {
     }
 
     /// A safe-listed `cat` covers a read of the workdir and not a read of
-    /// `/etc/hosts`: the second falls back to the shell's `ask`, and the
-    /// prompt offers no grant for the stage or the run, because a grant of
-    /// `cat src/a` from `cat src/a /etc/hosts` would cover other outside reads.
+    /// `/etc/hosts`: the second falls back to the shell's `ask`, and what the
+    /// prompt offers to remember is `cat` with that one path, so an approval
+    /// covers the same read again and no other outside read.
     #[tokio::test]
     async fn a_safe_read_outside_the_workdir_asks() {
         let hub = InteractionHub::new();
@@ -3752,9 +3753,10 @@ pub(crate) mod tests {
         assert!(asked.contains("[denied]"), "got: {asked}");
         let options = seen.lock().unwrap().clone();
         assert_eq!(options[0], "Allow once");
-        assert_eq!(
-            options[1],
-            "Allow for this stage (nothing reusable - it will ask again)"
+        assert!(
+            options[1].starts_with("Allow cat with ")
+                && options[1].ends_with("hosts (outside the working directory) for this stage"),
+            "{options:?}"
         );
 
         // The control: the same program on a path inside runs with no prompt.
@@ -5057,3 +5059,9 @@ mod mcp_content_tests {
         assert_eq!(out, "[error] tool error: gone");
     }
 }
+
+/// The lines here are `sh` lines, read the way a POSIX shell reads them; the
+/// reading itself is tested on every platform in `shell_keys`.
+#[cfg(all(test, unix))]
+#[path = "tool_service_grant_tests.rs"]
+mod grant_tests;

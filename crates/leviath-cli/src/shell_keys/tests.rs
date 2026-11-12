@@ -14,12 +14,16 @@ fn word(text: &str) -> Word {
         text: text.to_string(),
         literal: true,
         quoted: false,
+        shown: text.to_string(),
+        expands: Expands::Nothing,
+        bare_lead: true,
     }
 }
 
 fn expansion(text: &str) -> Word {
     Word {
         literal: false,
+        expands: Expands::Unknown,
         ..word(text)
     }
 }
@@ -465,16 +469,18 @@ fn binding_keys_skips_flags_and_refuses_an_expanded_name() {
     assert_eq!(out, ["env:FOO", "env:BAR"]);
 
     let mut out = Vec::new();
+    let expanded = [expansion("$VAR")];
     assert_eq!(
-        binding_keys(&[expansion("$VAR")], &mut out),
-        Err(()),
+        binding_keys(&expanded, &mut out),
+        Err(&expanded[0]),
         "a name supplied by an expansion names a different variable every run"
     );
 
     let mut out = Vec::new();
+    let unnamed = [word("FOO"), word("not a name")];
     assert_eq!(
-        binding_keys(&[word("not a name")], &mut out),
-        Err(()),
+        binding_keys(&unnamed, &mut out),
+        Err(&unnamed[1]),
         "a word that is not spelled like a variable is not one this can key"
     );
 }
@@ -494,16 +500,6 @@ fn folds_into_key_rejects_every_kind_of_non_program() {
 #[test]
 fn an_empty_argument_is_not_folded() {
     assert_eq!(keys(r#"cat """#), ["shell:cat"]);
-}
-
-#[test]
-fn take_substitution_balances_nested_parens() {
-    let mut chars = "a $(b) c) rest".chars().peekable();
-    assert_eq!(take_substitution(&mut chars).as_deref(), Some("a $(b) c"));
-    assert_eq!(chars.collect::<String>(), " rest");
-
-    let mut unbalanced = "a (b".chars().peekable();
-    assert_eq!(take_substitution(&mut unbalanced), None);
 }
 
 // ─── is_valid_prefix ─────────────────────────────────────────────────────────
@@ -903,6 +899,73 @@ fn a_trailing_backslash_only_swallows_a_terminator_on_a_posix_shell() {
     assert_eq!(keys_under(r"echo trailing\", false), ["shell:echo"]);
 }
 
+/// The shell removes a backslash-newline before it reads a word, so the two
+/// halves of a word, an option or an operator join across it. Where there is
+/// nothing to join (after a blank or a separator) the line reads as if it
+/// were not there; anywhere else the line is not read at all.
+#[test]
+fn a_line_continuation_joins_nothing_this_cannot_see() {
+    let texts = |command: &str| -> Option<Vec<Vec<String>>> {
+        tokenize_for(command, true).map(|segments| {
+            segments
+                .iter()
+                .filter(|s| !s.words.is_empty())
+                .map(|s| s.words.iter().map(|w| w.text.clone()).collect())
+                .collect()
+        })
+    };
+    let two = Some(vec![
+        vec!["cat".to_string(), "a".to_string()],
+        vec!["wc".to_string(), "-l".to_string()],
+    ]);
+    for line in [
+        "cat \\\na | wc -l",
+        "\\\ncat a | \\\n\\\n wc -l",
+        "cat a |\\\nwc -l",
+        "cat a &&\\\nwc -l",
+        "cat a;\\\nwc -l",
+        "cat a\n\\\nwc -l",
+    ] {
+        assert_eq!(texts(line), two, "{line:?}");
+    }
+    for line in [
+        // Halves of a word: `link`, `..`, `-R`, `--output=x`.
+        "cat li\\\nnk",
+        "cat src/.\\\n./.\\\n./x",
+        "grep -\\\nR key .",
+        "git diff --out\\\nput=x",
+        // Halves of an operator, and a word against one.
+        "cat <\\\n<EOF\nbody\nEOF",
+        "cat f<\\\n1-5>",
+        "cat f<1-\\\n5>",
+        "echo x >\\\n> out",
+        "echo $\\\n(id)",
+        "cat \"a\"\\\nb",
+    ] {
+        assert_eq!(texts(line), None, "{line:?}");
+    }
+    // Between double quotes it is removed, and a `$` it would join to what
+    // follows is an expansion already.
+    assert_eq!(arg_of("echo \"a\\\nb\""), "ab");
+    assert_eq!(second_word("echo \"$\\\n(id)\"").expands, Expands::Unknown);
+    // An escaped backslash is a backslash, and the newline after it ends the
+    // command.
+    assert_eq!(
+        texts("echo a\\\\\necho b"),
+        Some(vec![
+            vec!["echo".to_string(), "a\\".to_string()],
+            vec!["echo".to_string(), "b".to_string()]
+        ])
+    );
+    assert_eq!(arg_of("echo \"a\\\\\nb\""), "a\\\nb");
+    // `cmd.exe` continues a line with `^`; a backslash there is part of a
+    // path, and the newline after one ends the command.
+    assert_eq!(
+        keys_under("type a\\\nb", false),
+        ["shell:b", "shell:type a\\"]
+    );
+}
+
 // ─── Where a redirect may write ──────────────────────────────────────────────
 
 /// A discarded write is not a write, so nothing here needs confining. Pinned as
@@ -1019,6 +1082,16 @@ fn a_heredoc_body_that_could_run_something_stays_unreadable() {
     );
     assert_eq!(
         write_targets_for("cat <<'EOF' > out.txt\n$(touch /tmp/pwned)\nEOF", true),
+        WriteTargets::Known(vec!["out.txt".to_string()])
+    );
+    // A backslash at the end of a line joins it to the next, so the `$` and
+    // the `(` of a substitution can sit on two lines of an unquoted body.
+    assert_eq!(
+        write_targets_for("cat <<EOF > out.txt\n$\\\n(touch /tmp/pwned)\nEOF", true),
+        WriteTargets::Unreadable
+    );
+    assert_eq!(
+        write_targets_for("cat <<'EOF' > out.txt\n$\\\n(touch /tmp/pwned)\nEOF", true),
         WriteTargets::Known(vec!["out.txt".to_string()])
     );
     // Never terminated: with a body (delimiter absent), and with none at all.
@@ -1317,4 +1390,257 @@ fn no_safe_entry_can_ever_widen_onto_a_write_or_env_key() {
             "{env:?} is pre-approved by default"
         );
     }
+}
+
+// ─── What the reader follows, and what it refuses to guess ───────────────────
+
+/// A `#` that starts a word starts a comment, which ends with its line. One
+/// inside a word, between quotes or after a `$` is text.
+#[test]
+fn a_comment_is_skipped_to_the_end_of_its_line() {
+    // Read as a POSIX shell reads it, on every platform.
+    let keys = |command: &str| keys_under(command, true);
+    assert_eq!(
+        keys("ls # 'quote\ntouch a\n# '"),
+        ["shell:ls", "shell:touch a"]
+    );
+    assert_eq!(keys("ls # x \\\ntouch a"), ["shell:ls", "shell:touch a"]);
+    assert_eq!(keys("ls #x; touch a"), ["shell:ls"]);
+    assert_eq!(keys("# only a note"), Vec::<String>::new());
+    assert_eq!(keys("(#note\nls)"), ["shell:ls"]);
+    // A carriage return or a vertical tab is a character of a word to the
+    // shell, so a `#` after one is in the middle of a word.
+    assert_eq!(keys("ls\r# ; touch a"), ["shell:ls #", "shell:touch a"]);
+    assert_eq!(keys("ls\u{b}# ; touch a"), ["shell:ls #", "shell:touch a"]);
+    assert_eq!(keys("ls;#x\ntouch a"), ["shell:ls", "shell:touch a"]);
+    assert_eq!(arg_of("echo a#b"), "a#b");
+    assert_eq!(arg_of("echo \"\"#b"), "#b");
+    assert_eq!(arg_of("echo '#b'"), "#b");
+    assert!(second_word("echo $# x").expands.is_plain());
+    // `cmd.exe` has no such comment.
+    assert_eq!(keys_under("echo # x", false), ["shell:echo"]);
+    assert_eq!(
+        tokenize_for("echo # x", false).expect("tokenizes")[0]
+            .words
+            .len(),
+        3
+    );
+}
+
+/// `$'...'` is one quoted word in bash and zsh, where `\'` does not close
+/// it, and a `$` before a plain quoted word in a POSIX `sh`, where it does.
+/// Where the two end it at the same place it is read; where they do not,
+/// the line is not.
+#[test]
+fn an_ansi_c_quote_is_read_only_where_every_shell_ends_it_alike() {
+    for line in [
+        "grep $'\\t' file",
+        "echo $'a\\nb' c",
+        "echo $'a\\\\' c",
+        "IFS=$'\\n' ls",
+    ] {
+        assert!(tokenize_for(line, true).is_some(), "{line}");
+    }
+    assert_eq!(second_word("echo $'a b' c").expands, Expands::Unknown);
+    for line in [
+        "x=$'\\'' ; touch a #'",
+        "echo $'it\\'s' ; touch a",
+        "echo $'never closed",
+        "echo $'ends in a backslash\\",
+    ] {
+        assert_eq!(tokenize_for(line, true), None, "{line}");
+    }
+    // Between double quotes a `$'` is two characters of text.
+    assert_eq!(arg_of("echo \"a$'b\""), "a'b");
+}
+
+/// A substitution ends at the parenthesis that closes it, and one between
+/// quotes, behind a backslash or in a comment does not.
+#[test]
+fn a_substitution_is_read_with_its_quotes() {
+    // Read as a POSIX shell reads it, on every platform.
+    let keys = |command: &str| keys_under(command, true);
+    for (inner, rest) in [
+        ("a $(b) c", " rest"),
+        ("echo '('", "; touch a"),
+        ("echo \")\"", "; touch a"),
+        ("echo \"$(echo \")\")\"", " x"),
+        ("echo \\)", " x"),
+        ("echo a # )\necho b", " x"),
+        ("echo a#b", ""),
+        ("echo \"a\\\"b)\"", " x"),
+        ("echo \"$x\" '$y'", " z"),
+    ] {
+        let text = format!("{inner}){rest}");
+        let mut chars = text.chars().peekable();
+        assert_eq!(
+            take_substitution(&mut chars, true).as_deref(),
+            Some(inner),
+            "{text}"
+        );
+        assert_eq!(chars.collect::<String>(), rest, "{text}");
+    }
+    for text in [
+        "a (b",
+        "echo ')",
+        "echo \")",
+        "echo \"$(a",
+        "echo \\",
+        "echo \"a\\",
+    ] {
+        let mut chars = text.chars().peekable();
+        assert_eq!(take_substitution(&mut chars, true), None, "{text}");
+    }
+    // Where a backslash is a path separator it escapes nothing.
+    let mut chars = "dir C:\\) rest".chars().peekable();
+    assert_eq!(
+        take_substitution(&mut chars, false).as_deref(),
+        Some("dir C:\\")
+    );
+    // What follows the substitution is still the line's.
+    assert_eq!(
+        keys("x=\"$(echo '(')\"; touch a; echo \")\""),
+        ["shell:echo", "shell:env:x", "shell:touch a"]
+    );
+    // What is inside one is read like a line, and is no more readable.
+    assert_eq!(tokenize_for("echo $(ls `pwd`)", true), None);
+}
+
+/// `>!`, `>&|` and `&>|` are zsh's; the other shells write to a file called
+/// `!` or stop at the bar. A line with one names no target.
+#[test]
+fn a_redirect_only_zsh_spells_is_unreadable() {
+    for line in [
+        "echo x >! out",
+        "echo x >>! out",
+        "echo x >&! out",
+        "echo x >&| out",
+        "echo x &>! out",
+        "echo x &>| out",
+    ] {
+        assert_eq!(
+            write_targets_for(line, true),
+            WriteTargets::Unreadable,
+            "{line}"
+        );
+    }
+    assert_eq!(
+        write_targets_for("echo x > !out", true),
+        WriteTargets::Known(vec!["!out".to_string()])
+    );
+    assert_eq!(
+        write_targets_for("echo x >| out 2>&1", true),
+        WriteTargets::Known(vec!["out".to_string()])
+    );
+}
+
+/// A loop header, `read` and `printf -v` bind a variable as an assignment
+/// does. An ordinary lower-case loop variable is the one binding with no
+/// key: nothing but the loop's own body reads it.
+#[test]
+fn a_binding_without_an_equals_sign_is_keyed() {
+    // Read as a POSIX shell reads it, on every platform.
+    let keys = |command: &str| keys_under(command, true);
+    assert_eq!(
+        keys("for PATH in a; do ls; done"),
+        ["shell:env:PATH", "shell:ls"]
+    );
+    assert_eq!(
+        keys("for path in a; do ls; done"),
+        ["shell:env:path", "shell:ls"]
+    );
+    assert_eq!(
+        keys("for a B in x y; do ls; done"),
+        ["shell:env:B", "shell:ls"]
+    );
+    assert_eq!(
+        keys("for PATH; do ls; done"),
+        ["shell:env:PATH", "shell:ls"]
+    );
+    assert_eq!(
+        keys("select PATH in a; do ls; done"),
+        ["shell:env:PATH", "shell:ls"]
+    );
+    assert_eq!(keys("for d in a b; do ls \"$d\"; done"), ["shell:ls"]);
+    assert_eq!(
+        keys("for ((i=0;;)); do ls; done"),
+        ["shell:env:i", "shell:ls"]
+    );
+    assert_eq!(
+        keys("for \"$name\" in a; do ls; done"),
+        Vec::<String>::new()
+    );
+    assert_eq!(keys("for 1x in a; do ls; done"), Vec::<String>::new());
+    // A `do` in the header's own command is followed by the body's program.
+    assert_eq!(keys("for x do touch a; done"), ["shell:touch a"]);
+    assert_eq!(
+        keys("for PATH do touch a; done"),
+        ["shell:env:PATH", "shell:touch a"]
+    );
+    // `jobs -x` runs what follows it, so `jobs` is a program like any other.
+    assert_eq!(keys("jobs"), ["shell:jobs"]);
+    assert_eq!(keys("jobs -x touch a"), Vec::<String>::new());
+    assert_eq!(keys("read -r PATH"), ["shell:env:PATH"]);
+    assert_eq!(
+        keys("while read -r line; do ls; done"),
+        ["shell:env:line", "shell:ls"]
+    );
+    assert_eq!(keys("mapfile -t lines"), ["shell:env:lines"]);
+    assert_eq!(keys("readarray lines"), ["shell:env:lines"]);
+    assert_eq!(keys("getopts ab opt"), ["shell:env:ab", "shell:env:opt"]);
+    assert_eq!(
+        keys("printf -v PATH %s a"),
+        ["shell:env:PATH", "shell:printf"]
+    );
+    assert_eq!(
+        keys("printf -vPATH %s a"),
+        ["shell:env:PATH", "shell:printf"]
+    );
+    assert_eq!(keys("printf '%s' -v PATH"), ["shell:printf"]);
+    assert_eq!(keys("printf -v"), ["shell:printf"]);
+    assert_eq!(keys("printf"), ["shell:printf"]);
+    for line in [
+        "printf -v \"$name\" %s a",
+        "printf \"$fmt\" a",
+        "printf -v 'a[1]' %s a",
+        "printf -v1x %s a",
+    ] {
+        assert_eq!(keys(line), Vec::<String>::new(), "{line}");
+    }
+}
+
+/// An expansion that can assign binds a variable no key names, and a
+/// `${...}` with a quote in it ends where only the shell can say.
+#[test]
+fn an_expansion_that_assigns_or_hides_its_end_is_not_keyed() {
+    // Read as a POSIX shell reads it, on every platform.
+    let keys = |command: &str| keys_under(command, true);
+    for line in [
+        "true ${PATH:=tools}; ls",
+        "echo \"${x::=y}\"",
+        "y=$((x=1)) ls",
+        "echo $((i++))",
+        "echo $[i--]",
+        "cat <<EOF\n${PATH:=tools}\nEOF\nls",
+        "cat <<EOF\n$((PATH=1))\nEOF",
+    ] {
+        assert_eq!(keys(line), Vec::<String>::new(), "{line}");
+    }
+    for line in [
+        "echo \"${x:-\"a\"}\"",
+        "echo ${x:-'a'}",
+        "echo \"${x/'a'/b}\"",
+        "echo ${x:-`ls`}",
+        "echo ${x",
+    ] {
+        assert_eq!(tokenize_for(line, true), None, "{line}");
+    }
+    assert_eq!(
+        keys("echo ${x:-a=b} $((1+2)) ${#x} ${x/a/b} ${x:-{a}}"),
+        ["shell:echo"]
+    );
+    assert_eq!(
+        keys("cat <<EOF\nname=${USER} n=${#USER}\nEOF"),
+        ["shell:cat"]
+    );
 }

@@ -26,8 +26,16 @@
 //! (`CODE_INSTALLING`). When adding a construct here, the question to ask is
 //! not "does this run a program" but "could this change which program a later
 //! word resolves to".
+//!
+//! What a line reads is a separate question, answered by [`operands`]: a path
+//! outside the workdir keeps a line off the safe list. One exact path handed
+//! to a program as a plain word gets a key of its own, in the `outside:`
+//! namespace no program name can spell, and only a grant of that program with
+//! that path covers it.
 
 use std::collections::BTreeSet;
+
+use leviath_core::interaction::{GrantBlocker, GrantBlockerReason};
 
 /// The namespace every shell key carries, so a key can never collide with the
 /// bare tool name a non-shell grant uses.
@@ -52,7 +60,7 @@ const PREFIX_KEYWORDS: &[&str] = &[
 /// [`ENV_BINDING`] and [`CODE_INSTALLING`].
 const INERT_KEYWORDS: &[&str] = &[
     "for", "in", "case", "esac", "fi", "done", "select", "break", "continue", "return", "shift",
-    "exit", "jobs", "disown", "wait", "set", "umask",
+    "exit", "disown", "wait", "set", "umask",
 ];
 
 /// Builtins that bind a variable name, so the segment contributes an
@@ -61,7 +69,18 @@ const INERT_KEYWORDS: &[&str] = &[
 /// `export PATH=/tmp/evil` runs no program, but the next segment's `ls` is a
 /// different `ls` because of it. Keying the name is what stops a safe-listed
 /// program in a later segment silently covering the whole line.
-const ENV_BINDING: &[&str] = &["export", "unset", "local", "readonly", "declare", "typeset"];
+const ENV_BINDING: &[&str] = &[
+    "export",
+    "unset",
+    "local",
+    "readonly",
+    "declare",
+    "typeset",
+    "read",
+    "getopts",
+    "mapfile",
+    "readarray",
+];
 
 /// Builtins that install code to run later, at a point this parser cannot
 /// attribute to any program. The whole line becomes ungrantable.
@@ -72,34 +91,14 @@ const ENV_BINDING: &[&str] = &["export", "unset", "local", "readonly", "declare"
 /// segment describes what will actually execute.
 const CODE_INSTALLING: &[&str] = &["function", "trap", "alias", "unalias"];
 
-/// Flags that turn an otherwise read-only program into one that writes a file
-/// or runs another program, keyed by the program that accepts them.
-///
-/// This is a denylist, and a denylist has to be complete to be correct - so it
-/// is used for exactly one thing: keeping an entry on the default safe list
-/// that would otherwise have to be removed. `git`'s read-only subcommands are
-/// most of what a coding agent does, but `--output=<file>` is a diff-machinery
-/// option that `diff`, `log` and `show` all accept, and `git diff` is an exact
-/// safe entry. Refusing the segment is cheaper than losing read-only git.
-///
-/// A program whose escape *cannot* be spelled as a flag does not belong here
-/// and was removed from the safe list instead - see [`crate::approvals`], where
-/// `uniq`'s output operand is the worked example. When in doubt, remove the
-/// entry rather than extending this table: the entry is convenience, the rule
-/// is the guarantee.
-const ESCAPE_FLAGS: &[(&str, &[&str])] = &[("git", &["--output"])];
-
-/// Whether this segment hands a safe-listed program a flag that lets it escape.
-///
-/// Prefix-matched, so `--output=x` and a separated `--output x` both hit.
-fn carries_escape_flag(program: &str, words: &[Word]) -> bool {
-    ESCAPE_FLAGS.iter().any(|(name, flags)| {
-        *name == program
-            && words
-                .iter()
-                .skip(1)
-                .any(|w| flags.iter().any(|f| w.text.starts_with(f)))
-    })
+/// What keeps a segment from being keyed: `word`, for `reason`, with `why`
+/// finishing the sentence that starts with the word.
+fn unkeyed(word: &Word, reason: GrantBlockerReason, why: &str) -> GrantBlocker {
+    GrantBlocker {
+        word: word.shown.clone(),
+        reason,
+        detail: format!("`{}` {why}", word.shown),
+    }
 }
 
 /// Programs that run a command assembled at runtime, so nothing in the line
@@ -133,6 +132,24 @@ struct Word {
     /// grant useless in practice: every distinct `grep` pattern became its own
     /// grant and the same search re-prompted forever.
     quoted: bool,
+    /// The word as the line spells it, with its quotes removed and nothing
+    /// else: `$HOME/x`, `\done`. What a person is shown, and what tells a
+    /// bare keyword from a word that only has a keyword's value.
+    shown: String,
+    /// What its expansions are, when it has any: see [`Expands`].
+    expands: Expands,
+    /// Whether the first character of its value is written bare: not quoted,
+    /// not escaped, not expanded. zsh rewrites a word that opens with a bare
+    /// `=`, empty quotes in front of it or not (`""=ls`).
+    bare_lead: bool,
+}
+
+impl Word {
+    /// Whether the word is written as exactly its value: no quote, no escape
+    /// and no expansion. Only such a word is a shell keyword.
+    fn is_bare(&self) -> bool {
+        self.literal && !self.quoted && self.shown == self.text
+    }
 }
 
 /// One command of a line: the words that decide what runs, and the targets it
@@ -149,6 +166,13 @@ struct Segment {
     /// is a path operand like any other: `cat < /etc/hosts` reads the same
     /// file `cat /etc/hosts` does. See [`operands`].
     reads: Vec<Word>,
+    /// Whether it holds something that can hide or invent a command boundary
+    /// from this reader: a parenthesis, a heredoc, an expansion that is not a
+    /// plain one. Its words still say what runs; what they do not say is how
+    /// the commands around it nest. See [`loops`].
+    tangled: bool,
+    /// Whether a `(` ends it: after a word, a glob group or qualifier in zsh.
+    grouped: bool,
 }
 
 /// What a redirect writes to.
@@ -315,8 +339,10 @@ fn keys_from_segments(segments: &[Segment]) -> Vec<String> {
 /// pass against a fix that emitted the right key and still let it be covered,
 /// which is exactly how the safe-list escapes went unnoticed.
 ///
-/// A line that names a path outside the workdir is never covered, whatever
-/// this says: the callers check [`outside_workdir`] first.
+/// A line that names a path outside the workdir carries a key for each such
+/// path (see [`Outside::grant_keys`]), which only a grant covers; a caller
+/// that pre-approves with no grants to consult checks [`outside_workdir`]
+/// itself.
 ///
 /// `&dyn Fn` rather than a generic: one instantiation, so the coverage gate sees
 /// one set of regions instead of one per call site.
@@ -334,15 +360,23 @@ pub(crate) fn all_covered(
 /// Covered means what it means in [`all_covered`], which is this list being
 /// empty. A prompt that listed the covered keys too would lead with whatever
 /// sorts first, `cat` and `cd`, and push the one program actually being
-/// approved out of sight behind "+N more"; a grant recording them would hand
+/// approved out of sight behind the rest; a grant recording them would hand
 /// over again what the safe list already gives.
+///
+/// A key naming a path outside the workdir is covered by a grant of exactly
+/// that key and by nothing else. The safe list is never asked about one: a
+/// program being safe means reading the project, and a path outside it is
+/// approved by a person, for that program and that path, or not at all.
 pub(crate) fn uncovered_keys(
     keys: &[String],
     safe: &dyn Fn(&str) -> bool,
     granted: &dyn Fn(&str) -> bool,
 ) -> Vec<String> {
     keys.iter()
-        .filter(|k| !(safe(k) || safe(program_of(k)) || granted(k)))
+        .filter(|k| match leviath_core::interaction::outside_path_of(k) {
+            Some(_) => !granted(k),
+            None => !(safe(k) || safe(program_of(k)) || granted(k)),
+        })
         .cloned()
         .collect()
 }
@@ -503,7 +537,10 @@ fn tokenize_for(command: &str, backslash_escapes: bool) -> Option<Vec<Segment>> 
     let mut lex = Lexer::default();
     let escapes = backslash_escapes;
     let mut chars = command.chars().peekable();
+    // The character this turn of the loop started from, one turn on.
+    let mut last = ' ';
     while let Some(c) = chars.next() {
+        let before = std::mem::replace(&mut last, c);
         match c {
             '\'' => {
                 // Single quotes suppress every expansion, so the contents are
@@ -516,7 +553,7 @@ fn tokenize_for(command: &str, backslash_escapes: bool) -> Option<Vec<Segment>> 
                     if q == '\'' {
                         break;
                     }
-                    lex.word.push(q);
+                    lex.push(q);
                 }
             }
             '"' => {
@@ -525,36 +562,56 @@ fn tokenize_for(command: &str, backslash_escapes: bool) -> Option<Vec<Segment>> 
                 loop {
                     match chars.next()? {
                         '"' => break,
+                        '\\' if escapes && chars.next_if_eq(&'\n').is_some() => {}
                         '\\' if escapes => {
                             // Inside double quotes a backslash escapes only the
                             // four characters that would otherwise be special;
                             // anywhere else it stands for itself.
                             let e = chars.next()?;
+                            lex.shown.push('\\');
                             if !matches!(e, '$' | '"' | '\\' | '`') {
                                 lex.word.push('\\');
                             }
-                            lex.word.push(e);
+                            lex.push(e);
                         }
                         '`' => return None,
                         '$' => lex.take_dollar(&mut chars, escapes)?,
-                        q => lex.word.push(q),
+                        q => lex.push(q),
                     }
                 }
             }
             '`' => return None,
+            // The shell removes a backslash before a newline ahead of reading
+            // any word, so `li\` and `nk` on the next line are `link`, and the
+            // halves of an operator join the same way. After a blank or a
+            // separator there is nothing to join; anywhere else the line is
+            // not one this reads. Between double quotes only a `$` could be
+            // joined to something, and a `$` before a backslash is already an
+            // expansion nothing vouches for.
+            '\\' if escapes && chars.next_if_eq(&'\n').is_some() => {
+                if !matches!(before, ' ' | '\t' | '\n' | ';' | '&' | '|') {
+                    return None;
+                }
+                last = ' ';
+            }
             '\\' if escapes => {
                 lex.begin_word();
-                lex.word.push(chars.next()?);
+                lex.shown.push('\\');
+                lex.push(chars.next()?);
             }
             // Not an escape on this shell, so it is data - and on Windows it is
             // the path separator, which is the whole reason this branch exists.
             '\\' => {
                 lex.begin_word();
-                lex.word.push('\\');
+                lex.push('\\');
             }
             '$' => {
                 lex.begin_word();
+                let ansi_c = chars.peek() == Some(&'\'');
                 lex.take_dollar(&mut chars, escapes)?;
+                if ansi_c {
+                    expansion::take_ansi_c(&mut chars)?;
+                }
             }
             // `<<WORD` opens a heredoc: its body is stdin data that starts
             // after the next newline, not part of this command line, so a `>`
@@ -570,6 +627,7 @@ fn tokenize_for(command: &str, backslash_escapes: bool) -> Option<Vec<Segment>> 
                 if !escapes {
                     return None;
                 }
+                lex.tangled = true;
                 // A file descriptor written in front of the operator (`3<<`)
                 // is part of it, the same as on the other redirects.
                 if !lex.word.chars().all(|d| d.is_ascii_digit()) {
@@ -586,6 +644,9 @@ fn tokenize_for(command: &str, backslash_escapes: bool) -> Option<Vec<Segment>> 
                 lex.pending_heredocs
                     .push(take_heredoc_delimiter(&mut chars, escapes, strip_tabs)?);
             }
+            // zsh reads `<1-5>` as a glob over numbered names; the other
+            // shells read two redirects.
+            '<' if expansion::is_numeric_glob(chars.clone()) => return None,
             '>' | '<' => {
                 // A file descriptor written in front of the operator (`2>`) is
                 // part of it, not a word of its own.
@@ -619,6 +680,12 @@ fn tokenize_for(command: &str, backslash_escapes: bool) -> Option<Vec<Segment>> 
                 if read_write {
                     chars.next();
                 }
+                // `>!` and `>&|` are zsh's `>|` and `>&`; the other shells
+                // write to a file called `!`, or stop at the bar.
+                let bar = dup && chars.peek() == Some(&'|');
+                if c == '>' && (bar || chars.peek() == Some(&'!')) {
+                    return None;
+                }
                 lex.swallow = Some(match (c, dup, read_write) {
                     ('>', true, _) => Swallow::Dup,
                     (_, true, _) => Swallow::Other,
@@ -628,6 +695,9 @@ fn tokenize_for(command: &str, backslash_escapes: bool) -> Option<Vec<Segment>> 
             }
             '&' if chars.peek() == Some(&'>') => {
                 chars.next();
+                if matches!(chars.peek(), Some('!' | '|')) {
+                    return None;
+                }
                 lex.end_word();
                 lex.swallow = Some(Swallow::Write);
             }
@@ -637,7 +707,9 @@ fn tokenize_for(command: &str, backslash_escapes: bool) -> Option<Vec<Segment>> 
                 if (c == '&' || c == '|') && chars.peek() == Some(&c) {
                     chars.next();
                 }
+                lex.tangled |= matches!(c, '(' | ')');
                 lex.end_word();
+                lex.grouped = c == '(' && lex.swallow.is_none();
                 lex.end_segment();
                 // Heredoc bodies begin after the line's newline, however many
                 // commands sat on it, and stack in the order their operators
@@ -649,9 +721,16 @@ fn tokenize_for(command: &str, backslash_escapes: bool) -> Option<Vec<Segment>> 
                 }
             }
             c if c.is_whitespace() => lex.end_word(),
+            // A `#` that starts a word starts a comment, which ends with its
+            // line whatever it holds: no quote in it opens anything.
+            '#' if escapes && !lex.in_word && expansion::ends_a_word(before) => {
+                lex.tangled = true;
+                while chars.next_if(|c| *c != '\n').is_some() {}
+            }
             _ => {
+                lex.bare_lead |= lex.word.is_empty();
                 lex.begin_word();
-                lex.word.push(c);
+                lex.push(c);
             }
         }
     }
@@ -666,119 +745,6 @@ fn tokenize_for(command: &str, backslash_escapes: bool) -> Option<Vec<Segment>> 
     Some(lex.segments)
 }
 
-/// A heredoc a line has opened, waiting for the newline its body starts after.
-struct Heredoc {
-    /// The word that ends the body, matched against whole lines.
-    delimiter: String,
-    /// Whether the delimiter carried any quoting. A quoted delimiter makes the
-    /// body pure data; an unquoted one leaves it subject to expansion, so a
-    /// command substitution inside it would really run.
-    literal: bool,
-    /// `<<-`: the shell strips leading tabs from body and delimiter lines.
-    strip_tabs: bool,
-}
-
-/// Read the delimiter word after `<<`, with its quoting.
-///
-/// Quote concatenation applies the way it does to any word (`<<'EO'F` ends at
-/// `EOF`), and any quoted piece - or a backslash escape - marks the whole
-/// delimiter quoted. `None` for a quote that never closes, or for no word at
-/// all (`<< ;`, or the third `<` of a here-string), where the shell would be
-/// reading something this cannot.
-fn take_heredoc_delimiter(
-    chars: &mut std::iter::Peekable<std::str::Chars>,
-    escapes: bool,
-    strip_tabs: bool,
-) -> Option<Heredoc> {
-    let mut delimiter = String::new();
-    let mut literal = false;
-    loop {
-        match chars.peek() {
-            Some('\'') => {
-                chars.next();
-                literal = true;
-                loop {
-                    match chars.next()? {
-                        '\'' => break,
-                        q => delimiter.push(q),
-                    }
-                }
-            }
-            Some('"') => {
-                chars.next();
-                literal = true;
-                loop {
-                    match chars.next()? {
-                        '"' => break,
-                        q => delimiter.push(q),
-                    }
-                }
-            }
-            Some('\\') if escapes => {
-                chars.next();
-                literal = true;
-                delimiter.push(chars.next()?);
-            }
-            Some(&c)
-                if c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '<' | '>') =>
-            {
-                break;
-            }
-            Some(&c) => {
-                chars.next();
-                delimiter.push(c);
-            }
-            None => break,
-        }
-    }
-    match delimiter.is_empty() {
-        true => None,
-        false => Some(Heredoc {
-            delimiter,
-            literal,
-            strip_tabs,
-        }),
-    }
-}
-
-/// Consume one heredoc's body, leaving `chars` just past the delimiter line.
-///
-/// `None` in the two cases where the line has to stay unreadable: the body
-/// never ends (the shell would keep reading input that is not here), and an
-/// unquoted body holding a `` ` `` or `$(` (the shell expands such a body, so
-/// a substitution inside it really runs - and could write - which is exactly
-/// what this reader exists to not guess about). A quoted body is data whatever
-/// it contains.
-fn take_heredoc_body(
-    chars: &mut std::iter::Peekable<std::str::Chars>,
-    heredoc: &Heredoc,
-) -> Option<()> {
-    loop {
-        let mut line = String::new();
-        let mut line_ended = false;
-        for c in chars.by_ref() {
-            if c == '\n' {
-                line_ended = true;
-                break;
-            }
-            line.push(c);
-        }
-        let candidate = match heredoc.strip_tabs {
-            true => line.trim_start_matches('\t'),
-            false => line.as_str(),
-        };
-        if candidate == heredoc.delimiter {
-            return Some(());
-        }
-        if !heredoc.literal && (line.contains('`') || line.contains("$(")) {
-            return None;
-        }
-        if !line_ended {
-            return None;
-        }
-    }
-}
-
 /// The tokenizer's mutable state, gathered so the character loop reads as the
 /// grammar it implements rather than as five `&mut` arguments threaded through
 /// every call.
@@ -791,9 +757,19 @@ struct Lexer {
     /// Read targets seen in the segment being accumulated.
     reads: Vec<Word>,
     word: String,
+    /// The word being accumulated as the line spells it: see [`Word::shown`].
+    shown: String,
     in_word: bool,
     literal: bool,
     quoted: bool,
+    /// What the word being accumulated expands: see [`Expands`].
+    expands: Expands,
+    /// Whether the word being accumulated opened with a bare character.
+    bare_lead: bool,
+    /// Whether the segment being accumulated is [`Segment::tangled`].
+    tangled: bool,
+    /// Whether the segment being ended is [`Segment::grouped`].
+    grouped: bool,
     /// Set by a redirect operator: the next word names a file, not a program.
     swallow: Option<Swallow>,
     /// Heredocs the current line has opened, in operator order. Their bodies
@@ -835,6 +811,9 @@ impl Lexer {
                 text: std::mem::take(&mut self.word),
                 literal: self.literal,
                 quoted: self.quoted,
+                shown: std::mem::take(&mut self.shown),
+                expands: std::mem::take(&mut self.expands),
+                bare_lead: self.bare_lead,
             };
             match self.swallow.take() {
                 Some(Swallow::Write) => self.writes.push(word),
@@ -857,9 +836,18 @@ impl Lexer {
     /// gathered so far turned out to belong to an operator.
     fn discard_word(&mut self) {
         self.word.clear();
+        self.shown.clear();
+        self.bare_lead = false;
         self.in_word = false;
         self.literal = true;
         self.quoted = false;
+        self.expands = Expands::Nothing;
+    }
+
+    /// Add a character of the word's value that the line spells as itself.
+    fn push(&mut self, c: char) {
+        self.word.push(c);
+        self.shown.push(c);
     }
 
     fn end_segment(&mut self) {
@@ -871,55 +859,67 @@ impl Lexer {
             words: std::mem::take(&mut self.current),
             writes: std::mem::take(&mut self.writes),
             reads: std::mem::take(&mut self.reads),
+            tangled: std::mem::take(&mut self.tangled),
+            grouped: std::mem::take(&mut self.grouped),
         });
     }
 
     /// Consume whatever follows a `$`.
     ///
-    /// `$(( ))` is arithmetic: it computes a number and runs nothing, so it
-    /// only marks the word as expanded. `$( )` is a command substitution, which
-    /// runs a command *inside* this one, so its contents become their own
-    /// segment - otherwise `echo $(curl evil)` would grant only `echo`, and a
-    /// later `echo $(curl evil)` would be covered by an earlier harmless one.
+    /// A plain parameter expansion (`$x`, `${x:-y}`: see [`expansion`]) only
+    /// marks the word as expanded, and is taken whole. `$(( ))` is
+    /// arithmetic: it computes a number and runs nothing, so it only marks
+    /// the word too. `$( )` is a command substitution, which runs a command
+    /// *inside* this one, so its contents become their own segment -
+    /// otherwise `echo $(curl evil)` would grant only `echo`, and a later
+    /// `echo $(curl evil)` would be covered by an earlier harmless one.
     fn take_dollar(
         &mut self,
         chars: &mut std::iter::Peekable<std::str::Chars>,
         escapes: bool,
     ) -> Option<()> {
         self.literal = false;
+        self.shown.push('$');
+        let mut ahead = chars.clone();
+        if let Some(plain) = expansion::take_plain(&mut ahead) {
+            *chars = ahead;
+            let var = plain.var.map(|name| VarRef {
+                name,
+                at: self.word.len(),
+                len: plain.text.len(),
+            });
+            self.expands.plain(var);
+            plain.text.chars().for_each(|c| self.push(c));
+            return Some(());
+        }
+        // Anything else may split the line where this reader does not, or
+        // not split it where this reader does.
+        self.tangled = true;
+        if chars.peek() == Some(&'{') && !expansion::braces_hold_no_quote(chars.clone()) {
+            return None;
+        }
         if chars.peek() != Some(&'(') {
+            self.expands = Expands::Unknown;
             return Some(());
         }
         chars.next();
         if chars.peek() == Some(&'(') {
             chars.next();
-            take_substitution(chars)?;
+            let inner = take_substitution(chars, escapes)?;
             // The second half of the closing `))`.
-            match chars.next() {
-                Some(')') => return Some(()),
-                _ => return None,
+            chars.next().filter(|close| *close == ')')?;
+            match expansion::arithmetic_is_inert(&inner) {
+                true => self.expands.plain(None),
+                false => self.expands = Expands::Unknown,
             }
+            self.shown.push_str(&format!("(({inner}))"));
+            return Some(());
         }
-        let inner = take_substitution(chars)?;
+        self.expands = Expands::Unknown;
+        let inner = take_substitution(chars, escapes)?;
+        self.shown.push_str(&format!("({inner})"));
         self.segments.extend(tokenize_for(&inner, escapes)?);
         Some(())
-    }
-}
-
-/// Take the text of a `$(...)` up to its matching `)`, leaving `chars` just
-/// past it. `None` when the parens never balance.
-fn take_substitution(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<String> {
-    let mut depth = 0usize;
-    let mut inner = String::new();
-    loop {
-        let c = chars.next()?;
-        match c {
-            '(' => depth += 1,
-            ')' if depth == 0 => return Some(inner),
-            ')' => depth -= 1,
-            _ => {}
-        }
-        inner.push(c);
     }
 }
 
@@ -935,7 +935,7 @@ fn take_substitution(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option
 fn segment_key(words: &[Word]) -> SegmentKey {
     match strip_to_program(words) {
         Stripped::NothingRuns(keys) => SegmentKey::from_keys(keys),
-        Stripped::Unreadable => SegmentKey::Unreadable,
+        Stripped::Unreadable(_) => SegmentKey::Unreadable,
         Stripped::Program { env_keys, words } => SegmentKey::Keys(program_keys(env_keys, words)),
     }
 }
@@ -960,8 +960,9 @@ enum Stripped<'a> {
     /// No program runs here: the segment is keywords, or bindings alone. The
     /// keys are the `env:NAME` entries those bindings contribute.
     NothingRuns(Vec<String>),
-    /// Something here decides what runs in a way no key can name.
-    Unreadable,
+    /// Something here decides what runs in a way no key can name: the word,
+    /// and why.
+    Unreadable(GrantBlocker),
     /// `words[0]` is a literal program; `env_keys` names what the segment
     /// bound in front of it.
     Program {
@@ -977,6 +978,10 @@ enum Stripped<'a> {
 /// Shared by [`segment_key`] and [`matchable_segments`], so the two readings
 /// of what a segment runs cannot drift apart.
 fn strip_to_program(words: &[Word]) -> Stripped<'_> {
+    let assigns = |w: &&Word| w.expands == Expands::Unknown && expansion::may_assign(&w.shown);
+    if let Some(word) = words.iter().find(assigns) {
+        return unbound(word);
+    }
     let mut env_keys = Vec::new();
     let mut rest = words;
     loop {
@@ -984,16 +989,37 @@ fn strip_to_program(words: &[Word]) -> Stripped<'_> {
             return Stripped::NothingRuns(env_keys);
         };
         let text = first.text.as_str();
+        if let Some(option) = options::changes_the_shell(rest) {
+            return Stripped::Unreadable(unkeyed(
+                option,
+                GrantBlockerReason::UnreadableLine,
+                "changes how the shell reads the words after it",
+            ));
+        }
+        if matches!(text, "for" | "select") {
+            // The header binds its variables, and a `do` in the same segment
+            // (`for x do cmd`) is followed by the program the body runs.
+            match loops::header_keys(&rest[1..], &mut env_keys) {
+                Ok(after) if after.first().is_some_and(|w| w.text == "do") => rest = after,
+                Ok(_) => return Stripped::NothingRuns(env_keys),
+                Err(name) => return unbound(name),
+            }
+            continue;
+        }
         if INERT_KEYWORDS.contains(&text) {
             return Stripped::NothingRuns(env_keys);
         }
         if CODE_INSTALLING.contains(&text) {
-            return Stripped::Unreadable;
+            return Stripped::Unreadable(unkeyed(
+                first,
+                GrantBlockerReason::InstallsCode,
+                "installs code that runs later",
+            ));
         }
         if ENV_BINDING.contains(&text) {
             return match binding_keys(&rest[1..], &mut env_keys) {
                 Ok(()) => Stripped::NothingRuns(env_keys),
-                Err(()) => Stripped::Unreadable,
+                Err(name) => unbound(name),
             };
         }
         if PREFIX_KEYWORDS.contains(&text) {
@@ -1012,11 +1038,31 @@ fn strip_to_program(words: &[Word]) -> Stripped<'_> {
     // program on every run, and a key naming it would grant all of them. The
     // same is true of a program whose whole job is running a command assembled
     // somewhere this cannot see.
-    if !program.literal || UNREADABLE_PROGRAMS.contains(&program.text.as_str()) {
-        return Stripped::Unreadable;
+    if !program.literal {
+        return Stripped::Unreadable(unkeyed(
+            program,
+            GrantBlockerReason::ProgramFromVariable,
+            "names the program at run time",
+        ));
     }
-    if carries_escape_flag(&program.text, rest) {
-        return Stripped::Unreadable;
+    if UNREADABLE_PROGRAMS.contains(&program.text.as_str()) {
+        return Stripped::Unreadable(unkeyed(
+            program,
+            GrantBlockerReason::RunsAssembledCommand,
+            "runs a command put together at run time",
+        ));
+    }
+    if let Some(flag) = options::escape_flag(&program.text, rest) {
+        return Stripped::Unreadable(unkeyed(
+            flag,
+            GrantBlockerReason::EscapeFlag,
+            "lets the program write a file or run another",
+        ));
+    }
+    match options::assigned(rest) {
+        Some(Ok(name)) => env_keys.push(env_key(name)),
+        Some(Err(name)) => return unbound(name),
+        None => {}
     }
     Stripped::Program {
         env_keys,
@@ -1024,58 +1070,17 @@ fn strip_to_program(words: &[Word]) -> Stripped<'_> {
     }
 }
 
-/// One command of a line as a yolo profile's shell rules see it: the words
-/// that would be matched, and whether they can be trusted to say what runs.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct MatchableSegment {
-    /// The program and its arguments, quotes removed, in order. Empty when the
-    /// segment runs nothing a rule could name.
-    pub words: Vec<String>,
-    /// The words do not fully decide what runs: the segment binds a variable
-    /// in front of its program (`PATH=x cargo`), one of its words is an
-    /// expansion (`rm -r $DIR`), or its program is one no key can name. An
-    /// opaque segment can still be refused; it can never be matched by a rule
-    /// that would let it through.
-    pub opaque: bool,
-    /// Whether it redirects a write somewhere that keeps it.
-    pub writes: bool,
-}
-
-/// The commands of a line, in order, for rule matching. `None` when the line
-/// cannot be read at all, the same cases [`command_keys`] treats as
-/// ungrantable. Segments that run nothing and bind nothing (`for i in ...`,
-/// `fi`) are left out; a binding on its own (`export FOO=1`) stays, as an
-/// opaque segment, because it changes what a later one resolves to.
-///
-/// The same tokenizer and the same reading of what a segment runs as the grant
-/// keys use; only the shape differs, because a rule wants the words and a key
-/// wants a name.
-pub(crate) fn matchable_segments(
-    command: &str,
-    backslash_escapes: bool,
-) -> Option<Vec<MatchableSegment>> {
-    let segments = tokenize_for(command, backslash_escapes)?;
-    let mut out = Vec::new();
-    for segment in &segments {
-        let writes = segment
-            .writes
-            .iter()
-            .any(|t| classify_write(t) != WriteTarget::Discarded);
-        let (words, opaque) = match strip_to_program(&segment.words) {
-            Stripped::NothingRuns(keys) if keys.is_empty() && !writes => continue,
-            Stripped::NothingRuns(_) | Stripped::Unreadable => (Vec::new(), true),
-            Stripped::Program { env_keys, words } => (
-                words.iter().map(|w| w.text.clone()).collect(),
-                !env_keys.is_empty() || words.iter().any(|w| !w.literal),
-            ),
-        };
-        out.push(MatchableSegment {
-            words,
-            opaque,
-            writes,
-        });
-    }
-    Some(out)
+/// A binding whose name no key can carry: `name` is not a variable name, or
+/// only the shell knows what it comes to.
+fn unbound<'a>(name: &Word) -> Stripped<'a> {
+    let (reason, why) = match name.literal {
+        true => (GrantBlockerReason::UnreadableLine, "is not a variable name"),
+        false => (
+            GrantBlockerReason::ExpandedAtRunTime,
+            "names the variable at run time",
+        ),
+    };
+    Stripped::Unreadable(unkeyed(name, reason, why))
 }
 
 /// The key naming a bound variable.
@@ -1088,26 +1093,23 @@ fn env_key(name: &str) -> String {
     format!("env:{name}")
 }
 
-/// Collect the names an [`ENV_BINDING`] builtin touches, or `Err` when one of
-/// them cannot be read.
+/// Collect the names an [`ENV_BINDING`] builtin touches, or `Err` with the
+/// word that cannot be read as one.
 ///
 /// Flags are skipped (`declare -x FOO` binds `FOO`), and a name supplied by an
 /// expansion is refused outright: `export $VAR` binds whatever `$VAR` says this
 /// run, so no key written today describes it.
-fn binding_keys(args: &[Word], out: &mut Vec<String>) -> Result<(), ()> {
+fn binding_keys<'a>(args: &'a [Word], out: &mut Vec<String>) -> Result<(), &'a Word> {
     for arg in args {
         if arg.text.starts_with('-') || arg.text.starts_with('+') {
             continue;
-        }
-        if !arg.literal {
-            return Err(());
         }
         let name = arg
             .text
             .split_once('=')
             .map_or(arg.text.as_str(), |(n, _)| n);
-        if !is_variable_name(name) {
-            return Err(());
+        if !arg.literal || !is_variable_name(name) {
+            return Err(arg);
         }
         out.push(env_key(name));
     }
@@ -1150,7 +1152,16 @@ fn folds_into_key(program: &str, arg: &Word) -> bool {
         && !arg.text.starts_with(|c: char| c.is_ascii_digit())
 }
 
+mod expansion;
+use expansion::{Expands, VarRef, take_substitution};
+mod heredoc;
+use heredoc::{Heredoc, take_heredoc_body, take_heredoc_delimiter};
+mod loops;
+mod matchable;
+pub(crate) use matchable::{MatchableSegment, matchable_segments};
 mod operands;
+mod options;
+mod readings;
 pub(crate) use operands::{Outside, outside_workdir};
 mod targets;
 pub(crate) use targets::{Landing, REDIRECT, Target, landing_for};

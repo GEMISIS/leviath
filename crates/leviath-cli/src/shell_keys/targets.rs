@@ -345,7 +345,7 @@ fn moves(segment: &Segment) -> bool {
 /// (`{ $X src; }`, `$(printf c)d`), or a program that runs text it was handed.
 fn program_unknown(words: &[Word]) -> bool {
     match strip_to_program(words) {
-        Stripped::Unreadable => true,
+        Stripped::Unreadable(_) => true,
         Stripped::NothingRuns(_) => false,
         Stripped::Program { words, .. } => match words {
             [prefix, rest @ ..] if WRAPPERS.contains(&prefix.text.as_str()) => {

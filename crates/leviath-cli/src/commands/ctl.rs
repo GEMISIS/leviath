@@ -422,9 +422,33 @@ fn format_interaction(agent_id: &str, req: &InteractionRequest) -> String {
     )
 }
 
+/// What approving a tool call for its stage or for the run would record, one
+/// key to a line, and each word that keeps it from recording anything. The
+/// option labels name the same keys on one line; this is the list laid out.
+fn format_grant(grant: &leviath_core::interaction::ApprovalGrant) -> String {
+    let mut s = String::new();
+    for (scope, keys) in [("stage", &grant.stage), ("run", &grant.run)] {
+        if keys.is_empty() {
+            continue;
+        }
+        s.push_str(&format!("\n  an approval for this {scope} records:"));
+        for key in keys {
+            s.push_str(&format!("\n    {}", key.label));
+        }
+    }
+    if !grant.blocked.is_empty() {
+        s.push_str("\n  an approval for the stage or the run records nothing:");
+        for blocker in &grant.blocked {
+            s.push_str(&format!("\n    {}", blocker.detail));
+        }
+    }
+    s
+}
+
 /// Render one open interaction in full, for `lev interactions <id>`: all of
 /// what the listing entry says, then what the listing has no room for (the
-/// call's arguments, the document under review), and the line that answers it.
+/// call's arguments, what an approval would record, the document under
+/// review), and the line that answers it.
 fn format_interaction_detail(agent_id: &str, req: &InteractionRequest) -> String {
     let mut s = format_interaction_head(agent_id, req);
     if let Some(arguments) = &req.tool_arguments {
@@ -433,6 +457,9 @@ fn format_interaction_detail(agent_id: &str, req: &InteractionRequest) -> String
         for line in pretty.lines() {
             s.push_str(&format!("\n    {line}"));
         }
+    }
+    if let Some(grant) = &req.grant {
+        s.push_str(&format_grant(grant));
     }
     if let Some(body) = &req.body {
         s.push_str("\n  body:");
