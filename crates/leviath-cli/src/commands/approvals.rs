@@ -144,8 +144,8 @@ fn explain(
     );
     if !outside.is_empty() {
         return format!(
-            "`{command}` reads outside the workdir ({}): {}. No entry or grant covers such a \
-             line, so it {}.\n",
+            "`{command}` reads outside the workdir ({}): {}. No entry on the safe list covers \
+             such a line, so it {}.\n",
             workdir.display(),
             outside.operands.join(", "),
             outside_verdict(outside_mode)

@@ -525,6 +525,35 @@ every option the way `lev interactions` numbers them:
  "answer": "lev respond coder-1788924523-abc123-approve-1 allow-run"}
 ```
 
+A tool approval also carries `grant`: what approving it for the stage or for the run would record.
+The two scoped labels name the same keys on one line. `stage` and `run` list every key, and
+`blocked` lists each word of a shell line that keeps it from recording anything:
+
+```json
+{"grant": {
+  "stage": [{"key": "shell:cargo test", "kind": "program", "label": "cargo test",
+             "program": "cargo test", "path": null}],
+  "run": [{"key": "shell:cargo test", "kind": "program", "label": "cargo test",
+           "program": "cargo test", "path": null},
+          {"key": "outside:[\"test\",\"/opt/tools/godot\"]", "kind": "outside_path",
+           "label": "test with /opt/tools/godot (outside the working directory)",
+           "program": "test", "path": "/opt/tools/godot"}],
+  "blocked": []
+}}
+```
+
+`kind` is `tool`, `program`, `variable`, `write` or `outside_path`. A blocked entry has the `word`
+as the line spells it, a `reason` and a `detail` sentence:
+
+```json
+{"word": "$GODOT", "reason": "program_from_variable",
+ "detail": "`$GODOT` names the program at run time"}
+```
+
+`reason` is one of `outside_workdir`, `expanded_at_run_time`, `program_from_variable`,
+`unplaceable_path`, `runs_assembled_command`, `installs_code`, `escape_flag`, `unreadable_line`
+and `nothing_runs`. The `request` of an `interaction_needed` event carries the same `grant`.
+
 `POST` the answer with the request's id as `request_id` and one of four fields. `option` is an
 option's `id`: `allow`, `allow-stage`, `allow-run` or `deny` on a tool approval, `yes` or `no` on a
 confirm, or a choice's own word, which stays put when the options are reordered. `value` is free

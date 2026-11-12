@@ -13,6 +13,12 @@ pub mod answer;
 pub use answer::{
     AnswerOption, answer_at, answer_options, answer_with_option, how_to_answer, parse_answer,
 };
+#[path = "interaction_grant.rs"]
+pub mod grant;
+pub use grant::{
+    ApprovalGrant, GrantBlocker, GrantBlockerReason, GrantKey, GrantKeyKind, outside_path_key,
+    outside_path_of,
+};
 
 // ─── Request ────────────────────────────────────────────────────────────────
 
@@ -77,6 +83,13 @@ pub struct InteractionRequest {
     /// Format of the body content.
     #[serde(default)]
     pub body_format: BodyFormat,
+    /// For a tool approval: what approving the call for its stage or for the
+    /// run would record, key by key, and what keeps it from recording
+    /// anything. The option labels name the same keys; this is the list a
+    /// client can lay out for itself. Absent on every other kind of request.
+    /// Boxed, so the requests that carry none are no larger for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant: Option<Box<ApprovalGrant>>,
 }
 
 impl InteractionRequest {
@@ -98,6 +111,7 @@ impl InteractionRequest {
             stage_name: stage.into(),
             body: None,
             body_format: BodyFormat::Plain,
+            grant: None,
         }
     }
 
@@ -120,6 +134,7 @@ impl InteractionRequest {
             stage_name: stage.into(),
             body: Some(markdown.into()),
             body_format: BodyFormat::Markdown,
+            grant: None,
         }
     }
 
@@ -143,6 +158,7 @@ impl InteractionRequest {
             stage_name: stage.into(),
             body: Some(initial_content.into()),
             body_format: BodyFormat::Plain,
+            grant: None,
         }
     }
 
@@ -164,6 +180,7 @@ impl InteractionRequest {
             stage_name: stage.into(),
             body: None,
             body_format: BodyFormat::Plain,
+            grant: None,
         }
     }
 
@@ -184,6 +201,7 @@ impl InteractionRequest {
             stage_name: stage.into(),
             body: None,
             body_format: BodyFormat::Plain,
+            grant: None,
         }
     }
 
@@ -246,51 +264,23 @@ impl InteractionRequest {
             stage_name: stage.into(),
             body: None,
             body_format: BodyFormat::Plain,
-        }
-    }
-
-    /// What a scoped approval of this call would grant, worded for an option
-    /// label. `None` when the call has no reusable key, which is what makes the
-    /// "it will ask again" wording honest rather than a surprise.
-    ///
-    /// Three keys then `+N more`: the point is to show what is being handed
-    /// over, and a label that wraps the terminal shows nothing.
-    fn grant_summary(grant_keys: &[String]) -> Option<String> {
-        if grant_keys.is_empty() {
-            return None;
-        }
-        let named: Vec<&str> = grant_keys
-            .iter()
-            .take(3)
-            .map(|k| k.strip_prefix("shell:").unwrap_or(k))
-            .collect();
-        let mut summary = named.join(", ");
-        if grant_keys.len() > named.len() {
-            summary.push_str(&format!(" +{} more", grant_keys.len() - named.len()));
-        }
-        Some(summary)
-    }
-
-    /// The label of the option that approves a call for `scope` ("stage" or
-    /// "run"), naming what that approval would be remembered under.
-    fn scope_label(scope: &str, keys: &[String]) -> String {
-        match Self::grant_summary(keys) {
-            Some(what) => format!("Allow {what} for this {scope}"),
-            None => format!("Allow for this {scope} (nothing reusable - it will ask again)"),
+            grant: None,
         }
     }
 
     /// Build a tool-approval request.
     ///
     /// `grant_keys` is what a `Stage` and a `Run` approval would each be
-    /// remembered under, and it goes in the option labels rather than in
-    /// `body` because the dashboard renders only `prompt` and `options` for
-    /// this kind. Naming it matters: a label promising more than the
-    /// dispatcher will remember - "Allow for this session" on a call it
-    /// degrades to once - has the user choose a grant they do not get. The two
-    /// scopes are named apart because they can differ: a run approval also
-    /// records what only a stage grant covers, which the stage option has no
-    /// need to hand over again.
+    /// remembered under. Every key goes in the option labels, because a
+    /// person approving for the run has to see all of what they hand over,
+    /// and the same list goes in [`InteractionRequest::grant`] for a client
+    /// that lays it out for itself. Naming it matters: a label promising more
+    /// than the dispatcher will remember - "Allow for this session" on a call
+    /// it degrades to once - has the user choose a grant they do not get. The
+    /// two scopes are named apart because they can differ: a run approval
+    /// also records what only a stage grant covers, which the stage option
+    /// has no need to hand over again. A call that records nothing says why,
+    /// when `grant_keys` carries the reason.
     ///
     /// Every client reads an option's meaning off its label through
     /// [`answer_options`], so the wording here is the one place it lives.
@@ -306,8 +296,9 @@ impl InteractionRequest {
             Some(detail) => format!("Allow tool call: `{tool}` - {detail}?"),
             None => format!("Allow tool call: `{tool}`?"),
         };
-        let stage_label = Self::scope_label("stage", &grant_keys.stage);
-        let run_label = Self::scope_label("run", &grant_keys.run);
+        let grant = ApprovalGrant::of(grant_keys);
+        let stage_label = grant.scope_label("stage", &grant.stage);
+        let run_label = grant.scope_label("run", &grant.run);
         Self {
             id: id.into(),
             kind: InteractionKind::ToolApproval,
@@ -325,6 +316,7 @@ impl InteractionRequest {
             stage_name: stage.into(),
             body: None,
             body_format: BodyFormat::Plain,
+            grant: Some(Box::new(grant)),
         }
     }
 
@@ -349,7 +341,8 @@ impl InteractionRequest {
 /// grant ends with its stage, so an approval for the run has to record those
 /// keys too or the same call asks again one stage later; an approval for the
 /// stage has no need of them. Both empty means the call has nothing reusable:
-/// it is approved once or not at all.
+/// it is approved once or not at all, and `blocked` says why when that is
+/// known.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GrantKeys {
     /// What an approval for the stage records: the keys nothing covers yet.
@@ -357,6 +350,9 @@ pub struct GrantKeys {
     /// What an approval for the run records: the keys nothing covers for the
     /// rest of the run.
     pub run: Vec<String>,
+    /// Why the call records nothing: each word of a shell line that keeps it
+    /// from being granted. Empty when it records something.
+    pub blocked: Vec<GrantBlocker>,
 }
 
 impl GrantKeys {
@@ -365,6 +361,7 @@ impl GrantKeys {
         Self {
             stage: keys.to_vec(),
             run: keys.to_vec(),
+            blocked: Vec::new(),
         }
     }
 
@@ -824,7 +821,8 @@ mod tests {
         assert_eq!(req.options[1], "Allow git status, ls for this stage");
         assert_eq!(req.options[2], "Allow git status, ls for this run");
 
-        // Beyond three, the rest are counted rather than wrapped off screen.
+        // Every key is named, however many: a person approving for the run
+        // has to see all of what they hand over.
         let req = InteractionRequest::tool_approval(
             "id",
             "shell",
@@ -832,7 +830,7 @@ mod tests {
             "s",
             &GrantKeys::same(&keys(&["a", "b", "c", "d", "e"])),
         );
-        assert_eq!(req.options[2], "Allow a, b, c +2 more for this run");
+        assert_eq!(req.options[2], "Allow a, b, c, d, e for this run");
 
         // A non-shell key is a bare tool name, with no prefix to strip.
         let req = InteractionRequest::tool_approval(
@@ -854,6 +852,7 @@ mod tests {
         let keys = GrantKeys {
             stage: vec!["shell:npm test".to_string()],
             run: vec!["shell:node".to_string(), "shell:npm test".to_string()],
+            blocked: Vec::new(),
         };
         let req = InteractionRequest::tool_approval(
             "id",
@@ -869,6 +868,7 @@ mod tests {
         let run_only = GrantKeys {
             stage: Vec::new(),
             run: vec!["shell:node".to_string()],
+            blocked: Vec::new(),
         };
         let req =
             InteractionRequest::tool_approval("id", "shell", serde_json::json!({}), "s", &run_only);
@@ -886,6 +886,7 @@ mod tests {
         let keys = GrantKeys {
             stage: vec!["a".to_string()],
             run: vec!["a".to_string(), "b".to_string()],
+            blocked: Vec::new(),
         };
         assert_eq!(keys.for_scope(Some(ApprovalScope::Stage)), ["a"]);
         assert_eq!(keys.for_scope(Some(ApprovalScope::Run)), ["a", "b"]);

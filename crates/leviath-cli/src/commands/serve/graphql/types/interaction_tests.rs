@@ -481,8 +481,134 @@ fn open_ask(
             stage_name: "plan".to_string(),
             body: None,
             body_format: Default::default(),
+            grant: None,
         },
     )
+}
+
+/// An open tool approval says what approving it for the stage or the run
+/// would record, key by key, and which word keeps it from recording anything.
+/// Every other ask has no grant.
+#[tokio::test]
+async fn an_open_approval_lists_what_an_approval_records() {
+    use leviath_core::interaction::{
+        GrantBlocker, GrantBlockerReason as CoreReason, GrantKeys, InteractionRequest,
+    };
+    let path_key = leviath_core::interaction::outside_path_key("test", "/abs/tool");
+    let approval = |id: &str, keys: &GrantKeys| {
+        InteractionRequest::tool_approval(
+            id,
+            "shell",
+            serde_json::json!({"command": "x"}),
+            "plan",
+            keys,
+        )
+    };
+    let every_kind = GrantKeys {
+        stage: vec!["shell:npm test".to_string()],
+        run: vec![
+            "shell:npm test".to_string(),
+            "shell:env:PATH".to_string(),
+            "shell:>out.txt".to_string(),
+            "web_fetch".to_string(),
+            path_key.clone(),
+        ],
+        blocked: Vec::new(),
+    };
+    let every_reason = GrantKeys {
+        stage: Vec::new(),
+        run: Vec::new(),
+        blocked: [
+            CoreReason::OutsideWorkdir,
+            CoreReason::ExpandedAtRunTime,
+            CoreReason::ProgramFromVariable,
+            CoreReason::UnplaceablePath,
+            CoreReason::RunsAssembledCommand,
+            CoreReason::InstallsCode,
+            CoreReason::EscapeFlag,
+            CoreReason::UnreadableLine,
+            CoreReason::NothingRuns,
+        ]
+        .into_iter()
+        .map(|reason| GrantBlocker {
+            word: "$G".to_string(),
+            reason,
+            detail: "`$G` names the program at run time".to_string(),
+        })
+        .collect(),
+    };
+    let open = vec![
+        ("run-a".to_string(), approval("ask-1", &every_kind)),
+        ("run-b".to_string(), approval("ask-2", &every_reason)),
+        open_ask("run-c", "ask-3", InteractionKind::FreeText),
+    ];
+    let schema = Schema::build(OpenProbe { open }, EmptyMutation, EmptySubscription).finish();
+    let answer = schema
+        .execute(Request::new(
+            "{ openInteractions { results { id grant { \
+             stage { key kind label program path } run { key kind label program path } \
+             blocked { word reason detail } } } } }",
+        ))
+        .await;
+    assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+    let json = serde_json::to_value(&answer.data).expect("data serializes");
+    let asks = &json["openInteractions"]["results"];
+
+    assert_eq!(
+        asks[0]["grant"]["stage"],
+        serde_json::json!([{
+            "key": "shell:npm test", "kind": "PROGRAM", "label": "npm test",
+            "program": "npm test", "path": null,
+        }])
+    );
+    let kinds: Vec<&str> = asks[0]["grant"]["run"]
+        .as_array()
+        .expect("run keys")
+        .iter()
+        .filter_map(|key| key["kind"].as_str())
+        .collect();
+    assert_eq!(
+        kinds,
+        ["PROGRAM", "VARIABLE", "WRITE", "TOOL", "OUTSIDE_PATH"]
+    );
+    assert_eq!(
+        asks[0]["grant"]["run"][4],
+        serde_json::json!({
+            "key": path_key, "kind": "OUTSIDE_PATH",
+            "label": "test with /abs/tool (outside the working directory)",
+            "program": "test", "path": "/abs/tool",
+        })
+    );
+    assert_eq!(asks[0]["grant"]["blocked"], serde_json::json!([]));
+
+    let reasons: Vec<&str> = asks[1]["grant"]["blocked"]
+        .as_array()
+        .expect("blockers")
+        .iter()
+        .filter_map(|blocker| blocker["reason"].as_str())
+        .collect();
+    assert_eq!(
+        reasons,
+        [
+            "OUTSIDE_WORKDIR",
+            "EXPANDED_AT_RUN_TIME",
+            "PROGRAM_FROM_VARIABLE",
+            "UNPLACEABLE_PATH",
+            "RUNS_ASSEMBLED_COMMAND",
+            "INSTALLS_CODE",
+            "ESCAPE_FLAG",
+            "UNREADABLE_LINE",
+            "NOTHING_RUNS",
+        ]
+    );
+    assert_eq!(asks[1]["grant"]["blocked"][0]["word"], "$G");
+    assert_eq!(
+        asks[1]["grant"]["blocked"][0]["detail"],
+        "`$G` names the program at run time"
+    );
+    assert_eq!(asks[1]["grant"]["run"], serde_json::json!([]));
+
+    assert!(asks[2]["grant"].is_null(), "a text ask grants nothing");
 }
 
 /// The approval inbox walks the daemon's own open asks the same way a run's
@@ -770,6 +896,7 @@ async fn every_mirrored_function_runs() {
         stage_name: "plan".to_string(),
         body: None,
         body_format: Default::default(),
+        grant: None,
     };
     let open = super::Interaction::open("asked-things".to_string(), request);
     assert_eq!(open.id, "ask-1");
@@ -817,6 +944,7 @@ fn an_open_tool_approval_carries_the_call_it_is_about() {
             stage_name: "work".to_string(),
             body: None,
             body_format: BodyFormat::default(),
+            grant: None,
         },
     );
     assert_eq!(asked.tool_name.as_deref(), Some("shell"));
@@ -844,6 +972,7 @@ fn an_open_tool_approval_carries_the_call_it_is_about() {
             stage_name: "work".to_string(),
             body: None,
             body_format: BodyFormat::default(),
+            grant: None,
         },
     );
     assert!(bare.tool_call.is_some());

@@ -268,7 +268,7 @@ async fn consume_once(
     loop {
         tokio::select! {
             item = stream.next_item() => match item {
-                Some(Streamed::Event(event)) => handle_event(state, client, outbox, event).await,
+                Some(Streamed::Event(event)) => handle_event(state, client, outbox, *event).await,
                 Some(Streamed::Opened(opened)) => {
                     if before.as_ref().is_none_or(|from| from.session != opened.session) {
                         sweep(state, client, outbox);

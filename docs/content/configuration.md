@@ -762,7 +762,8 @@ does not cover a line that also runs something else: `cat notes.md && curl evil`
 which file put it there.
 
 Nor does it cover a path outside the workdir. `cat src/main.rs` runs, while `cat /etc/hosts` and
-`grep -r key ~` fall back to the shell's policy, which asks. A granted `[read_paths]` root counts as
+`grep -r key ~` fall back to the shell's policy, which asks. An approval at that prompt can cover
+`cat` with `/etc/hosts` for the run; no entry here can. A granted `[read_paths]` root counts as
 inside. Set `outside_workdir = "deny"` to refuse such a command instead, even under `--yolo`. See
 [Built-in tools](/docs/tools#where-a-safe-listed-read-may-look) for which words count as paths.
 
@@ -782,10 +783,24 @@ shell = ["env:RUST_LOG", "env:CARGO_TERM_COLOR"]
 grants exactly that one. There is no entry that covers every variable at once, and no program name
 widens onto an `env:` key.
 
+A variable is bound in more ways than with an `=`, and each is keyed the same way: the variable of
+a `for` or `select` loop, the names handed to `read`, `mapfile`, `readarray` and `getopts`, and
+the one `printf -v` assigns. A loop variable with an ordinary lower-case name (`for f in a b`) is
+the exception and needs no key, since no shell and no program reads one. An expansion that
+assigns as it expands (`${NAME:=value}`, `$((n++))`) names its variable in a way no key can carry,
+so a line holding one prompts every time.
+
 Two constructs are refused rather than keyed, because they install code to run at a point no program
 name in the line describes: `trap`, and defining or aliasing a name with `function`, `alias` or
-`unalias`. A line containing one of those prompts every time and cannot be pre-approved. `set -euo
-pipefail` is unaffected, since shell options change nothing about which program a name resolves to.
+`unalias`. A line containing one of those prompts every time and cannot be pre-approved. The same
+goes for a line the reader cannot be sure it reads the way the shell will: quoting the shells do
+not read alike (`$'...'` with an escaped quote in it, a `${...}` with a quote between its braces)
+and a redirect only zsh spells (`>!`, `>&|`). A comment is skipped to the end of its line, as the
+shell skips it. `set -euo
+pipefail` is unaffected, since those options change nothing about which program a name resolves to
+or how a word is read. An option that does change how words are read (`setopt`, `shopt`, `set -o`
+with anything else) makes the line one that prompts every time too: see
+[Built-in tools](/docs/tools#where-a-safe-listed-read-may-look).
 
 ### Redirects
 

@@ -2497,6 +2497,7 @@ mod tests {
             stage_name: String::new(), // empty
             body: None,
             body_format: interaction::BodyFormat::Plain,
+            grant: None,
         });
         agent.stage_index = 2;
         agent.num_stages = 3;

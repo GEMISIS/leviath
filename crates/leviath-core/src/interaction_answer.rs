@@ -62,20 +62,34 @@ const APPROVAL_LABELS: [&str; 4] = [
 /// The labels are built in this crate, so they are the one place the meaning
 /// lives; a label this does not know is a deny, because an answer nobody
 /// recognised must never let a call through.
+///
+/// A scoped label names the keys it grants and, when it grants none, the
+/// words of the line that stopped it, and both are text the model wrote. So
+/// the scope is read off where this crate puts it, the start or the end of
+/// the label, never off the middle: a program called `x for this run` in the
+/// stage option's list does not make that option a run approval.
 fn approval_option(label: &str) -> (String, Effect) {
     match label {
         "Allow once" => ("allow".to_string(), Effect::Approve(ApprovalScope::Once)),
         "Deny" => ("deny".to_string(), Effect::Deny),
         DENY_WITH_FEEDBACK => ("deny-feedback".to_string(), Effect::DenyWithFeedback),
-        stage if stage.contains("for this stage") => (
+        stage if names_scope(stage, "stage") => (
             "allow-stage".to_string(),
             Effect::Approve(ApprovalScope::Stage),
         ),
-        run if run.contains("for this run") => {
+        run if names_scope(run, "run") => {
             ("allow-run".to_string(), Effect::Approve(ApprovalScope::Run))
         }
         other => (slug(other), Effect::Deny),
     }
+}
+
+/// Whether `label` is the option that approves for `scope`: "Allow ... for
+/// this `scope`", or "Allow for this `scope`" with or without what follows it
+/// in brackets.
+fn names_scope(label: &str, scope: &str) -> bool {
+    label.starts_with(&format!("Allow for this {scope}"))
+        || (label.starts_with("Allow ") && label.ends_with(&format!(" for this {scope}")))
 }
 
 /// A word made from a label: lower case, letters and digits, a dash for

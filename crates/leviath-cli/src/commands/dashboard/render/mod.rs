@@ -292,18 +292,18 @@ impl Dashboard {
             || (self.input_mode && is_waiting && self.selected_stage_can_respond())
             || (self.input_mode && accepts_messages)
         {
-            let n = options.len() as u16;
-            if self.input_mode {
-                match &kind {
-                    // The editor's rows plus one for the Send button under it.
-                    Some(InteractionKind::FreeText) | None => 12,
-                    _ => (n + 4).min(14),
-                }
-            } else {
-                match &kind {
-                    Some(InteractionKind::FreeText) | None => 6,
-                    _ => (n + 5).min(14),
-                }
+            // A list of options takes the rows its labels wrap to, as far as
+            // the panes above leave room: the content pane keeps its four.
+            let fixed = header_h + info_h + tabs_h + context_h + 4;
+            let most = area.height.saturating_sub(fixed).max(14);
+            let listed = self
+                .choice_pane_rows(&agent, &pending_req, &kind, &options, area.width)
+                .min(most);
+            match (&kind, self.input_mode) {
+                // The editor's rows plus one for the Send button under it.
+                (Some(InteractionKind::FreeText) | None, true) => 12,
+                (Some(InteractionKind::FreeText) | None, false) => 6,
+                _ => listed,
             }
         } else {
             0
@@ -913,6 +913,7 @@ regions = []
             stage_name: "main".to_string(),
             body: None,
             body_format: leviath_core::interaction::BodyFormat::Plain,
+            grant: None,
         });
         dash.agents.push(agent);
         dash.update_display_indices();
@@ -924,6 +925,104 @@ regions = []
             .unwrap();
         let buf = rendered_buffer(&terminal);
         assert!(buf.contains("What should I do?"), "{buf}");
+    }
+
+    /// An approval's scoped options name every key they grant, so a label
+    /// runs past the pane's width and wraps. The pane grows by the wrapped
+    /// rows: every key, every option and the hint under them stay on screen,
+    /// whether the options are being read or chosen from.
+    #[test]
+    fn an_approval_with_long_labels_shows_every_key_and_every_option() {
+        let keys: Vec<String> = [
+            "cargo build",
+            "cargo test",
+            "mkdir build-output",
+            "npm install",
+            "npm run build",
+            "python3 scripts/generate.py",
+            "tar xzf",
+        ]
+        .iter()
+        .map(|k| format!("shell:{k}"))
+        .chain([leviath_core::interaction::outside_path_key(
+            "test",
+            "/Applications/Godot.app/Contents/MacOS/Godot",
+        )])
+        .collect();
+        let request = leviath_core::interaction::InteractionRequest::tool_approval(
+            "req-1",
+            "shell",
+            serde_json::json!({"command": "cargo build && cargo test"}),
+            "main",
+            &leviath_core::interaction::GrantKeys::same(&keys),
+        );
+        for input_mode in [false, true] {
+            let mut terminal = Terminal::new(TestBackend::new(80, 40)).unwrap();
+            let mut dash = make_test_dashboard();
+            dash.input_mode = input_mode;
+            let mut agent = make_test_agent("run-wait", AgentDisplayStatus::Waiting);
+            agent.pending_request = Some(request.clone());
+            dash.agents.push(agent);
+            dash.update_display_indices();
+            terminal
+                .draw(|f| {
+                    let area = f.area();
+                    dash.draw_detail_panel(f, area);
+                })
+                .unwrap();
+            // Wrapping breaks a label across rows, so the buffer is read
+            // with its borders, line breaks and padding closed up.
+            let buf: String = rendered_buffer(&terminal)
+                .replace('│', " ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            for shown in [
+                "python3 scripts/generate.py",
+                "tar xzf",
+                "test with /Applications/Godot.app/Contents/MacOS/Godot",
+                "for this stage",
+                "for this run",
+                "[4] Deny",
+                "[5] Deny with feedback",
+            ] {
+                assert!(buf.contains(shown), "{shown:?} is off screen: {buf}");
+            }
+            let hint = match input_mode {
+                true => "[Enter] confirm",
+                false => "[i] respond",
+            };
+            assert!(buf.contains(hint), "the hint is off screen: {buf}");
+        }
+    }
+
+    /// On a terminal too short for every wrapped row, the pane takes what the
+    /// panes above leave and no more.
+    #[test]
+    fn an_approval_pane_never_takes_the_whole_panel() {
+        let keys: Vec<String> = (0..60).map(|n| format!("shell:program-{n} sub")).collect();
+        let request = leviath_core::interaction::InteractionRequest::tool_approval(
+            "req-1",
+            "shell",
+            serde_json::json!({"command": "x"}),
+            "main",
+            &leviath_core::interaction::GrantKeys::same(&keys),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(60, 30)).unwrap();
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-wait", AgentDisplayStatus::Waiting);
+        agent.pending_request = Some(request);
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                dash.draw_detail_panel(f, area);
+            })
+            .unwrap();
+        let buf = rendered_buffer(&terminal);
+        assert!(buf.contains("WAITING"), "the header is still drawn: {buf}");
+        assert!(buf.contains("Allow once"), "{buf}");
     }
 
     #[test]
@@ -1008,6 +1107,7 @@ regions = []
             stage_name: "main".to_string(),
             body: Some("# Plan\n\n- Step 1\n- Step 2\n- Step 3\n\nDo you approve?".to_string()),
             body_format: leviath_core::interaction::BodyFormat::Markdown,
+            grant: None,
         });
         dash.agents.push(agent);
         dash.update_display_indices();

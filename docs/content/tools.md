@@ -183,31 +183,96 @@ names stays inside the working directory or a granted `[read_paths]` root. It is
 | Command | Pre-approved? |
 | --- | --- |
 | `cat src/main.rs`, `grep -rn foo .`, `git log -- src`, `cat src/*.rs` | Yes |
+| `echo "$HOME"`, `echo "exit=${pipestatus[1]}"`, `for d in a b; do test -e "$d"; done` | Yes |
+| `godot -gdir=res://tests`, `cat --url=https://example.com/x` | Yes |
 | `cat /etc/hosts`, `grep -r key ~`, `head ../other/secret` | No |
 | `cd / && cat etc/passwd`, `git -C /elsewhere log`, `{ cat; } < /etc/hosts` | No |
 | `cat link`, `cat lea*` or `cat link/../x`, where a symlink points outside | No |
+| `cat "$HOME/x"`, `echo "$(cat /etc/hosts)"`, `cat file:///etc/hosts`, `cat x:///etc/hosts` | No |
+| `file -m x:/etc/hosts f`, `cat if=/etc/hosts`, `cat =ls`, `diff -r a b`, `pgrep -F /etc/hosts` | No |
 
 The check fails closed: what it cannot prove is inside counts as outside.
 
-- **Expansions.** A `$VAR`, `$(...)` or `%VAR%` on `cmd.exe` counts as outside, even handed to
-  `echo`.
+- **Expansions.** A `$VAR` or a `$(...)` handed to a program that opens its arguments counts as
+  outside, and so does a `%VAR%` on `cmd.exe`. A program that opens no file, such as `echo` or
+  `printf`, may be handed a plain parameter expansion: one that produces a value and does nothing
+  else. That is `$name`, `$1`, `${name}`, `${name[1]}`, `${#name}`, `${name:-default}`,
+  `${name%pattern}` and `${name:0:5}`. Anything that can run a command, read a file or assign is
+  still outside: `$(...)`, backticks, arithmetic over a variable, `${!name}`, `${name:=value}`, and
+  zsh's `${(e)name}` and `$name:h`. `printf` takes an expansion only after its format, because
+  `printf -v` assigns a variable.
+- **Loops.** `for d in a b; do test -e "$d"; done` is checked as `test -e a` and `test -e b`. This
+  holds inside the loop's `do ... done` and nowhere else. Every word of the list has to be spelled
+  out, with no glob, brace list, `~`, expansion or substitution. The variable has to be an ordinary
+  lower-case name, and nothing else on the line may name it. A line with a parenthesis, a heredoc,
+  `[[`, a comment or a line continuation is not read for loops at all. After `done` the variable
+  counts as an expansion again, since the loop may never have run. A word that starts with `-` is
+  never read this way: `grep -$d` stays an expansion. The word a value completes is checked like
+  any other, so a value cannot finish a `file:` URL, a glob or a `..` unnoticed.
+- **Lists.** A word is read in its parts as well as whole. What stands between its `:`, `,` and
+  `=` is each checked as a path, because a program may take the word apart there: `file -m
+  a:/etc/hosts` opens both files, and `cat if=/etc/hosts` counts as outside too. A part that is an
+  absolute path with nothing at the root of the file system to open, such as `//example.com` out
+  of a URL or `/api/v1` out of `path=/api/v1`, is not a read. So `12:30`, `key:value` and
+  `host:8080` change nothing.
 - **Globs and braces.** A glob is expanded and every match checked. A brace list, a pattern that
   could match `..`, or more than 1,000 matches counts as outside.
 - **`..`.** A path with `..` in it is also resolved as the shell resolves it, through symlinks.
 - **Flags.** Flag values count (`--git-dir=/x`, `-f/etc/list`), so a pattern starting with `/`
-  can prompt too.
+  can prompt too. A `-name=value` is read as its value, the way `--name=value` is.
+- **URLs.** A word spelled `scheme://rest` is not read as an absolute path at its `//`. It is
+  checked as written and as `rest` alone, so `x:///etc/passwd` and `x://../../etc/passwd` count as
+  outside while `res://tests` and `https://example.com/x` do not. A `file:` URL is its path:
+  `file:///etc/passwd` is `/etc/passwd`. The `//rest` after the colon is one of the word's parts
+  (see Lists), so `x://etc/passwd` counts as outside wherever `/etc` exists.
+- **Line continuations.** The shell removes a backslash at the end of a line before it reads a
+  single word, so `cat sub/.\` followed by `./x` on the next line is `cat sub/../x`. After a
+  space, a `;`, a `|` or a `&` there is nothing for it to join and the line is read as if it were
+  not there, which is how a long command is usually broken up. In the middle of a word or against
+  a redirect the line cannot be read, and the same goes for a line of an unquoted heredoc that
+  ends in a backslash.
+- **What zsh rewrites.** A word that opens with a bare `=` is the path of a command in zsh
+  (`=ls` is `/bin/ls`, and so is `""=ls`), so it cannot be placed; quoted, it is text. `f<1-5>`
+  is a glob in zsh and two redirects elsewhere, so a line with one is unreadable. `***/x` walks
+  through every symlink in zsh, and `cd old new` rewrites the current directory there, so
+  neither can be followed. A parenthesis straight after a program's word is part of a glob in
+  zsh (`cat x(id|ps)` opens `xid` or `xps`), so such a line counts as outside; a subshell,
+  `$(...)` and `<(...)` are read as before. A line that changes how the shell expands words
+  (`setopt`, `unsetopt`, `emulate`, `shopt`, or a `set` option other than `-e`, `-u`, `-x`, `-v`,
+  `-f`, `-C` and `-o` with errexit, nounset, pipefail, xtrace, verbose, noglob or noclobber) is
+  never covered and records nothing. The check reads the line, not your shell's start-up files:
+  it assumes the options a shell starts with.
 - **`cd`.** A `cd` that leaves the working directory makes everything after it on the line
-  uncovered.
-- **`grep -R`.** It follows every symlink it meets as it recurses, so it counts as outside. Plain
-  `grep -r` does not follow them.
+  uncovered. A `cd` after a loop has started is not followed at all, because it moves the shell
+  for every pass after the first, and such a line counts as outside.
+- **Files the line does not name.** Some arguments make a program read files the line never
+  spells out, and such a line counts as outside. `grep -R` and BSD `grep -S` follow every symlink
+  as they recurse (plain `grep -r` does not), and so does `diff -r`. `diff` handed a directory
+  compares every file in it, with or without `-r`. `file -f`, `wc --files0-from` and
+  `du --files0-from` read a list of files from a file, and `strings @file` reads its arguments
+  from one. A `jq` program that uses `import`, `include` or `modulemeta` reads modules from a
+  search path of its own. An option counts however it is spelled: a long one by any prefix of
+  its name (`--rec` is `--recursive`), a short one inside a cluster of letters.
 
-Only programs that open no file named in their arguments, such as `echo` and `printf`, have their
-literal words skipped.
+Only programs that open no file, through an argument or through any option, have their literal
+words skipped: `echo`, `printf`, `seq`, `sleep`, `true`, `false`, `pwd`, `basename`, `dirname`,
+`uname`, `whoami`, `id`, `which` and `tr`.
+
+Letting `echo` print a variable has a consequence worth knowing. `echo` is on the default safe
+list, so a model can print any environment variable the shell has, with no prompt, and read what
+comes back. A blueprint's command seed can do the same before the first reply. Which variables the
+shell has is for
+[`[security] shell_env`](/docs/configuration#what-a-shell-command-inherits) to decide. Its default withholds the ones
+shaped like credentials. If a variable the shell keeps must not reach the model, withhold it there,
+or take `echo` and `printf` off the safe list.
 
 A command that fails the check is not refused. It falls back to the shell's own policy, which asks
-by default. The prompt offers no grant for the stage or the run: approving `cat src/a /etc/hosts`
-approves that call, and nothing reusable. To refuse such commands instead, even under `--yolo`,
-set `outside_workdir = "deny"`:
+by default. When what it names outside is one exact path written as a plain word, the prompt
+offers to remember that program with that path: approving `cat src/a /etc/hosts` for the run
+covers `cat` with `/etc/hosts`, and no other path and no other program. Anything else outside (an
+expansion, a glob, a path in an option or a redirect, a `cd` out) has nothing reusable, and the
+prompt names the word that stopped it. See [the prompt](/docs/interaction#the-prompt). To refuse
+such commands instead, even under `--yolo`, set `outside_workdir = "deny"`:
 
 ```toml
 # config.toml

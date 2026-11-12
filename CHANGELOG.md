@@ -15,6 +15,97 @@ same list.
 
 ### Changed
 
+- An "allow for this run" covers more of the shell lines it is given for, so the same line does
+  not ask twice (#1118). Four things change in what the check on a line's paths lets through:
+  - A short flag with `=` is read as its value, the way a long one is: `-gdir=res://tests` no
+    longer counts as the path `/tests`. The value is still checked, so `-o=/etc/passwd` asks.
+  - A word spelled `scheme://rest` is not read as an absolute path at its `//`. It is checked as
+    written and as `rest`, so `x:///etc/passwd` still asks. A `file:` URL is now read as the path
+    it names, which it was not before: `cat file:///etc/hosts` asks.
+  - A program that opens no file named in its arguments (`echo`, `printf` and the rest of that
+    list) may be handed a plain parameter expansion such as `$HOME` or `${pipestatus[1]}`. A
+    substitution, arithmetic over a variable, `${!name}`, an assignment and zsh's evaluating forms
+    still ask. This lets `echo`, which is on the default safe list, print any environment variable
+    the shell has with no prompt; `[security] shell_env` decides which those are.
+  - Inside `for NAME in <words>; do ... done`, a loop variable whose list is spelled out is checked
+    as each of its values. After the loop, or with a glob or an expansion in the list, or when
+    anything else on the line names the variable, it is an expansion as before.
+- The check on a shell line's paths reads a word the way a program or the shell may take it apart,
+  not only as it is written (#1118). Each of these ran with no prompt when the program was on the
+  safe list, and now asks:
+  - What stands between a word's `:`, `,` and `=` is each checked as a path: `file -m
+    x:/etc/hosts f` (a colon list, whose lines `file` prints back), `cat if=/etc/hosts`, and
+    `cat x=~/.ssh/id_rsa`, where bash expands the `~`. A part that is an absolute path with
+    nothing at the root of the file system to open is not a read, so `12:30`, `key:value`,
+    `host:8080` and a URL inside a `grep` pattern change nothing.
+  - A backslash at the end of a line joins it to the next before the shell reads a word, so
+    `cat sub/.\` with `./x` on the next line read `sub/../x`, and the two halves of an option or
+    of a `$(` could be joined the same way. Such a line is now unreadable when the backslash
+    stands inside a word, against a redirect, or at the end of a line of an unquoted heredoc. A
+    line broken after a space, a `;`, a `|` or a `&` is read as before.
+  - A word zsh rewrites is not placed as written: `cat =ls` reads `/bin/ls`, and `cat f<1-5>` is a
+    glob there, so the first cannot be placed and the second makes the line unreadable. zsh's
+    `***/x`, which walks through symlinks, and its two-name `cd old new` are not followed either,
+    and a parenthesis straight after a program's word is a glob there (`cat x(id|ps)` opens `xid`
+    or `xps`), so that line asks.
+  - A line that changes how the shell expands words (`setopt`, `unsetopt`, `emulate`, `shopt`, or
+    a `set` option other than `-e -u -x -v -f -C` and `-o` with errexit, nounset, pipefail, xtrace,
+    verbose, noglob or noclobber) is never covered and records nothing. `set -euo pipefail` is
+    unaffected.
+  - Arguments that make a safe-listed program read files the line does not name count as outside:
+    BSD `grep -S`, `diff -r`, `diff` on a directory, `file -f`, `wc --files0-from`,
+    `du --files0-from`, `strings @file`, and a `jq` program that uses `import`, `include` or
+    `modulemeta`. `file -C`, which writes a compiled magic file, and
+    `git branch --edit-description`, which opens an editor, are refused the way `git --output`
+    is. Each is found however the option is spelled: a long one by any prefix of its name
+    (`file --comp`, `git branch --e`), a short one in a cluster (`file -bC`), and the program by
+    its own name whatever directory it is run from.
+  - `pgrep`, `hostname` and `ps` have their arguments checked as paths like any other program:
+    `pgrep -F` and `hostname -F` open the file they are handed.
+- A shell line is read the way the shell reads it, or it prompts (#1118). When the reader cannot
+  be sure where a word or a command starts, the line records nothing and asks every time:
+  - A comment is skipped to the end of its line, whatever it holds. A quote inside one used to
+    be read as opening a string.
+  - A `$(...)` ends at the parenthesis that closes it. One between quotes, behind a backslash or
+    in a comment does not close it.
+  - Quoting the shells do not read alike makes a line unreadable: a `$'...'` with an escaped
+    quote in it, and a `${...}` with a quote between its braces.
+  - So does a redirect only zsh spells: `>!`, `>&|`, `&>|` and their appending forms.
+  - A variable bound without an `=` is keyed like any other: the variable of a `for` or
+    `select` loop, the names handed to `read`, `mapfile`, `readarray` and `getopts`, and the
+    one `printf -v` assigns. An ordinary lower-case loop variable (`for f in a b`) needs no key.
+    An expansion that assigns (`${NAME:=value}`, `$((n++))`) keeps the line from being keyed.
+    `read` used to be approved as a program named `read`; it is now approved by the variables
+    it sets.
+  - `for x do cmd` names `cmd`, which used to go unnamed, and `jobs` is a program like any
+    other, since `jobs -x` runs one.
+  - A `cd` after a loop has started is not followed, and the line asks.
+- A line that hands a program one exact path outside the working directory can be approved for
+  the stage or the run (#1118). `test -x /opt/tools/godot` used to record nothing. It now offers
+  `Allow test with /opt/tools/godot (outside the working directory) for this run`, and the grant
+  covers that program with that path: another path, a path under or above it, and another program
+  with the same path all ask. The path is recorded with its symlinks and `..` resolved. The safe
+  list never covers a path outside, and `outside_workdir = "deny"` refuses the line whatever was
+  granted. A path outside in an option, a redirect, a glob or a `cd` records nothing, as before.
+  The grant is one more key in the run file's existing list of grant keys, so the file's layout
+  does not change.
+- **Breaking.** The scoped options of a tool approval name every key they grant. The label used
+  to stop at three and count the rest (`Allow cp, curl, mkdir +2 more for this run`). A line that
+  records nothing now says why in the label, naming the word, as in
+  ``Allow for this run (nothing reusable: `$GODOT` names the program at run time - it will ask again)``.
+  A client that matched those labels as text should read `answer_options[].id` instead, which has
+  not changed.
+- An open tool approval carries `grant`: every key an approval for the stage and for the run would
+  record (`key`, `kind`, `label`, and the `program` and `path` it names), and `blocked`, each word
+  of a shell line that keeps it from recording anything, with a `reason` and a `detail`. It is on
+  `GET /api/runs/{id}/interaction`, in `lev interactions --json`, on `InteractionOutput.grant`
+  over GraphQL and in the `interaction_needed` event. `lev interactions <id>` lays the keys out a
+  line each, and the dashboard's prompt grows to show every wrapped option.
+- **Breaking, library.** `leviath_core::interaction::InteractionRequest` gains a `grant` field and
+  `GrantKeys` gains `blocked`, so code that builds either with a struct literal needs the new
+  field. `ApprovalGrant`, `GrantKey`, `GrantKeyKind`, `GrantBlocker`, `GrantBlockerReason`,
+  `outside_path_key` and `outside_path_of` are new. `leviath_runtime::control_socket::Streamed::Event`
+  holds its event in a `Box`, since an event carrying a request is larger by that field.
 - A stage that declares `image/png` and draws through OpenRouter's Images API gets a PNG. The
   declared type never reached the gateway, so `flux-3-image-klein` and `flux.2-flex` answered in
   their default JPEG. The first declared type whose format the model's entry in

@@ -137,76 +137,7 @@ impl Dashboard {
                 ClickTarget::ResponseSend,
             );
         } else {
-            let (title, prompt_lines): (&str, Vec<Line>) = if self.input_mode {
-                let mut lines: Vec<Line> = vec![];
-                // MultipleChoice / ToolApproval / Confirm
-                for (i, opt) in options.iter().enumerate() {
-                    let sel = i == self.choice_selected;
-                    let prefix = if sel { " > " } else { "   " };
-                    // Numbered from 1, as `lev interactions` lists them.
-                    let label = format!("{}[{}] {}", prefix, i + 1, opt);
-                    let style = if sel {
-                        Style::default().fg(C_WARN).add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(C_MUTED)
-                    };
-                    lines.push(Line::from(Span::styled(label, style)));
-                }
-                lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
-                    format!(
-                        " [↑↓] or [1-{}] select  [Enter] confirm  [Esc] cancel",
-                        options.len()
-                    ),
-                    Style::default().fg(C_DIM),
-                )));
-                (" Response ", lines)
-            } else {
-                let mut lines: Vec<Line> = vec![];
-                // An interactive stage that has replied asks nothing in
-                // particular: it is the person's turn to say something.
-                let conversing = agent.awaits_message();
-                let idle = match conversing {
-                    true => "It has replied, and waits for your next message",
-                    false => "Waiting for input",
-                };
-                let prompt_text = pending_req
-                    .as_ref()
-                    .map(|r| r.prompt.as_str())
-                    .or(agent.waiting_prompt.as_deref())
-                    .unwrap_or(idle);
-                lines.push(Line::from(Span::styled(
-                    format!(" {}", prompt_text),
-                    Style::default().fg(C_WARN),
-                )));
-                if !options.is_empty() {
-                    lines.push(Line::from(""));
-                    for (i, opt) in options.iter().enumerate() {
-                        let label = format!("   [{}] {}", i + 1, opt);
-                        lines.push(Line::from(Span::styled(
-                            label,
-                            Style::default().fg(C_MUTED),
-                        )));
-                    }
-                }
-                lines.push(Line::from(""));
-                // An EditText opens the document for in-place editing in the pane
-                // above, so label it as editing rather than a generic response.
-                let is_edit = matches!(kind, Some(InteractionKind::EditText));
-                let hint = match (is_edit, conversing) {
-                    (true, _) => " [i] edit the document above  [k] kill",
-                    (false, true) => " [i] reply  [k] kill",
-                    (false, false) => " [i] respond  [k] kill",
-                };
-                lines.push(Line::from(Span::styled(hint, Style::default().fg(C_DIM))));
-                let title = match (is_edit, conversing) {
-                    (true, _) => " Edit Document ",
-                    (false, true) => " Your Turn ",
-                    (false, false) => " Input Required ",
-                };
-                (title, lines)
-            };
-
+            let (title, prompt_lines) = self.choice_lines(agent, pending_req, kind, options);
             let prompt_color = if self.input_mode { C_SUCCESS } else { C_WARN };
             let prompt_widget = Paragraph::new(prompt_lines)
                 .block(
@@ -224,6 +155,106 @@ impl Dashboard {
                 .wrap(Wrap { trim: true });
             frame.render_widget(prompt_widget, prompt_area);
         }
+    }
+
+    /// The pane that puts a question and its options: its title and its
+    /// lines, one per option, each carrying the option's whole label.
+    fn choice_lines(
+        &self,
+        agent: &DashboardAgent,
+        pending_req: &Option<interaction::InteractionRequest>,
+        kind: &Option<interaction::InteractionKind>,
+        options: &[String],
+    ) -> (&'static str, Vec<Line<'static>>) {
+        use interaction::InteractionKind;
+
+        let mut lines: Vec<Line<'static>> = vec![];
+        if self.input_mode {
+            // MultipleChoice / ToolApproval / Confirm
+            for (i, opt) in options.iter().enumerate() {
+                let sel = i == self.choice_selected;
+                let prefix = if sel { " > " } else { "   " };
+                // Numbered from 1, as `lev interactions` lists them.
+                let label = format!("{}[{}] {}", prefix, i + 1, opt);
+                let style = if sel {
+                    Style::default().fg(C_WARN).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(C_MUTED)
+                };
+                lines.push(Line::from(Span::styled(label, style)));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                format!(
+                    " [↑↓] or [1-{}] select  [Enter] confirm  [Esc] cancel",
+                    options.len()
+                ),
+                Style::default().fg(C_DIM),
+            )));
+            return (" Response ", lines);
+        }
+        // An interactive stage that has replied asks nothing in
+        // particular: it is the person's turn to say something.
+        let conversing = agent.awaits_message();
+        let idle = match conversing {
+            true => "It has replied, and waits for your next message",
+            false => "Waiting for input",
+        };
+        let prompt_text = pending_req
+            .as_ref()
+            .map(|r| r.prompt.as_str())
+            .or(agent.waiting_prompt.as_deref())
+            .unwrap_or(idle);
+        lines.push(Line::from(Span::styled(
+            format!(" {}", prompt_text),
+            Style::default().fg(C_WARN),
+        )));
+        if !options.is_empty() {
+            lines.push(Line::from(""));
+            for (i, opt) in options.iter().enumerate() {
+                let label = format!("   [{}] {}", i + 1, opt);
+                lines.push(Line::from(Span::styled(
+                    label,
+                    Style::default().fg(C_MUTED),
+                )));
+            }
+        }
+        lines.push(Line::from(""));
+        // An EditText opens the document for in-place editing in the pane
+        // above, so label it as editing rather than a generic response.
+        let is_edit = matches!(kind, Some(InteractionKind::EditText));
+        let hint = match (is_edit, conversing) {
+            (true, _) => " [i] edit the document above  [k] kill",
+            (false, true) => " [i] reply  [k] kill",
+            (false, false) => " [i] respond  [k] kill",
+        };
+        lines.push(Line::from(Span::styled(hint, Style::default().fg(C_DIM))));
+        let title = match (is_edit, conversing) {
+            (true, _) => " Edit Document ",
+            (false, true) => " Your Turn ",
+            (false, false) => " Input Required ",
+        };
+        (title, lines)
+    }
+
+    /// The rows the pane of [`Self::choice_lines`] takes at `width`, borders
+    /// included, with every line wrapped in full. An approval's scoped
+    /// options name every key they grant, or the word that stops a grant, so
+    /// a label is often longer than the pane is wide; a height counted in
+    /// options would cut the wrapped ones off the bottom.
+    pub(in crate::commands::dashboard) fn choice_pane_rows(
+        &self,
+        agent: &DashboardAgent,
+        pending_req: &Option<interaction::InteractionRequest>,
+        kind: &Option<interaction::InteractionKind>,
+        options: &[String],
+        width: u16,
+    ) -> u16 {
+        let (_, lines) = self.choice_lines(agent, pending_req, kind, options);
+        let rows = Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
+            .line_count(width.saturating_sub(2));
+        u16::try_from(rows).unwrap_or(u16::MAX).saturating_add(2)
     }
 }
 
@@ -280,6 +311,7 @@ mod tests {
             stage_name: "main".to_string(),
             body: None,
             body_format: interaction::BodyFormat::Plain,
+            grant: None,
         }
     }
 

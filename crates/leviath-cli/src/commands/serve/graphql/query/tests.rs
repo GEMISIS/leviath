@@ -5097,6 +5097,7 @@ async fn the_open_interactions_are_the_approval_inbox() {
         stage_name: "build".to_string(),
         body: None,
         body_format: Default::default(),
+        grant: None,
     };
 
     crate::runstate::with_isolated_runs_dir_async("graphql-open-inbox", |_d| async move {

@@ -1305,6 +1305,10 @@ The daemon holds these in memory, so it is one read rather than a walk of the ru
     results {
       id kind prompt body options isRequired
       answerOptions { id label number }
+      grant {
+        run { kind label program path }
+        blocked { word reason detail }
+      }
       run { id title status }
       toolCall {
         __typename
@@ -1321,6 +1325,11 @@ The daemon holds these in memory, so it is one read rather than a walk of the ru
 `id` is the word that answers with it: `allow`, `allow-stage`, `allow-run`, `deny` and
 `deny-feedback` on a tool approval, `yes` and `no` on a confirm, and on a multiple choice a word
 made from the option's own label, so it stays put when the options are reordered.
+
+`grant` is what approving a tool call for its stage or for the run would record. `stage` and
+`run` list every key, and the two scoped labels name the same keys on one line. `blocked` lists
+each word of a shell line that keeps it from recording anything, with a `reason` a client can
+switch on and a `detail` sentence to show. It is null on every other kind of ask.
 
 The answer is `@oneOf`, so exactly one variant goes in. `option` takes one of those words for any
 request that lists options, and the rest are for one kind each.

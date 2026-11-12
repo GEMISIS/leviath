@@ -45,6 +45,7 @@ impl ToolService for Judge {
                 keys: GrantKeys {
                     stage: vec!["k".to_string()],
                     run: vec!["j".to_string(), "k".to_string()],
+                    blocked: Vec::new(),
                 },
                 charge: 7,
             },

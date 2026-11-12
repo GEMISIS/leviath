@@ -318,6 +318,7 @@ fn approval_event() -> WorldEvent {
             stage_name: "implement".to_string(),
             body: None,
             body_format: Default::default(),
+            grant: None,
         },
     }
 }

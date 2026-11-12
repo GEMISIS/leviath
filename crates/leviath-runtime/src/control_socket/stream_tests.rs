@@ -442,12 +442,12 @@ async fn a_stream_says_where_it_opened_and_how_many_events_it_missed() {
         items,
         [
             Streamed::Opened(opened.clone()),
-            Streamed::Event(completed("five")),
-            Streamed::Event(completed("seven")),
+            Streamed::Event(Box::new(completed("five"))),
+            Streamed::Event(Box::new(completed("seven"))),
             Streamed::Missed(2),
-            Streamed::Event(completed("ten")),
+            Streamed::Event(Box::new(completed("ten"))),
             Streamed::Missed(2),
-            Streamed::Event(completed("fourteen")),
+            Streamed::Event(Box::new(completed("fourteen"))),
         ]
     );
     assert_eq!(

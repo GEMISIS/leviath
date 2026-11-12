@@ -1007,6 +1007,18 @@ probe-1789971553-793b8652da33-approve-1  [tool-approval]  agent=probe-1789971553
 that answers with it), its `label`, the `number` the listing shows, and `answer`, the whole
 `lev respond` command. An agent keeps the `id`: it does not move when the options are reordered.
 
+The two scoped options of a tool approval name every key they grant, or the word that keeps the
+line from being granted. Naming one request lays the same thing out a key to a line, and `--json`
+carries it as `grant` (see [the API](/docs/api#answering-a-question)):
+
+```
+  an approval for this stage records:
+    cargo test
+  an approval for this run records:
+    cargo test
+    test with /opt/tools/godot (outside the working directory)
+```
+
 `REQUEST_ID` follows the same rules as on `lev respond` below.
 
 ### `lev respond <REQUEST_ID> [ANSWER]`

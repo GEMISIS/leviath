@@ -1839,7 +1839,7 @@
             "$ref": "#/components/responses/Overloaded"
           }
         },
-        "description": "The request carries `answer_options`: each option's `id` (the word that answers with it), `label`, `number` as `lev interactions` lists it, and `answer`, the `lev respond` command. A run the daemon holds off this machine (its provider was taken away, say) is a 409 whose `error` says what to put back: its question cannot be answered until the run is back, and then reopens under a new id."
+        "description": "The request carries `answer_options`: each option's `id` (the word that answers with it), `label`, `number` as `lev interactions` lists it, and `answer`, the `lev respond` command. A tool approval also carries `grant`, what approving it for the stage or for the run would record: `stage` and `run` are lists of every key for that scope, each with `key`, `kind` (`tool`, `program`, `variable`, `write` or `outside_path`), `label`, and `program` and `path` where the key names one (null otherwise); `blocked` lists each word of a shell line that keeps it from recording anything, with `word`, `reason` (`outside_workdir`, `expanded_at_run_time`, `program_from_variable`, `unplaceable_path`, `runs_assembled_command`, `installs_code`, `escape_flag`, `unreadable_line` or `nothing_runs`) and `detail`. The `allow-stage` and `allow-run` labels name the same keys. A run the daemon holds off this machine (its provider was taken away, say) is a 409 whose `error` says what to put back: its question cannot be answered until the run is back, and then reopens under a new id."
       },
       "post": {
         "tags": [
@@ -5535,7 +5535,7 @@
           }
         },
         "deprecated": true,
-        "description": "Kept for older clients and will be removed; use `GET /api/runs/{id}/interaction`. The request carries `answer_options`: each option's `id` (the word that answers with it), `label`, `number` as `lev interactions` lists it, and `answer`, the `lev respond` command. A run the daemon holds off this machine (its provider was taken away, say) is a 409 whose `error` says what to put back: its question cannot be answered until the run is back, and then reopens under a new id."
+        "description": "Kept for older clients and will be removed; use `GET /api/runs/{id}/interaction`. The request carries `answer_options`: each option's `id` (the word that answers with it), `label`, `number` as `lev interactions` lists it, and `answer`, the `lev respond` command. A tool approval also carries `grant`, what approving it for the stage or for the run would record: `stage` and `run` are lists of every key for that scope, each with `key`, `kind` (`tool`, `program`, `variable`, `write` or `outside_path`), `label`, and `program` and `path` where the key names one (null otherwise); `blocked` lists each word of a shell line that keeps it from recording anything, with `word`, `reason` (`outside_workdir`, `expanded_at_run_time`, `program_from_variable`, `unplaceable_path`, `runs_assembled_command`, `installs_code`, `escape_flag`, `unreadable_line` or `nothing_runs`) and `detail`. The `allow-stage` and `allow-run` labels name the same keys. A run the daemon holds off this machine (its provider was taken away, say) is a 409 whose `error` says what to put back: its question cannot be answered until the run is back, and then reopens under a new id."
       },
       "post": {
         "tags": [
