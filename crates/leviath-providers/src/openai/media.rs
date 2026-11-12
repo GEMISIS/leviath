@@ -146,6 +146,7 @@ pub(crate) async fn run(
                     unit: None,
                     tokens: billing.tokens,
                     response_format: false,
+                    formats: None,
                 },
                 request,
             )

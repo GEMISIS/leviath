@@ -114,6 +114,7 @@ pub(crate) async fn run(
                     unit: billing.unit.filter(|_| billing.reported),
                     tokens: None,
                     response_format: true,
+                    formats: None,
                 },
                 request,
             )

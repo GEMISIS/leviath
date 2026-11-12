@@ -80,6 +80,10 @@ pub struct LearnedModel {
     /// `endpoints`: an image model listed under `/api/v1/images` alone is
     /// refused on chat and is sent to its images endpoint instead.
     pub endpoints: Option<Vec<String>>,
+    /// The `output_format` values an image model's endpoint accepts (`png`,
+    /// `jpeg`), as OpenRouter's images listing names them; empty when the
+    /// listing names the model and no format, `None` when it was not read.
+    pub image_formats: Option<Vec<String>>,
 }
 
 impl LearnedModel {
@@ -146,6 +150,16 @@ impl LearnedModels {
     /// Replace the whole catalogue with what a listing just said.
     pub fn replace(&self, models: HashMap<String, LearnedModel>) {
         *leviath_core::sync::lock(&self.0) = models;
+    }
+
+    /// Change what is known about `id` with `change`, when the catalogue
+    /// names it: what a second listing adds to the first. `false` when `id`
+    /// is not in the catalogue, which is left as it was.
+    pub fn amend(&self, id: &str, change: impl FnOnce(&mut LearnedModel)) -> bool {
+        leviath_core::sync::lock(&self.0)
+            .get_mut(id)
+            .map(change)
+            .is_some()
     }
 
     /// A copy of the whole catalogue, for writing to the shared cache. Sorted
@@ -410,6 +424,25 @@ mod tests {
             max_output_tokens: 4_096,
             ..Default::default()
         }
+    }
+
+    /// A second listing adds to an entry the first named, and names no new
+    /// one.
+    #[test]
+    fn an_amendment_reaches_only_a_named_entry() {
+        let store = LearnedModels::default();
+        store.replace(HashMap::from([(
+            "a/b".to_string(),
+            LearnedModel::default(),
+        )]));
+        let png = |m: &mut LearnedModel| m.image_formats = Some(vec!["png".into()]);
+        assert!(store.amend("a/b", png));
+        assert_eq!(
+            store.get("a/b").unwrap().image_formats,
+            Some(vec!["png".to_string()])
+        );
+        assert!(!store.amend("c/d", png));
+        assert!(!store.contains("c/d"));
     }
 
     #[test]

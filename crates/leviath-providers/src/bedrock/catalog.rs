@@ -550,6 +550,7 @@ pub(super) fn merge_listing(
             model.map_or_else(|| vec!["text/*".to_string()], |m| m.output_types.clone()),
         ),
         endpoints: None,
+        image_formats: None,
     };
     let mut learned = HashMap::new();
     for model in models.iter().filter(|m| m.on_demand) {

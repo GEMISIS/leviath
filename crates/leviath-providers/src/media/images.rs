@@ -128,6 +128,42 @@ pub(crate) struct Route<'a> {
     /// Whether the route takes `response_format`. OpenAI's image models
     /// always answer base64 and refuse the key (400 "Unknown parameter").
     pub(crate) response_format: bool,
+    /// The `output_format` values the model is known to accept, so the
+    /// stage's declared type can be asked for (see [`declared_format`]);
+    /// `None` leaves the format to the provider, as every route but
+    /// OpenRouter's does for now.
+    pub(crate) formats: Option<&'a [String]>,
+}
+
+/// The `output_format` name an images route uses for `mime`, when it has
+/// one: the five OpenRouter's Images API documents.
+pub(crate) fn format_name(mime: &str) -> Option<&'static str> {
+    match mime {
+        "image/png" => Some("png"),
+        "image/jpeg" => Some("jpeg"),
+        "image/webp" => Some("webp"),
+        "image/svg+xml" => Some("svg"),
+        "image/gif" => Some("gif"),
+        _ => None,
+    }
+}
+
+/// The format to ask for: the first type the stage declares, in its order,
+/// whose name is among `accepts`. `None` when no declared type is one (a
+/// wildcard, a type with no format name, one the model does not list), so
+/// nothing is asked and the provider's default stands.
+pub(crate) fn declared_format(
+    request: &InferenceRequest,
+    accepts: &[String],
+) -> Option<&'static str> {
+    request
+        .extra
+        .get(crate::provider::OUTPUT_MIMES_KEY)
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(Value::as_str)
+        .filter_map(format_name)
+        .find(|name| accepts.iter().any(|a| a == name))
 }
 
 /// Generate or edit images for `request`.
@@ -157,6 +193,12 @@ pub(crate) async fn run(
         if let Some(value) = super::extra_str(request, key) {
             body.insert((*key).into(), json!(value));
         }
+    }
+    // A format the stage names itself always wins.
+    if !body.contains_key("output_format")
+        && let Some(format) = route.formats.and_then(|a| declared_format(request, a))
+    {
+        body.insert("output_format".into(), json!(format));
     }
     let path = route.shape.carry(&mut body, &references);
 
@@ -303,7 +345,92 @@ mod tests {
             }),
             tokens: None,
             response_format: true,
+            formats: None,
         }
+    }
+
+    /// The declared type is asked for only when the model lists its format:
+    /// the first declared type, in order, that maps to a listed format.
+    #[test]
+    fn the_declared_type_is_asked_for_only_in_a_format_the_model_lists() {
+        let declaring = |mimes: Value| {
+            let mut req = request("x", 0);
+            req.extra = json!({ "output_mimes": mimes });
+            req
+        };
+        let all: Vec<String> = ["png", "jpeg", "webp", "svg", "gif"]
+            .map(String::from)
+            .to_vec();
+        for (mime, name) in [
+            ("image/png", "png"),
+            ("image/jpeg", "jpeg"),
+            ("image/webp", "webp"),
+            ("image/svg+xml", "svg"),
+            ("image/gif", "gif"),
+        ] {
+            assert_eq!(format_name(mime), Some(name));
+            assert_eq!(declared_format(&declaring(json!([mime])), &all), Some(name));
+        }
+        let flux = vec!["jpeg".to_string(), "png".to_string()];
+        // Several declared: the first the model lists, in declared order.
+        assert_eq!(
+            declared_format(
+                &declaring(json!(["image/webp", "image/png", "image/jpeg"])),
+                &flux
+            ),
+            Some("png")
+        );
+        // A wildcard, a type with no format name, one the model does not
+        // list, a model listing none, or nothing declared: nothing asked.
+        for nothing in [
+            json!(["image/*"]),
+            json!(["image/bmp"]),
+            json!(["image/webp"]),
+            json!([7, "text/markdown"]),
+            json!("image/png"),
+        ] {
+            assert_eq!(
+                declared_format(&declaring(nothing.clone()), &flux),
+                None,
+                "{nothing}"
+            );
+        }
+        assert_eq!(declared_format(&declaring(json!(["image/png"])), &[]), None);
+        assert_eq!(declared_format(&request("x", 0), &flux), None);
+    }
+
+    /// Turned on, the declared format is sent; a format the stage names
+    /// itself wins; turned off, nothing is added.
+    #[tokio::test]
+    async fn the_declared_format_is_sent_unless_the_stage_names_one() {
+        let reply = json!({ "data": [ { "b64_json": "SlBFRw==" } ] })
+            .to_string()
+            .into_bytes();
+        let (url, bodies) = spawn_mock_sequence(vec![
+            (200, "OK", reply.clone()),
+            (200, "OK", reply.clone()),
+            (200, "OK", reply),
+        ])
+        .await;
+        let flux = vec!["jpeg".to_string(), "png".to_string()];
+        let mut on: Route<'_> = route(EditShape::Meta, false);
+        on.hints = &["output_format"];
+        on.formats = Some(&flux);
+        let mut png = request("x", 0);
+        png.extra = json!({ "output_mimes": ["image/png"] });
+        run(&endpoint(&url), &on, &png).await.unwrap();
+        let mut named = png.clone();
+        named.extra["output_format"] = json!("jpeg");
+        run(&endpoint(&url), &on, &named).await.unwrap();
+        run(&endpoint(&url), &route(EditShape::Meta, false), &png)
+            .await
+            .unwrap();
+        let bodies = bodies.lock().unwrap().clone();
+        let format =
+            |i: usize| serde_json::from_str::<Value>(&bodies[i]).unwrap()["output_format"].clone();
+        assert_eq!(format(0), "png");
+        assert_eq!(format(1), "jpeg");
+        assert_eq!(format(2), Value::Null);
     }
 
     /// OpenAI's shape, as measured: no `response_format` sent, the format

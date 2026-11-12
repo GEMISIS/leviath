@@ -1009,7 +1009,12 @@ An image model the listing names under the Images API alone (its `endpoints` is
 `["/api/v1/images"]`, as for `black-forest-labs/flux-3-image` and `flux.2-klein-4b`) is drawn
 there: `POST /images` with the stage's prompt, the images it was handed as `input_references`, and
 `resolution`, `aspect_ratio`, `size`, `quality`, `output_format`, `background` and `n` when the
-stage sets them. The picture is the stage's output, priced at the `usage.cost` the reply reports.
+stage sets them. A stage that sets no `output_format` is asked for its declared type: the first of
+its declared outputs (`image/png`, `image/jpeg`, `image/webp`, `image/svg+xml`, `image/gif`) whose
+format the model's entry in `GET /images/models` lists, read once when the listing is primed. A
+model that lists no format, a wildcard, or a listing that could not be read asks for nothing, and
+the model's default format stands. The picture is the stage's output, priced at the `usage.cost`
+the reply reports.
 Chat refuses these models ("cannot be used with the chat/completions endpoint"), so the listing,
 not the model's name, decides. When the listing could not be read, that refusal sends the call to
 the Images API instead, and the model goes there for the rest of the process.

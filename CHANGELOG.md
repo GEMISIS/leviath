@@ -15,6 +15,13 @@ same list.
 
 ### Changed
 
+- A stage that declares `image/png` and draws through OpenRouter's Images API gets a PNG. The
+  declared type never reached the gateway, so `flux-3-image-klein` and `flux.2-flex` answered in
+  their default JPEG. The first declared type whose format the model's entry in
+  `GET /images/models` lists is now sent as `output_format`; that listing is read beside `/models`
+  when the catalogue is primed. A model that lists no format, a type it does not list, a wildcard,
+  or a listing that could not be read asks for nothing, as before, and a stage's own
+  `output_format` always wins (#1121).
 - An OpenRouter image model served only on OpenRouter's Images API (`black-forest-labs/flux-3-image`,
   `flux-3-image-klein` and the others its listing names under `/api/v1/images` alone) is drawn
   there, with the stage's prompt and reference images, and priced at the cost the reply reports.
