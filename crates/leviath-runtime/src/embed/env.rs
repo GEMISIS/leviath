@@ -7,8 +7,10 @@
 //! here are the plain ones: shell-command, tool and code seeds are refused,
 //! and a dependency on an MCP server is never met. An embedder that connects
 //! MCP servers itself declares their tools with
-//! [`with_mcp_tools`](EmbedEnv::with_mcp_tools), so a run naming them checks
+//! [`with_mcp_tools`](EmbedEnv::with_mcp_tools), so a run naming them resolves
 //! ([`resolve::check`](crate::resolve::check)) as it would on the daemon.
+//! What a daemon then decides from the user's tool permissions is checked
+//! with [`resolve::check_with_permissions`](crate::resolve::check_with_permissions).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

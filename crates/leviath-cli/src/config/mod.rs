@@ -453,20 +453,38 @@ impl Default for Config {
 }
 
 impl Config {
+    /// The tool permissions in this config, as the runtime reads them: what
+    /// a program that embeds it reads from the same file with
+    /// `leviath_runtime::user_creds::load_tool_permissions`.
+    ///
+    /// Every field is named, with no `..Default::default()`: a field the
+    /// runtime starts reading is a compile error here until it is copied.
+    pub(crate) fn tool_permission_settings(&self) -> leviath_runtime::tool_policy::ToolPermissions {
+        leviath_runtime::tool_policy::ToolPermissions {
+            tool_permissions: self.tool_permissions.clone(),
+            agent_tool_permissions: self.agent_tool_permissions.clone(),
+            allow_blueprint_permissions: self.security.allow_blueprint_permissions,
+            safe_commands: self.safe_commands.settings(),
+            agent_safe_commands: self
+                .agent_safe_commands
+                .iter()
+                .map(|(agent, block)| (agent.clone(), block.settings()))
+                .collect(),
+            allow_blueprint_safe_commands: self.security.allow_blueprint_safe_commands,
+        }
+    }
+
     /// The permission ceiling to apply to the blueprint `agent`: the global
     /// `[tool_permissions]` with that agent's `[agent_tool_permissions.<name>]`
     /// entries laid over it. `None`, a graph its caller wrote, gets the global
     /// table only: per-agent grants name blueprints the operator installed,
     /// never a name a caller chose.
     ///
-    /// Returned by value (rather than as two maps threaded through
+    /// Returned by value (not as two maps threaded through
     /// [`crate::tools::resolve_policy`]) so the ceiling is resolved exactly once,
     /// at spawn, and every later lookup reads a single flat map.
     pub(crate) fn permissions_for_agent(&self, agent: Option<&str>) -> HashMap<String, ToolPolicy> {
-        let mut merged = self.tool_permissions.clone();
-        if let Some(per_agent) = agent.and_then(|name| self.agent_tool_permissions.get(name)) {
-            merged.extend(per_agent.iter().map(|(k, v)| (k.clone(), *v)));
-        }
+        let mut merged = self.tool_permission_settings().for_agent(agent);
         // `[safe_commands] outside_workdir = "deny"` is a ceiling like any
         // configured deny: nothing below it, a blueprint or a launch flag,
         // lifts it. `ask` is the built-in default and adds nothing.
@@ -485,18 +503,18 @@ impl Config {
     /// [`Self::permissions_for_agent`].
     ///
     /// `blueprint` is the graph's own `safe_commands`, which contributes
-    /// only when the user opted in - see
-    /// [`crate::approvals::resolve_safe_keys`].
+    /// only when the user opted in. The runtime resolves the layers
+    /// (`leviath_runtime::tool_policy::resolve_safe_keys`), with this
+    /// crate's reading of a shell line for the shell half.
     pub(crate) fn safe_keys_for_agent(
         &self,
         agent: Option<&str>,
         blueprint: Option<&leviath_runtime::spec::graph::SafeCommandsDef>,
     ) -> std::collections::BTreeMap<String, crate::approvals::SafeSource> {
-        crate::approvals::resolve_safe_keys(
-            &self.safe_commands,
-            agent.and_then(|name| self.agent_safe_commands.get(name)),
+        self.tool_permission_settings().safe_keys(
+            agent,
             blueprint,
-            self.security.allow_blueprint_safe_commands,
+            Some(&crate::shell_keys::is_valid_prefix),
         )
     }
 

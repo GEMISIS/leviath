@@ -35,10 +35,15 @@
 //! provider script is a host's own layer, and no `.env` file is loaded.
 //! Unknown keys in the file are ignored, since `lev`'s configuration is a
 //! superset of what this reads.
+//!
+//! The same file holds the user's tool permissions, which decide which tool
+//! calls run without asking. [`load_tool_permissions`] reads them, for a
+//! host that checks a run before starting it.
 
 mod creds;
 mod defaults;
 mod model_provider;
+mod permissions;
 mod provider_config;
 pub mod renamed;
 pub mod retired;
@@ -47,6 +52,7 @@ mod settings;
 pub use creds::{provider_creds, signin_options};
 pub use defaults::{model_defaults, retention_settings};
 pub use model_provider::{ModelProviderConfig, ModelProviderKind};
+pub use permissions::load_tool_permissions;
 pub use provider_config::ProviderConfig;
 pub use settings::{EnvFill, SecuritySettings, UserSettings, env_names};
 
@@ -308,12 +314,8 @@ impl std::error::Error for UserCredsError {
 /// environment still load. The keychain is opened only when a key is still
 /// missing after the file and the environment.
 pub fn load_user_creds(source: &UserCredsSource<'_>) -> Result<UserCreds, UserCredsError> {
-    let path = source
-        .config_path
-        .clone()
-        .unwrap_or_else(|| source.data_dir.join("config.toml"));
     let mut warnings = Vec::new();
-    let mut settings = read_settings(path, &mut warnings)?;
+    let mut settings = read_settings(config_path(source), &mut warnings)?;
 
     let mut origins = BTreeMap::new();
     for keyed in KEYED_PROVIDERS {
@@ -364,30 +366,51 @@ pub fn load_user_creds(source: &UserCredsSource<'_>) -> Result<UserCreds, UserCr
     })
 }
 
-/// The settings in the file at `path`, or the defaults when there is none.
+/// The config file `source` reads: the one it names, or `config.toml` in its
+/// data directory.
+fn config_path(source: &UserCredsSource<'_>) -> PathBuf {
+    source
+        .config_path
+        .clone()
+        .unwrap_or_else(|| source.data_dir.join("config.toml"))
+}
+
+/// The text of the config file at `path` with each key that changed name
+/// respelled, and which were, or `None` when there is no file.
 ///
 /// "None" is decided the way the CLI decides it, by [`Path::exists`], so
 /// `lev` and an embedder agree on every install: a path that does not
 /// resolve is the defaults, and a file that is there but will not read is
 /// an error.
 ///
-/// A key that changed name is respelled in the text before it is parsed, by
-/// the rewrite `lev` runs, and each one this loader reads is named in
-/// `warnings`. Done on the text, so a parse error still points at its line.
+/// A renamed key is respelled in the text before it is parsed, by the
+/// rewrite `lev` runs. Done on the text, so a parse error still points at
+/// its line.
 ///
 /// [`Path::exists`]: std::path::Path::exists
+fn read_config(
+    path: &std::path::Path,
+) -> Result<Option<(String, Vec<renamed::Renamed>)>, UserCredsError> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(path).map_err(|source| UserCredsError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    Ok(Some(renamed::rename_in_text(&text)))
+}
+
+/// The settings in the file at `path`, or the defaults when there is none
+/// (see [`read_config`]). Each renamed key this loader reads is named in
+/// `warnings`.
 fn read_settings(
     path: PathBuf,
     warnings: &mut Vec<String>,
 ) -> Result<UserSettings, UserCredsError> {
-    if !path.exists() {
+    let Some((text, renames)) = read_config(&path)? else {
         return Ok(UserSettings::default());
-    }
-    let text = std::fs::read_to_string(&path).map_err(|source| UserCredsError::Read {
-        path: path.clone(),
-        source,
-    })?;
-    let (text, renames) = renamed::rename_in_text(&text);
+    };
     let mut settings: UserSettings = match toml::from_str(&text) {
         Ok(settings) => settings,
         Err(source) => return Err(UserCredsError::Parse { path, source }),

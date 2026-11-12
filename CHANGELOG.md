@@ -226,6 +226,23 @@ same list.
 
 ### Added
 
+- `leviath-runtime`: a program that embeds the runtime can check a run against the user's tool
+  permissions before it spawns it. The daemon refuses a spawn whose validator tool would have to
+  ask, and that rule and the permission layers it is decided by lived in `lev`, so an embedder's
+  own check (`resolve::check`) passed a graph the daemon then refused: an MCP validator tool
+  the graph marks `allow`, which a graph cannot allow by itself. The rule and the policy are now
+  in the new `leviath_runtime::tool_policy`, with the safe list (the shipped one and which of
+  the user's, the per-agent and the graph's own entries count for a run), and the daemon calls
+  them from there. `resolve::check_with_permissions(&request, &env, &permissions)` resolves a
+  request and then gives the refusal the daemon would, with the same path, message and hint;
+  `tool_policy::check_validator_tools` does the same for a `RunSpec`. `ToolPermissions` holds the
+  user's `[tool_permissions]`, `[agent_tool_permissions.<name>]`, `[safe_commands]`,
+  `[agent_safe_commands.<name>]` and the `[security]` switches `allow_blueprint_permissions` and
+  `allow_blueprint_safe_commands`, and `user_creds::load_tool_permissions` reads them from
+  `config.toml`. The check decides from those, the graph and the launch, so a validator tool on
+  the safe list passes as it does on the daemon. It does not see a named yolo profile, what a
+  shell line does, or the write limits; the embedding docs say what that means for the answer
+  (#1109).
 - `leviath-providers`: a failed call says whether its request was sent.
   `ProviderError::request_sent()` answers `Some(false)` when nothing went out (refused on this
   machine, or no connection to send on), `Some(true)` when a request was written to an open

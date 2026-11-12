@@ -21,125 +21,15 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::shell_keys::{KEY_PREFIX, is_valid_prefix};
+use crate::shell_keys::is_valid_prefix;
 
-/// Shell commands that are safe to run without asking.
-///
-/// The rule an entry has to pass, which matters more than the list because the
-/// list will grow: **it must not be able to write a file, execute another
-/// program, or open a network connection under any flag.**
-///
-/// That rule is why several obvious candidates are absent. `find` takes
-/// `-exec` and `-delete`; `sed` takes `-i`; `awk` has `system()`; `sort` takes
-/// `-o`; `tee`, `xargs`, `env`, `nohup`, `timeout` and `watch` all run a
-/// program named in their arguments; `cargo` runs build scripts and test
-/// binaries. Any of them can be added by name in `[safe_commands] shell`, which
-/// is the point of the setting.
-///
-/// Three entries were removed after an audit found the list did not obey its
-/// own rule, which is worth recording because they read as harmless:
-/// - `uniq` takes an **output operand** (`uniq IN OUT`), so `uniq payload
-///   ~/.bashrc` wrote an arbitrary file with no prompt. Positional, so no flag
-///   check could have caught it.
-/// - `tree` takes `-o FILE`.
-/// - `rg` takes `--pre COMMAND`, which runs that command over every input file,
-///   and `-z`, which shells out to decompressors.
-///
-/// The `git` entries stay, because read-only git is most of what a coding agent
-/// does - but `--output` is a diff-machinery option accepted by `diff`, `log`
-/// and `show`, so a git segment carrying it is refused by
-/// [`crate::shell_keys`]. That is a patch on one known escape, not a claim that
-/// git has no others: `[sandbox]` is the durable answer, and this list is
-/// pre-decided convenience inside it.
-///
-/// Two consequences worth stating rather than burying. `cat`, `head` and `grep`
-/// being safe would let an agent read any file the user can, so an entry only
-/// covers a segment whose path operands all stay inside the workdir or a
-/// granted `[read_paths]` root: the fence `read_file` has, asked of every word
-/// that could name a file (see [`crate::shell_keys::outside_workdir`]).
-/// `cat src/main.rs` runs unprompted; `cat /etc/hosts`, `grep -r key ~` and
-/// `cd / && cat etc/passwd` fall back to the shell's policy, which asks by
-/// default, and [`OutsideWorkdir::Deny`] refuses them outright. The check
-/// fails closed - what it cannot place counts as outside - but it reads words,
-/// so a program the line runs can still read what it likes. And the
-/// read-only `git` subcommands honour a
-/// repository's `core.pager` and `diff.external`. A pager does not run without
-/// a tty, but `diff.external` does - reachable only via `git -c`, which keys as
-/// a bare `git` and so is not covered by any entry here.
-pub const DEFAULT_SAFE_SHELL: &[&str] = &[
-    // Reading and listing.
-    "ls",
-    "cat",
-    "head",
-    "tail",
-    "wc",
-    "cut",
-    "tr",
-    "grep",
-    "egrep",
-    "fgrep",
-    "diff",
-    "cmp",
-    "file",
-    "stat",
-    "du",
-    "df",
-    "jq",
-    "column",
-    "od",
-    "strings",
-    "basename",
-    "dirname",
-    "realpath",
-    "readlink",
-    "pwd",
-    "cd",
-    // Reporting.
-    "echo",
-    "printf",
-    "date",
-    "seq",
-    "sleep",
-    "true",
-    "false",
-    "test",
-    "which",
-    "type",
-    "uname",
-    "hostname",
-    "whoami",
-    "id",
-    "ps",
-    "pgrep",
-    // Read-only git.
-    "git status",
-    "git diff",
-    "git log",
-    "git show",
-    "git branch",
-    "git remote",
-    "git rev-parse",
-    "git blame",
-    "git describe",
-    "git ls-files",
-];
-
-/// Where a safe key came from, for `lev approvals safe`.
-///
-/// The question this answers is "why did it not ask me", which is the one a
-/// person asks the first time a run does something unprompted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum SafeSource {
-    /// [`DEFAULT_SAFE_SHELL`], or a built-in tool that never prompts.
-    Default,
-    /// The user's `[safe_commands]`.
-    Config,
-    /// The user's `[agent_safe_commands.<name>]`.
-    Agent,
-    /// The blueprint's own `[safe_commands]`, which the user opted into.
-    Blueprint,
-}
+// The shipped list, where a safe key came from, and which layers count for a
+// run are the runtime's, so a program that embeds it resolves the same list.
+// The list is named here for the tests that hold every entry of it to this
+// crate's reading of a shell line.
+#[cfg(test)]
+pub(crate) use leviath_runtime::tool_policy::DEFAULT_SAFE_SHELL;
+pub(crate) use leviath_runtime::tool_policy::SafeSource;
 
 /// The user's `[safe_commands]` block.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -217,76 +107,50 @@ pub struct AgentSafeCommands {
     pub allow_blueprint: bool,
 }
 
-/// The safe keys in effect for one run, and where each came from.
+impl SafeCommands {
+    /// This block as the runtime reads it: the part that says which keys
+    /// are safe.
+    pub(crate) fn settings(&self) -> leviath_runtime::tool_policy::SafeCommandSettings {
+        leviath_runtime::tool_policy::SafeCommandSettings {
+            defaults: self.defaults,
+            tools: self.tools.clone(),
+            shell: self.shell.clone(),
+        }
+    }
+}
+
+impl AgentSafeCommands {
+    /// This block as the runtime reads it.
+    pub(crate) fn settings(&self) -> leviath_runtime::tool_policy::AgentSafeCommandSettings {
+        leviath_runtime::tool_policy::AgentSafeCommandSettings {
+            tools: self.tools.clone(),
+            shell: self.shell.clone(),
+            allow_blueprint: self.allow_blueprint,
+        }
+    }
+}
+
+/// The safe keys in effect for one run, and where each came from: the
+/// runtime's resolution ([`leviath_runtime::tool_policy::resolve_safe_keys`])
+/// with this crate's reading of a shell line, so the shell half of the list
+/// is held too.
 ///
-/// **Declaring is not granting.** A blueprint's own block contributes nothing
-/// unless `allow_blueprint` names this agent or
-/// `[security] allow_blueprint_safe_commands` is set, which is the same shape
-/// `[read_paths]` already uses: a manifest the user downloaded may describe what
-/// it would like to run unprompted, and the user decides whether that counts.
-/// This is also why `resolve_policy` needs no new argument and its "a blueprint
-/// may only tighten" tests keep their meaning.
-///
-/// An entry that is not a valid prefix is skipped with a warning rather than
-/// failing the spawn: a typo in a config file should cost one prompt, not a run.
+/// A blueprint's own block contributes nothing unless `allow_blueprint`
+/// names this agent or `[security] allow_blueprint_safe_commands` is set, and
+/// an entry that is not a valid prefix is skipped with a warning.
 pub(crate) fn resolve_safe_keys(
     config: &SafeCommands,
     agent: Option<&AgentSafeCommands>,
     blueprint: Option<&leviath_runtime::spec::graph::SafeCommandsDef>,
     allow_blueprint_globally: bool,
 ) -> BTreeMap<String, SafeSource> {
-    let mut keys = BTreeMap::new();
-    if config.defaults {
-        for entry in DEFAULT_SAFE_SHELL {
-            keys.insert(format!("{KEY_PREFIX}{entry}"), SafeSource::Default);
-        }
-    }
-    add(&mut keys, &config.tools, &config.shell, SafeSource::Config);
-    if let Some(agent) = agent {
-        add(&mut keys, &agent.tools, &agent.shell, SafeSource::Agent);
-    }
-    let opted_in = allow_blueprint_globally || agent.is_some_and(|a| a.allow_blueprint);
-    if let (true, Some(bp)) = (opted_in, blueprint) {
-        let tools: Vec<String> = bp.tools.iter().map(ToString::to_string).collect();
-        add(&mut keys, &tools, &bp.shell, SafeSource::Blueprint);
-    }
-    keys
-}
-
-/// Fold one layer's entries in, later layers winning the `source` label so
-/// `lev approvals safe` names the narrowest thing that put a key there.
-fn add(
-    keys: &mut BTreeMap<String, SafeSource>,
-    tools: &[String],
-    shell: &[String],
-    source: SafeSource,
-) {
-    for tool in tools {
-        // `tools` and `shell` land in one map, so a `tools` entry spelled with
-        // the shell prefix would enter the shell key space without going
-        // through `is_valid_prefix` - which is the only thing standing between
-        // a config file and a pre-approved `shell:>/root/.bashrc`,
-        // `shell:sh`, or `shell:env:PATH`. A tool name never needs that
-        // prefix, so refusing it costs nothing and closes the back door.
-        if tool.starts_with(KEY_PREFIX) {
-            tracing::warn!(
-                "ignoring safe_commands tools entry {tool:?}: shell commands belong in the \
-                 `shell` list, where they are checked"
-            );
-            continue;
-        }
-        keys.insert(tool.clone(), source);
-    }
-    for entry in shell {
-        if !is_valid_prefix(entry) {
-            tracing::warn!(
-                "ignoring safe_commands shell entry {entry:?}: it is not a bare command prefix \
-                 (a program, optionally with the subcommand that narrows it)"
-            );
-            continue;
-        }
-        keys.insert(format!("{KEY_PREFIX}{entry}"), source);
-    }
+    leviath_runtime::tool_policy::resolve_safe_keys(
+        &config.settings(),
+        agent.map(AgentSafeCommands::settings).as_ref(),
+        blueprint,
+        allow_blueprint_globally,
+        Some(&is_valid_prefix),
+    )
 }
 
 #[cfg(test)]
