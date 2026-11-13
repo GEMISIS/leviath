@@ -399,7 +399,9 @@ async fn a_file_reseeded_on_continue_is_given() {
     assert!(!given_by_spec.contains(&sha), "not the spec's seed");
 
     let mut window = world.get::<ContextWindow>(entity).unwrap().clone();
-    let (produced, given) = window.stored_parts_by_origin(&given_by_spec);
+    let crate::components::PartsByOrigin {
+        produced, given, ..
+    } = window.stored_parts_by_origin(&given_by_spec);
     assert!(produced.iter().all(|p| !p.is_named("map.json")));
     assert!(given.iter().any(|p| p.is_named("map.json")));
 

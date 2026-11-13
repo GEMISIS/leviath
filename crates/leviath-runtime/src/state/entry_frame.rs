@@ -29,6 +29,12 @@ enum MetaFrame<'a> {
     /// [`EntryMeta::Given`] on an entry that is not sticky. After `Sticky`,
     /// so every file written before it reads the same.
     Given,
+    /// [`EntryMeta::FileCopy`] on an entry that is not sticky. After
+    /// `Given`, for the same reason.
+    FileCopy,
+    /// [`EntryMeta::Placed`] on an entry that is not sticky. The last
+    /// variant, for the same reason.
+    Placed(std::borrow::Cow<'a, [super::PlacedAt]>),
 }
 
 impl<'a> MetaFrame<'a> {
@@ -43,6 +49,8 @@ impl<'a> MetaFrame<'a> {
                 note: note.as_deref().map(std::borrow::Cow::Borrowed),
             },
             (false, EntryMeta::Given) => MetaFrame::Given,
+            (false, EntryMeta::FileCopy) => MetaFrame::FileCopy,
+            (false, EntryMeta::Placed(at)) => MetaFrame::Placed(std::borrow::Cow::Borrowed(at)),
         }
     }
 
@@ -60,6 +68,8 @@ impl<'a> MetaFrame<'a> {
             ),
             MetaFrame::Sticky(meta) => (meta.into_owned(), true),
             MetaFrame::Given => (EntryMeta::Given, false),
+            MetaFrame::FileCopy => (EntryMeta::FileCopy, false),
+            MetaFrame::Placed(at) => (EntryMeta::Placed(at.into_owned()), false),
         }
     }
 }

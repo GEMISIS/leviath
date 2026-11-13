@@ -331,7 +331,10 @@ back into the system prompt on later turns.
 
 `context_read` takes a `key` on any region kind. `context_attach` takes an image, a recording or a
 document; a `key` makes a newer version replace the older one, and a `caption` is stored beside it.
-`context_export` puts the bytes back where a shell tool or a script can work on them.
+`context_export` puts the bytes back where a shell tool or a script can work on them. Both keep the
+file as the one that counts: an attached part is a copy of its file, and an exported part gives way
+to the file at the path it was written to, so naming that path in `submit_output` records
+[the file as it is now](/docs/outputs#large-results).
 
 ## Final output
 

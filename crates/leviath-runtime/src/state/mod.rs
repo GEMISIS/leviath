@@ -18,7 +18,9 @@ pub mod inspect;
 pub mod journal;
 pub mod segment;
 
-pub use context::{ContextDiff, ContextState, EntryKind, EntryMeta, EntryState, RegionState};
+pub use context::{
+    ContextDiff, ContextState, EntryKind, EntryMeta, EntryState, PlacedAt, RegionState,
+};
 pub use delta::{Change, RunEvent, StateDelta, TransitionReason, TransitionRecord};
 pub use files::{BlobFile, FileRef, RunFiles, StageFile, StageFiles, under};
 pub use journal::{CallEnding, OpenCallState};

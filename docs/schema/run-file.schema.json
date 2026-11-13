@@ -1370,6 +1370,27 @@
             "const": "Given",
             "description": "What a person sent the run (a message's files, the file in an\nanswer): its stored parts are the run's inputs, not its work.",
             "type": "string"
+          },
+          {
+            "const": "FileCopy",
+            "description": "What the run read from a working-directory file: its stored parts are\nthe file as it was then, and the file now at a path is the newer.",
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Where the run has put this entry's stored parts on disk. The file at\none of these paths is the run's working copy of the part.",
+            "properties": {
+              "Placed": {
+                "items": {
+                  "$ref": "#/$defs/PlacedAt"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "Placed"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -2612,6 +2633,24 @@
             "type": "string"
           }
         ]
+      },
+      "PlacedAt": {
+        "description": "One place the run put a stored part on disk.",
+        "properties": {
+          "path": {
+            "description": "The path, relative to the working directory, its components joined\nby `/`.",
+            "type": "string"
+          },
+          "sha256": {
+            "description": "The sha256 of the part put there.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "sha256"
+        ],
+        "type": "object"
       },
       "PointProgress": {
         "description": "Where a run is among the checkpoints of the stage it is in: the stage\nboundary questions a graph declares (`interactive_points`), which a person\nanswers before the stage may move on.",
@@ -9727,6 +9766,27 @@
             "const": "Given",
             "description": "What a person sent the run (a message's files, the file in an\nanswer): its stored parts are the run's inputs, not its work.",
             "type": "string"
+          },
+          {
+            "const": "FileCopy",
+            "description": "What the run read from a working-directory file: its stored parts are\nthe file as it was then, and the file now at a path is the newer.",
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Where the run has put this entry's stored parts on disk. The file at\none of these paths is the run's working copy of the part.",
+            "properties": {
+              "Placed": {
+                "items": {
+                  "$ref": "#/$defs/PlacedAt"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "Placed"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -10898,6 +10958,24 @@
             "type": "string"
           }
         ]
+      },
+      "PlacedAt": {
+        "description": "One place the run put a stored part on disk.",
+        "properties": {
+          "path": {
+            "description": "The path, relative to the working directory, its components joined\nby `/`.",
+            "type": "string"
+          },
+          "sha256": {
+            "description": "The sha256 of the part put there.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "sha256"
+        ],
+        "type": "object"
       },
       "PointProgress": {
         "description": "Where a run is among the checkpoints of the stage it is in: the stage\nboundary questions a graph declares (`interactive_points`), which a person\nanswers before the stage may move on.",

@@ -63,7 +63,14 @@ pub(crate) fn handle_mime_tool(
     };
     match name {
         "context_attach" => attach(args, window, &sink, workdir),
-        _ => export(args, window, store.as_ref(), &registry, workdir, ctx),
+        _ => match export(args, window, store.as_ref(), &registry, workdir, ctx) {
+            Ok((out, (path, sha256))) => {
+                // The file is the run's working copy of the part from here on.
+                window.mark_placed(&sha256, &path);
+                out
+            }
+            Err(refusal) => refusal,
+        },
     }
 }
 
@@ -165,6 +172,9 @@ fn attach(
         return format!("[error] region '{region}' refused '{name}': {e}");
     }
     window.key_last_entry(region, key);
+    // A copy of the file as it is now: the file at a path stays the newer of
+    // the two, so the copy never answers a name a file is at.
+    window.mark_file_copy(region, key);
     let sha = content
         .stored()
         .next()
@@ -186,7 +196,9 @@ fn attach(
 /// `context_export { name, path }`: a stored part, by file name or hash
 /// prefix, written into the workdir. A part outside the stage's limit for
 /// this tool is refused by name, so the model learns the limit rather than
-/// a missing file.
+/// a missing file. Answers with the text for the model and where the file
+/// was written (a [`placed_key`](crate::components::placed_key), with the
+/// digest of what was written); a refusal is the error, and wrote nothing.
 fn export(
     args: &serde_json::Value,
     window: &ContextWindow,
@@ -194,11 +206,13 @@ fn export(
     registry: &MimeRegistry,
     workdir: &Path,
     ctx: &MimeToolContext<'_>,
-) -> String {
-    let (run_id, limit) = (ctx.run_id, ctx.tool_limit);
+) -> Result<(String, (String, String)), String> {
+    let (run_id, limit, write_fence) = (ctx.run_id, ctx.tool_limit, ctx.write_fence);
     let Some(wanted) = arg(args, "name") else {
-        return "[error] missing 'name' argument: a part's file name or the start of its sha256"
-            .to_string();
+        return Err(
+            "[error] missing 'name' argument: a part's file name or the start of its sha256"
+                .to_string(),
+        );
     };
     let Some((part_name, blob)) = find_part(window, wanted) else {
         let known: Vec<String> = window
@@ -207,22 +221,22 @@ fn export(
             .flat_map(|r| r.content.iter())
             .flat_map(|e| e.content.stored().map(|p| p.stand_in()))
             .collect();
-        return match known.is_empty() {
+        return Err(match known.is_empty() {
             true => format!("[error] no stored part matches '{wanted}'; this run holds none"),
             false => format!(
                 "[error] no stored part matches '{wanted}'. The run holds:\n{}",
                 known.join("\n")
             ),
-        };
+        });
     };
     if let Some(limit) = limit
         && !blob.mime_type.matches_any(limit)
     {
-        return format!(
+        return Err(format!(
             "[error] '{wanted}' is {}; at this stage context_export may be handed only {}",
             blob.mime_type,
             limit.join(", ")
-        );
+        ));
     }
     let target = arg(args, "path")
         .map(str::to_string)
@@ -236,33 +250,37 @@ fn export(
                 .unwrap_or_default();
             format!("{}{ext}", blob.short_sha())
         });
-    let full = match resolve(&target, workdir) {
-        Ok(p) => p,
-        Err(e) => return format!("[error] {e}"),
-    };
+    let full = resolve(&target, workdir).map_err(|e| format!("[error] {e}"))?;
     // The stage's write paths hold this write as they hold `write_file`'s.
-    if let Some(fence) = ctx.write_fence
+    if let Some(fence) = write_fence
         && let Err(refused) = fence.check(&target, workdir)
     {
-        return fence.refusal("context_export", &refused);
+        return Err(fence.refusal("context_export", &refused));
     }
-    let bytes = match store.read(run_id, &blob.sha256) {
-        Ok(b) => b,
-        Err(e) => return format!("[error] could not read the stored bytes of '{wanted}': {e}"),
-    };
+    let bytes = store
+        .read(run_id, &blob.sha256)
+        .map_err(|e| format!("[error] could not read the stored bytes of '{wanted}': {e}"))?;
     if let Some(parent) = full.parent()
         && let Err(e) = std::fs::create_dir_all(parent)
     {
-        return format!("[error] could not create '{}': {e}", parent.display());
+        return Err(format!(
+            "[error] could not create '{}': {e}",
+            parent.display()
+        ));
     }
-    match std::fs::write(&full, &bytes) {
-        Ok(()) => format!(
+    std::fs::write(&full, &bytes)
+        .map_err(|e| format!("[error] could not write '{target}': {e}"))?;
+    Ok((
+        format!(
             "Wrote {} ({}) to '{target}'.",
             leviath_core::mime::human_size(bytes.len() as u64),
             blob.mime_type
         ),
-        Err(e) => format!("[error] could not write '{target}': {e}"),
-    }
+        (
+            crate::components::placed_key(&full, workdir),
+            blob.sha256.clone(),
+        ),
+    ))
 }
 
 /// The stored part `wanted` names: its name and its reference.
@@ -440,6 +458,157 @@ mod tests {
             assert!(!landed, "a refused export wrote anyway");
             let wrote = export("docs/copy.txt", &mut w);
             assert!(wrote.starts_with("Wrote"), "{wrote}");
+        });
+    }
+
+    /// Submit `path` as an artifact through the real `submit_output`
+    /// handler, over the world's own store.
+    fn submit(
+        w: &mut ContextWindow,
+        mime: &MimeParams<'_, '_>,
+        entity: Entity,
+        dir: &Path,
+        path: &str,
+    ) -> leviath_core::output::Artifact {
+        let (sources, _) = mime.hydration_inputs(entity);
+        let (store, registry) = sources.expect("a store");
+        let sink = PartSink {
+            store: store.as_ref(),
+            registry: &registry,
+            run_id: "run-1",
+            max_part_bytes: 1 << 20,
+            inline_text_bytes: 1024,
+        };
+        let (ack, output) = crate::output_tool::handle_output_tool(
+            &json!({ "content": "done", "artifacts": [path] }),
+            &crate::output_tool::OutputContext {
+                write_fence: None,
+                tool_verdict: None,
+                given: &[],
+                spec: None,
+                validators: None,
+                stage: "draw",
+                stage_names: &[],
+                workdir: Some(dir),
+                sink: Some(&sink),
+                overwrite_artifacts: false,
+            },
+            0,
+            w,
+        );
+        output.expect(&ack).artifacts[0].clone()
+    }
+
+    /// Issue 1134, through the tools themselves: a stage attaches
+    /// `art/hero.png`, rewrites it, and submits the path. The attach marks
+    /// its entry a copy of the file, keyed or not, so the rewritten file is
+    /// what is recorded and nothing is written beside it.
+    #[test]
+    fn an_attached_file_rewritten_since_is_recorded_as_rewritten() {
+        const REWRITTEN: &[u8] = b"\x89PNG\r\n\x1a\nthe rewrite";
+        for key in [None, Some("hero")] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir(dir.path().join("art")).unwrap();
+            let hero = dir.path().join("art/hero.png");
+            std::fs::write(&hero, b"\x89PNG\r\n\x1a\nv1").unwrap();
+            with_world(true, &mut |mime, entity| {
+                let mut w = window();
+                w.add_region(Region::new(
+                    crate::output_tool::FINAL_OUTPUT_REGION.into(),
+                    RegionKind::Pinned,
+                    10_000,
+                ));
+                // Attached twice under a key: the second version replaces
+                // the first and is a copy too.
+                for _ in 0..2 {
+                    let out = call(
+                        "context_attach",
+                        json!({"region": "sprites", "path": "art/hero.png", "key": key}),
+                        &mut w,
+                        mime,
+                        entity,
+                        Some(dir.path()),
+                    );
+                    assert!(out.starts_with("Attached"), "{out}");
+                }
+                let sprites = w.get_region("sprites").unwrap();
+                assert_eq!(sprites.content.len(), if key.is_some() { 1 } else { 2 });
+                assert!(sprites.content.iter().all(|e| e.is_file_copy()));
+
+                std::fs::write(&hero, REWRITTEN).unwrap();
+                let artifact = submit(&mut w, mime, entity, dir.path(), "art/hero.png");
+                assert_eq!(artifact.path, "art/hero.png");
+                assert_eq!(artifact.sha256, leviath_core::mime::sha256_hex(REWRITTEN));
+                assert_eq!(std::fs::read(&hero).unwrap(), REWRITTEN);
+                assert_eq!(
+                    std::fs::read_dir(dir.path().join("art")).unwrap().count(),
+                    1
+                );
+            });
+        }
+    }
+
+    /// The same through `context_export`: a part the run made is exported,
+    /// the file is edited, and the path is submitted. The export records
+    /// where it wrote, with the path's dots folded, so the edited file is
+    /// what is recorded. A refused export records nothing.
+    #[test]
+    fn an_exported_part_edited_since_is_recorded_as_edited() {
+        const EDITED: &[u8] = b"\x89PNG\r\n\x1a\nedited after the export";
+        let dir = tempfile::tempdir().unwrap();
+        with_world(true, &mut |mime, entity| {
+            let (sources, _) = mime.hydration_inputs(entity);
+            let (store, registry) = sources.expect("a store");
+            let blob = leviath_core::mime::Blob::new(
+                leviath_core::mime::MimeType::parse("image/png").unwrap(),
+                b"\x89PNG\r\n\x1a\ndrawn".to_vec(),
+            )
+            .named("hero.png");
+            let reference = store.put("run-1", &blob, &registry).unwrap();
+            let sha = reference.sha256.clone();
+            let mut w = window();
+            w.add_region(Region::new(
+                crate::output_tool::FINAL_OUTPUT_REGION.into(),
+                RegionKind::Pinned,
+                10_000,
+            ));
+            let part = leviath_core::mime::Part::stored(reference).named("hero.png");
+            w.get_region_mut("sprites")
+                .unwrap()
+                .add_entry(EntryContent::from_parts(vec![part]), 1)
+                .unwrap();
+            let placed = |w: &ContextWindow| w.get_region("sprites").unwrap().content[0].placed();
+
+            let refused = call(
+                "context_export",
+                json!({"name": "hero.png", "path": "../hero.png"}),
+                &mut w,
+                mime,
+                entity,
+                Some(dir.path()),
+            );
+            assert!(refused.starts_with("[error]"), "{refused}");
+            assert!(placed(&w).is_empty());
+
+            let out = call(
+                "context_export",
+                json!({"name": "hero.png", "path": "./out/../out/hero.png"}),
+                &mut w,
+                mime,
+                entity,
+                Some(dir.path()),
+            );
+            assert!(out.starts_with("Wrote"), "{out}");
+            assert_eq!(placed(&w), [("out/hero.png".to_string(), sha)]);
+
+            std::fs::write(dir.path().join("out/hero.png"), EDITED).unwrap();
+            let artifact = submit(&mut w, mime, entity, dir.path(), "out/hero.png");
+            assert_eq!(artifact.path, "out/hero.png");
+            assert_eq!(artifact.sha256, leviath_core::mime::sha256_hex(EDITED));
+            assert_eq!(
+                std::fs::read_dir(dir.path().join("out")).unwrap().count(),
+                1
+            );
         });
     }
 

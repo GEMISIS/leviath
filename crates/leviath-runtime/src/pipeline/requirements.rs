@@ -371,12 +371,21 @@ pub(crate) fn require_final_output(
         // stage that produced nothing to satisfy its declared artifacts falls
         // through to the nudge below, exactly as before.
         let targets: Vec<&str> = stage.output_routing.values().map(|r| r.as_str()).collect();
+        // Only what the stage made is its answer: not an input sat in a
+        // routed region, not a file it attached there, not a part it has
+        // since reworked on disk.
+        let given = spec.0.given_digests();
+        let inputs = crate::output_tool::auto_emit::Inputs {
+            given: &given,
+            workdir: metadata.map(|m| std::path::Path::new(&m.workdir)),
+        };
         if let Some(output) = crate::output_tool::auto_emit::try_emit_for(
             stage.name.as_str(),
             &targets,
             stage_inf.and_then(|si| si.output.as_ref()),
             chrono::Utc::now().timestamp(),
             &mut window,
+            &inputs,
         ) {
             // Announced like a submission: it is the run's answer, recorded
             // before the run ends.
@@ -402,6 +411,7 @@ pub(crate) fn require_final_output(
                 &targets,
                 stage_inf.and_then(|si| si.output.as_ref()),
                 &window,
+                &inputs,
             )
         {
             tracing::warn!(stage = %stage.name, "{why}");

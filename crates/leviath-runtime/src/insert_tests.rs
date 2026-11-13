@@ -1306,7 +1306,9 @@ fn a_seed_marks_each_part_entry_it_lands_as_given() {
     let files = window.get_region("files").unwrap();
     let marks: Vec<bool> = files.content.iter().map(|e| e.is_given()).collect();
     assert_eq!(marks, [false, true, true]);
-    let (produced, given) = window.stored_parts_by_origin(&[]);
+    let crate::components::PartsByOrigin {
+        produced, given, ..
+    } = window.stored_parts_by_origin(&[]);
     assert!(produced.is_empty());
     assert_eq!(given.len(), 2);
 
