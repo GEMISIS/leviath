@@ -281,6 +281,13 @@ same list.
 
 ### Fixed
 
+- A media stage that fails for making none of its media quotes the model's own words and opens
+  with a tag a caller can match (#1136). After three replies without the image, video or audio the
+  stage makes, the error gave only how many characters the last reply held, though the nudge sent
+  back to the model had quoted them, and the only way to tell this failure from any other was to
+  read its sentence. It now quotes the last reply, shortened as the nudge shortens it and on one
+  line, and its text opens with `[no-media]`, written like the provider failure tags. Nothing
+  reads that tag as a provider failure, and the stage still ends after the same three replies.
 - `submit_output` records the file a run wrote, not an input it was fed under the same name. A
   run given `level-1-map.json` that wrote its own `levels/level-1-map.json` and submitted that
   path had the input recorded as the artifact, and its own file written beside itself as

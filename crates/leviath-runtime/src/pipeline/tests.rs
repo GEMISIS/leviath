@@ -5960,11 +5960,13 @@ fn a_media_stage_that_made_nothing_fails_once_its_nudges_are_spent() {
         panic!("the stage did not fail");
     };
     assert!(
-        message.starts_with("stage 'draw' makes image, and 3 replies in a row carried none"),
+        message.starts_with(
+            "[no-media] stage 'draw' makes image, and 3 replies in a row carried none"
+        ),
         "{message}"
     );
     assert!(message.contains("application/json (2 bytes)"), "{message}");
-    assert!(message.contains("1 characters of text"), "{message}");
+    assert!(message.contains("text: \"r\" (1 characters)"), "{message}");
     assert!(matches!(
         &world.get::<AgentState>(e).unwrap().status,
         AgentStatus::Error { message: said } if said == message
@@ -5988,6 +5990,77 @@ fn the_media_failure_names_what_the_last_reply_held() {
     assert!(said.contains("held audio/wav (44 bytes)."), "{said}");
     let empty = no_media_failure("clip", "video", 3, "", &[]);
     assert!(empty.contains("held nothing at all."), "{empty}");
+}
+
+/// The failure quotes a reply's words, shortened at the bound the nudge uses
+/// with the same ellipsis rule, on one line.
+#[test]
+fn the_media_failure_quotes_the_last_replys_words_shortened_like_the_nudge() {
+    let said = no_media_failure("edit", "image", 3, "  I cannot edit\nthat picture.  ", &[]);
+    assert!(
+        said.contains("The last one held text: \"I cannot edit that picture.\" (27 characters)."),
+        "{said}"
+    );
+    assert!(!said.contains('\n'), "{said}");
+    // Exactly at the bound: whole, no ellipsis. One over: cut, with one.
+    let at = no_media_failure("edit", "image", 3, &"z".repeat(500), &[]);
+    assert!(
+        at.contains(&format!("\"{}\" (500", "z".repeat(500))),
+        "{at}"
+    );
+    let over = no_media_failure("edit", "image", 3, &"z".repeat(501), &[]);
+    assert!(
+        over.contains(&format!("\"{}...\" (501", "z".repeat(500))),
+        "{over}"
+    );
+    // The nudge cuts at the same place.
+    let nudge = no_media_nudge(&"z".repeat(501), "image");
+    assert!(
+        nudge.contains(&format!("\"{}...\"", "z".repeat(500))),
+        "{nudge}"
+    );
+}
+
+/// Parts of another type are named and nothing is quoted; a reply with
+/// nothing says so.
+#[test]
+fn the_media_failure_quotes_nothing_for_parts_only_and_says_nothing_held() {
+    let json = leviath_core::mime::Part::inline(
+        leviath_core::mime::MimeType::parse("application/json").unwrap(),
+        "{}",
+    );
+    let parts_only = no_media_failure("edit", "image", 3, "   ", &[json]);
+    assert!(
+        parts_only.contains("held application/json (2 bytes)."),
+        "{parts_only}"
+    );
+    assert!(!parts_only.contains("text:"), "{parts_only}");
+    let nothing = no_media_failure("edit", "image", 3, "", &[]);
+    assert!(nothing.contains("held nothing at all."), "{nothing}");
+}
+
+/// The failure opens with the same label for every family, and nothing that
+/// reads leading tags off a message takes it for a provider failure.
+#[test]
+fn the_media_failure_carries_one_label_that_is_no_provider_failure() {
+    use leviath_providers::{ProviderError, UnavailableReason};
+    for family in ["image", "video", "audio"] {
+        let said = no_media_failure("make", family, 3, "no", &[]);
+        assert!(said.starts_with("[no-media] stage 'make'"), "{said}");
+        for error in [
+            ProviderError::RequestFailed(said.clone()),
+            ProviderError::ApiError(said.clone()),
+        ] {
+            assert_eq!(error.failure_kind(), None, "{said}");
+            assert!(!error.is_capability_refusal(), "{said}");
+        }
+        assert_eq!(UnavailableReason::from_message(&said), None, "{said}");
+    }
+    assert!(
+        leviath_providers::FailureKind::ALL
+            .iter()
+            .all(|kind| kind.label() != "no-media")
+    );
 }
 
 /// A media stage that has called tools is not failed for a reply without
