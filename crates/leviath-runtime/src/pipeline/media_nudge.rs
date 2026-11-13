@@ -35,10 +35,33 @@ pub(crate) fn media_part_count(parts: &[leviath_core::mime::Part], family: &str)
         .count()
 }
 
+/// The tag a no-media failure opens with, in the style of the provider
+/// failure tags (`[bad-request]`). It is not one of them: no
+/// `FailureKind` carries this label, so nothing that reads leading tags to
+/// retry, reroute or count a provider failure takes it for one. A caller that
+/// wants to say this failure in its own words reads it at the head of the
+/// stage's or run's `error` text.
+pub(crate) const NO_MEDIA_TAG: &str = "[no-media]";
+
+/// How many characters of a reply's words are quoted back before an ellipsis.
+const QUOTED_REPLY_CHARS: usize = 500;
+
+/// A reply's words, trimmed and shortened to [`QUOTED_REPLY_CHARS`] with `...`
+/// after a cut one: how both the nudge and the failure quote the model.
+fn shortened_reply(trimmed: &str) -> String {
+    let mut quoted = leviath_core::text::truncate_chars(trimmed, QUOTED_REPLY_CHARS);
+    if trimmed.chars().count() > QUOTED_REPLY_CHARS {
+        quoted.push_str("...");
+    }
+    quoted
+}
+
 /// Why a media stage stopped: `attempts` replies in a row held nothing of the
 /// `family` it makes. Names what the last one did hold, each part by type and
-/// size, so a route that returned the wrong thing can be told from a model
-/// that returned nothing.
+/// size, and quotes its words, shortened as the nudge shortens them and kept
+/// on one line, so a route that returned the wrong thing, a refusal and a
+/// model that returned nothing can all be told apart. Opens with
+/// [`NO_MEDIA_TAG`].
 pub(crate) fn no_media_failure(
     stage: &str,
     family: &str,
@@ -56,16 +79,21 @@ pub(crate) fn no_media_failure(
             format!("{} ({size} bytes)", part.mime_type)
         })
         .collect();
-    let characters = reply_text.trim().chars().count();
-    if characters > 0 {
-        held.push(format!("{characters} characters of text"));
+    let trimmed = reply_text.trim();
+    if !trimmed.is_empty() {
+        let characters = trimmed.chars().count();
+        let words = shortened_reply(trimmed)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        held.push(format!("text: \"{words}\" ({characters} characters)"));
     }
     let held = match held.is_empty() {
         true => "nothing at all".to_string(),
         false => held.join(", "),
     };
     format!(
-        "stage '{stage}' makes {family}, and {attempts} replies in a row carried none. The last \
+        "{NO_MEDIA_TAG} stage '{stage}' makes {family}, and {attempts} replies in a row carried none. The last \
          one held {held}. A media model is not asked a fourth time: every reply is a paid \
          generation. Check that the stage's model makes {family} on the provider it ran on \
          (`lev models show <model>`)."
@@ -89,10 +117,7 @@ pub(crate) fn no_media_nudge(reply_text: &str, family: &str) -> String {
              generation may have failed. Generate {what} and try again."
         );
     }
-    let mut quoted = leviath_core::text::truncate_chars(trimmed, 500);
-    if trimmed.chars().count() > 500 {
-        quoted.push_str("...");
-    }
+    let quoted = shortened_reply(trimmed);
     format!(
         "This stage produces {what}, but your last reply contained none, only text: \
          \"{quoted}\". That usually means the generation failed or was refused. If that \

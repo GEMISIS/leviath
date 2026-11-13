@@ -955,8 +955,12 @@ media.
 Every reply from a media model is a paid generation, so a media stage is never asked more than
 three times. A reply that holds nothing of the type the stage makes is sent back twice, with the
 model's own words, and the third one fails the stage, whatever its `max_iterations`. The error
-names what the last reply held, each part by type and size, so a route that returned the wrong
-thing can be told from a model that returned nothing.
+names what the last reply held, each part by type and size, and quotes its words (shortened to
+500 characters, on one line), so a route that returned the wrong thing, a refusal and a model that
+returned nothing can be told apart. The error text opens with the tag `[no-media]`, in the style of
+the provider failure tags (`[bad-request]`), so a caller can tell this failure without reading its
+sentence. It is not a provider failure: no `failure_kind` carries that label, and it is never
+retried or rerouted.
 
 **OpenAI**
 
