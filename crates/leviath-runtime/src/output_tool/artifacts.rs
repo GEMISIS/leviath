@@ -2,7 +2,10 @@
 //!
 //! An artifact is named by path or by `{ name, path, type }`. Every path must
 //! resolve inside the workdir and name either a part the run produced, which is
-//! written to disk, or a file that exists; every declared `required` artifact
+//! written to disk, or a file that exists; a part the run was given (an
+//! attachment, an input) is never one, so a file the run wrote under an
+//! input's name is that file, and an input named on its own is refused as
+//! not the run's to hand back; every declared `required` artifact
 //! must be present; an artifact that a declaration names must be of the
 //! declared type. What survives is typed
 //! by the registry (a declared type wins), hashed, and stored as a part of
@@ -25,6 +28,19 @@ pub(super) struct Ingested {
     /// One sentence per produced part written beside a different file rather
     /// than over it, for the acknowledgement.
     pub moved: Vec<String>,
+}
+
+/// The stored parts in the run's window that a submission's names are
+/// looked up among, by where they came from.
+#[derive(Debug, Default)]
+pub(super) struct Sources {
+    /// What the run produced: a tool's result, a model's answer, a worker's
+    /// file handed up. One of these answers an artifact's name.
+    pub produced: Vec<Part>,
+    /// What the run was given: its attachments, inputs, seeds and the files
+    /// a person sent it. One of these never answers an artifact's name; it
+    /// is only recognised, so naming one is refused with the reason.
+    pub given: Vec<Part>,
 }
 
 /// One named entry of the `artifacts` argument, before it is checked.
@@ -188,7 +204,7 @@ pub(super) fn resolve(
     args: &serde_json::Value,
     workdir: Option<&std::path::Path>,
     declared: &[ArtifactSpec],
-    produced: &[Part],
+    sources: &Sources,
     sink: Option<&PartSink<'_>>,
     overwrite: bool,
     fence: Option<&leviath_core::write_paths::WriteFence>,
@@ -245,8 +261,10 @@ pub(super) fn resolve(
         // A part the run produced (an image a model drew, a mesh a provider
         // built) is looked for first, by name and then sha, because a file of
         // the same name on disk may not be this run's at all. Only a name no
-        // part answers to is read from the workdir, as a file the run wrote.
-        let (bytes, path) = match produced_part(&item.path, produced, sink)? {
+        // produced part answers to is read from the workdir, as a file the run
+        // wrote. A part the run was given is not looked for here: an input
+        // sharing a name with the file the run wrote must not stand in for it.
+        let (bytes, path) = match produced_part(&item.path, &sources.produced, sink)? {
             Some((bytes, sha256)) => {
                 let path = place_produced(
                     &item.path,
@@ -268,6 +286,18 @@ pub(super) fn resolve(
             }
             None => match std::fs::read(&full) {
                 Ok(bytes) => (bytes, item.path.clone()),
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::NotFound
+                        && sources.given.iter().any(|p| p.is_named(&item.path)) =>
+                {
+                    return Err(format!(
+                        "[error] artifact '{}': nothing is at that path in the working \
+                         directory, and the name matches something this run was given, not \
+                         something it made. Name a file the run wrote in the working \
+                         directory, or a part it produced.",
+                        item.path
+                    ));
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     return Err(format!(
                         "[error] artifact '{}' is neither a file in the working directory nor \
@@ -387,7 +417,7 @@ mod tests {
             &args,
             Some(dir.path()),
             &specs(),
-            &[],
+            &Sources::default(),
             Some(&sink),
             false,
             None,
@@ -417,7 +447,7 @@ mod tests {
             &args,
             Some(dir.path()),
             &specs(),
-            &[],
+            &Sources::default(),
             Some(&sink),
             false,
             None,
@@ -425,7 +455,16 @@ mod tests {
         .unwrap();
         assert_eq!(out.records.len(), 1);
         // Without a sink: typed by the built-in registry, nothing stored.
-        let out = resolve(&args, Some(dir.path()), &[], &[], None, false, None).unwrap();
+        let out = resolve(
+            &args,
+            Some(dir.path()),
+            &[],
+            &Sources::default(),
+            None,
+            false,
+            None,
+        )
+        .unwrap();
         assert_eq!(out.records[0].mime_type.as_str(), "video/mp4");
         assert!(out.parts.is_empty());
     }
@@ -462,15 +501,23 @@ mod tests {
             (json!({"artifacts": ["missing.mp4"]}), "neither a file"),
         ];
         for (args, expect) in cases {
-            let err =
-                resolve(&args, Some(dir.path()), &specs(), &[], None, false, None).unwrap_err();
+            let err = resolve(
+                &args,
+                Some(dir.path()),
+                &specs(),
+                &Sources::default(),
+                None,
+                false,
+                None,
+            )
+            .unwrap_err();
             assert!(err.contains(expect), "{args}: {err}");
         }
         let err = resolve(
             &json!({"artifacts": ["notes.md"]}),
             None,
             &[],
-            &[],
+            &Sources::default(),
             None,
             false,
             None,
@@ -479,10 +526,18 @@ mod tests {
         assert!(err.contains("working directory"), "{err}");
         // Nothing declared, nothing named: nothing to check.
         assert!(
-            resolve(&json!({}), None, &[], &[], None, false, None)
-                .unwrap()
-                .records
-                .is_empty()
+            resolve(
+                &json!({}),
+                None,
+                &[],
+                &Sources::default(),
+                None,
+                false,
+                None
+            )
+            .unwrap()
+            .records
+            .is_empty()
         );
         // A store that refuses keeps the record and drops the part.
         struct Broken;
@@ -520,7 +575,7 @@ mod tests {
             &json!({"artifacts": ["notes.md"]}),
             Some(dir.path()),
             &[],
-            &[],
+            &Sources::default(),
             Some(&sink),
             false,
             None,

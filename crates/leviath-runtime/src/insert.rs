@@ -149,7 +149,8 @@ pub(crate) fn seeded_window(
 /// Write one region's seed into `window`: its text (trimmed to the region's
 /// budget), then each seeded part as an entry of its own. A seed with parts
 /// and no text adds no empty text entry. A region the window does not hold
-/// takes nothing.
+/// takes nothing. Each part entry that lands is marked given: a seed is
+/// what the run was handed, never something it made.
 pub(crate) fn seed_region(
     window: &mut ContextWindow,
     name: &str,
@@ -168,13 +169,22 @@ pub(crate) fn seed_region(
             crate::components::part_from_state(part),
         ]);
         let tokens = content.tokens(None);
-        let _ = window.add_content_entry(
-            leviath_core::ContextCause::Seed,
-            name,
-            leviath_core::EntryKind::Text,
-            content,
-            tokens,
-        );
+        // A seed is given to the run by definition, at its start, on entering
+        // a stage's own layout and on a continuation's reseed alike, so each
+        // part entry is marked where it lands (see
+        // `ContextWindow::stored_parts_by_origin`).
+        if window
+            .add_content_entry(
+                leviath_core::ContextCause::Seed,
+                name,
+                leviath_core::EntryKind::Text,
+                content,
+                tokens,
+            )
+            .is_ok()
+        {
+            window.mark_given(name, None);
+        }
     }
 }
 

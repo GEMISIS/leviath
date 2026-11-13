@@ -26,6 +26,9 @@ enum MetaFrame<'a> {
         note: Option<std::borrow::Cow<'a, str>>,
     },
     Sticky(std::borrow::Cow<'a, EntryMeta>),
+    /// [`EntryMeta::Given`] on an entry that is not sticky. After `Sticky`,
+    /// so every file written before it reads the same.
+    Given,
 }
 
 impl<'a> MetaFrame<'a> {
@@ -39,6 +42,7 @@ impl<'a> MetaFrame<'a> {
                 done: *done,
                 note: note.as_deref().map(std::borrow::Cow::Borrowed),
             },
+            (false, EntryMeta::Given) => MetaFrame::Given,
         }
     }
 
@@ -55,6 +59,7 @@ impl<'a> MetaFrame<'a> {
                 false,
             ),
             MetaFrame::Sticky(meta) => (meta.into_owned(), true),
+            MetaFrame::Given => (EntryMeta::Given, false),
         }
     }
 }

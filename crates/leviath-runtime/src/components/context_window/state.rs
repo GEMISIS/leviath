@@ -114,13 +114,15 @@ fn entry_state(entry: &RegionEntry) -> EntryState {
                 is_error: *is_error,
             },
         },
-        meta: entry
-            .as_checklist_item()
-            .map_or(EntryMeta::None, |item| EntryMeta::ChecklistItem {
+        meta: match entry.as_checklist_item() {
+            Some(item) => EntryMeta::ChecklistItem {
                 id: small(item.id),
                 done: item.done,
                 note: item.note,
-            }),
+            },
+            None if entry.is_given() => EntryMeta::Given,
+            None => EntryMeta::None,
+        },
         key: entry.key.clone(),
         reasoning: entry.reasoning.clone(),
         sticky: entry.sticky,
@@ -148,6 +150,7 @@ fn entry(state: &EntryState) -> RegionEntry {
                 }
                 Some(meta)
             }
+            EntryMeta::Given => Some(serde_json::json!({ leviath_core::region::GIVEN: true })),
         },
         kind: match &state.kind {
             EntryKind::Text => leviath_core::EntryKind::Text,

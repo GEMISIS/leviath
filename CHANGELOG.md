@@ -281,6 +281,20 @@ same list.
 
 ### Fixed
 
+- `submit_output` records the file a run wrote, not an input it was fed under the same name. A
+  run given `level-1-map.json` that wrote its own `levels/level-1-map.json` and submitted that
+  path had the input recorded as the artifact, and its own file written beside itself as
+  `levels/level-1-map-<sha8>.json`: an artifact's name was looked up among every stored part in
+  the window, the run's attachments and inputs among them, before the working directory. Only a
+  part the run produced (a tool's result, a model's answer, a worker's file handed up) answers a
+  name now. A part is given when it was seeded (at the run's start, on entering a stage's own
+  layout, or reseeded when the run is continued) or when a person sent it (a message's files and
+  the file in an answer to a question the model asked). Each such entry is marked given where it
+  is written, and the mark is kept in the run's file; for a run saved before the mark, the
+  digests of its spec's seeds stand in for it. The same bytes are given
+  wherever else they turn up. The copy of an earlier answer's files in `final_output` answers
+  nothing either, so a stage sent back to fix a file records the fix. A name with nothing at its
+  path that matches only something given is refused, saying exactly that (#1132).
 - A model that answers in no text (an image, audio or video model) is sent its stage's prompt and
   nothing else, on every provider. Behind a chat route it was sent the stage's regions as system
   messages and the bare "Begin." turn: OpenRouter's `flux.2-flex` drew a 24-tile sheet that had

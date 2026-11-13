@@ -1365,6 +1365,11 @@
               "ChecklistItem"
             ],
             "type": "object"
+          },
+          {
+            "const": "Given",
+            "description": "What a person sent the run (a message's files, the file in an\nanswer): its stored parts are the run's inputs, not its work.",
+            "type": "string"
           }
         ]
       },
@@ -9717,6 +9722,11 @@
               "ChecklistItem"
             ],
             "type": "object"
+          },
+          {
+            "const": "Given",
+            "description": "What a person sent the run (a message's files, the file in an\nanswer): its stored parts are the run's inputs, not its work.",
+            "type": "string"
           }
         ]
       },

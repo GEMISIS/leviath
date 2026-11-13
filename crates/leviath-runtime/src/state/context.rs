@@ -131,6 +131,9 @@ pub enum EntryMeta {
         /// The note left when it was ticked.
         note: Option<String>,
     },
+    /// What a person sent the run (a message's files, the file in an
+    /// answer): its stored parts are the run's inputs, not its work.
+    Given,
 }
 
 /// A typed part of an entry.

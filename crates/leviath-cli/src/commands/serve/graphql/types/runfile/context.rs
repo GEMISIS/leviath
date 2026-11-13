@@ -242,7 +242,7 @@ impl From<&EntryState> for ContextEntry {
             ),
         };
         let checklist = match &e.meta {
-            EntryMeta::None => None,
+            EntryMeta::None | EntryMeta::Given => None,
             EntryMeta::ChecklistItem { id, done, note } => Some(ChecklistItem {
                 number: saturating(*id),
                 done: *done,

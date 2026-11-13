@@ -17,18 +17,66 @@ use leviath_core::region::{EntryContent, KeyedWrite};
 use leviath_providers::ContentBlock;
 
 impl super::ContextWindow {
-    /// Every stored part anywhere in the window, cloned. What `submit_output`
-    /// searches to let a stage name a part the run produced (a picture from an
-    /// image model, which lives in the store, not on disk) as an artifact to
-    /// emit. Lives here, beside the other mime assembly, to keep the parent
-    /// file under its production-line cap.
-    pub(crate) fn stored_parts(&self) -> Vec<Part> {
-        self.regions
-            .iter()
-            .flat_map(|r| &r.content)
+    /// The stored parts in the window, cloned and split in two: what the run
+    /// produced, and what it was given. What `submit_output` searches to let a
+    /// stage name a part the run produced (a picture from an image model,
+    /// which lives in the store, not on disk) as an artifact to emit, and to
+    /// tell a stage that names one of its inputs that it did not make it.
+    ///
+    /// A part is given when it sits on an entry its writer marked given
+    /// ([`mark_given`](Self::mark_given)): every seed, a reseed on continue
+    /// included, and what a person sent. `given`, the digests of the parts
+    /// the run's spec seeded it with, covers a run saved before that mark
+    /// existed, whose seeded entries carry none. Every other stored part was
+    /// produced, a worker's file handed up included.
+    /// Bytes the run was given are given wherever else they turn up, so a
+    /// tool that echoes an input back has not produced it. The `final_output`
+    /// region is left out of both: its parts are copies of an earlier
+    /// submission's artifacts, not anything a tool or a model handed the run.
+    /// Lives here, beside the other mime assembly, to keep the parent file
+    /// under its production-line cap.
+    pub(crate) fn stored_parts_by_origin(&self, given: &[String]) -> (Vec<Part>, Vec<Part>) {
+        let entries = || {
+            self.regions
+                .iter()
+                .filter(|r| r.name != crate::output_tool::FINAL_OUTPUT_REGION)
+                .flat_map(|r| &r.content)
+        };
+        let sent: Vec<&str> = entries()
+            .filter(|e| e.is_given())
+            .flat_map(|e| e.content.stored())
+            .filter_map(|p| p.blob().map(|b| b.sha256.as_str()))
+            .collect();
+        entries()
             .flat_map(|e| e.content.stored())
             .cloned()
-            .collect()
+            .partition(|p| {
+                p.blob().is_some_and(|b| {
+                    !given.contains(&b.sha256) && !sent.contains(&b.sha256.as_str())
+                })
+            })
+    }
+
+    /// Mark the entry a write just landed in `region` as given to the run
+    /// (see [`RegionEntry::mark_given`](leviath_core::region::RegionEntry::mark_given)):
+    /// the one filed under `key` when the write was keyed, else the last.
+    /// Called by the writer that knows a person sent what it wrote, after
+    /// the write succeeded, the way a turn's reasoning token is attached.
+    /// A region the window does not hold, or no such entry, marks nothing.
+    pub(crate) fn mark_given(&mut self, region: &str, key: Option<&str>) {
+        let Some(region) = self.get_region_mut(region) else {
+            return;
+        };
+        let entry = match key {
+            Some(key) => region
+                .content
+                .iter_mut()
+                .find(|e| e.key.as_deref() == Some(key)),
+            None => region.content.last_mut(),
+        };
+        if let Some(entry) = entry {
+            entry.mark_given();
+        }
     }
 
     /// The stored part `needle` names (see [`Part::is_named`]), the most
@@ -92,6 +140,40 @@ mod tests {
     use leviath_core::mime::{Blob, MimeRegistry, MimeType, Part};
     use leviath_core::region::{Region, RegionKind};
     use leviath_providers::MessageContent;
+
+    /// A mark lands on the entry a keyed write filed under its key, else on
+    /// the last entry; a missing region, a key nothing holds and an empty
+    /// region mark nothing.
+    #[test]
+    fn a_mark_lands_on_the_entry_just_written() {
+        use crate::components::ContextWindow;
+        let mut window = ContextWindow::new(10_000);
+        window.add_region(Region::new("files".into(), RegionKind::Pinned, 5_000));
+        window.add_region(Region::new("empty".into(), RegionKind::Pinned, 5_000));
+        let files = window.get_region_mut("files").unwrap();
+        files
+            .add_keyed_entry("a", EntryContent::text("a"), 1)
+            .unwrap();
+        files
+            .add_keyed_entry("b", EntryContent::text("b"), 1)
+            .unwrap();
+        window.mark_given("nowhere", None);
+        window.mark_given("empty", None);
+        window.mark_given("files", Some("ghost"));
+        let given = |w: &ContextWindow| -> Vec<bool> {
+            w.get_region("files")
+                .unwrap()
+                .content
+                .iter()
+                .map(|e| e.is_given())
+                .collect()
+        };
+        assert_eq!(given(&window), [false, false]);
+        window.mark_given("files", Some("a"));
+        assert_eq!(given(&window), [true, false]);
+        window.mark_given("files", None);
+        assert_eq!(given(&window), [true, true]);
+    }
 
     fn stored(name: &str) -> Part {
         let reg = MimeRegistry::builtin();

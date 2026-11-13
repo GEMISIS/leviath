@@ -180,6 +180,23 @@ impl RunSpec {
         layers
     }
 
+    /// The sha256 of every stored part this run was given at its start: its
+    /// attachments, its inputs and the files its regions were seeded with.
+    /// A seed's entry is marked given where it lands, so this list matters
+    /// only for a run saved before that mark existed and continued or
+    /// resumed on a later build: its seeded parts carry no mark, and their
+    /// digests are how they are still known as given.
+    pub fn given_digests(&self) -> Vec<String> {
+        self.seeded
+            .values()
+            .flat_map(|seeded| &seeded.parts)
+            .filter_map(|part| match &part.body {
+                crate::state::context::PartBody::Stored(blob) => Some(blob.digest.to_string()),
+                crate::state::context::PartBody::Inline(_) => None,
+            })
+            .collect()
+    }
+
     /// The policy a child run or fan-out worker started from the stage at
     /// `stage_index` is narrowed against: this run's, with the write paths in
     /// force at that stage, so nothing it starts can write where it could not.
@@ -582,5 +599,50 @@ pub(crate) mod tests {
             spec.same_graph_source(),
             crate::spec::request::SpawnSource::Raw(Box::new(spec.graph.clone()))
         );
+    }
+
+    /// The digests a run was given are its seeded regions' stored parts,
+    /// whichever region they landed in; text, inline or seeded, has none.
+    #[test]
+    fn the_given_digests_are_every_seeded_stored_part() {
+        use crate::state::context::{BlobState, PartBody};
+        let stored = |bytes: &[u8]| PartState {
+            mime_type: "application/json".into(),
+            body: PartBody::Stored(BlobState {
+                digest: Digest::of(bytes),
+                size: bytes.len() as u64,
+                width: None,
+                height: None,
+                duration_ms: None,
+                tokens: 1,
+                stand_in: String::new(),
+            }),
+            name: Some("a.json".into()),
+            deliver: None,
+        };
+        let mut s = spec();
+        assert!(s.given_digests().is_empty(), "a text seed gives no part");
+        s.seeded.insert(
+            RegionName::new("files").unwrap(),
+            SeededContent {
+                text: String::new(),
+                parts: vec![
+                    stored(b"one"),
+                    PartState {
+                        body: PartBody::Inline("inline".into()),
+                        ..stored(b"x")
+                    },
+                    stored(b"two"),
+                ],
+            },
+        );
+        assert_eq!(
+            s.given_digests(),
+            [
+                Digest::of(b"one").to_string(),
+                Digest::of(b"two").to_string()
+            ]
+        );
+        assert_eq!(s.given_digests()[0], leviath_core::mime::sha256_hex(b"one"));
     }
 }

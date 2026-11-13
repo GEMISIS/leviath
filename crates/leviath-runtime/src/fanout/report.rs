@@ -155,3 +155,7 @@ pub(super) fn set_status(world: &mut World, entity: Entity, status: AgentStatus)
         state.status = status;
     }
 }
+
+#[cfg(test)]
+#[path = "report_tests.rs"]
+mod tests;

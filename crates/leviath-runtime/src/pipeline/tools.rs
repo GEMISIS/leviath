@@ -638,7 +638,11 @@ pub(crate) fn dispatch_tools(
             recovered.map(|r| r.0.clone()).unwrap_or_default();
         // What a `submit_output` in this batch is judged against.
         let stage_names = super::validator_tool::stage_names(blueprint);
+        let given = blueprint
+            .map(|spec| spec.0.given_digests())
+            .unwrap_or_default();
         let output_ctx = crate::output_tool::OutputContext {
+            given: &given,
             write_fence: Some(&write_fence),
             spec: stage_inf.output.as_ref(),
             validators,

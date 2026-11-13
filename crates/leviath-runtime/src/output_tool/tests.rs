@@ -56,6 +56,7 @@ fn a_submission_is_recorded_verbatim_and_mirrored_into_the_region() {
         &OutputContext {
             write_fence: None,
             tool_verdict: None,
+            given: &[],
             spec: Some(&spec(Some("markdown"), None)),
             validators: None,
             stage: "summary",
@@ -91,6 +92,7 @@ fn an_unrecognized_format_is_carried_through_without_inspection() {
         &OutputContext {
             write_fence: None,
             tool_verdict: None,
+            given: &[],
             spec: Some(&spec(Some("a2ui"), None)),
             validators: None,
             stage: "summary",
@@ -117,6 +119,7 @@ fn a_format_with_no_schema_never_parses_the_content() {
         &OutputContext {
             write_fence: None,
             tool_verdict: None,
+            given: &[],
             spec: Some(&spec(Some("xml"), None)),
             validators: None,
             stage: "summary",
@@ -146,6 +149,7 @@ fn a_format_checks_well_formedness_but_not_shape() {
         &OutputContext {
             write_fence: None,
             tool_verdict: None,
+            given: &[],
             spec: Some(&spec(Some("json"), None)),
             validators: None,
             stage: "summary",
@@ -165,6 +169,7 @@ fn a_format_checks_well_formedness_but_not_shape() {
         &OutputContext {
             write_fence: None,
             tool_verdict: None,
+            given: &[],
             spec: Some(&spec(Some("json"), None)),
             validators: None,
             stage: "summary",
@@ -188,6 +193,7 @@ fn no_spec_at_all_still_records_an_answer() {
         &OutputContext {
             write_fence: None,
             tool_verdict: None,
+            given: &[],
             spec: None,
             validators: None,
             stage: "summary",
@@ -217,6 +223,7 @@ fn a_submission_matching_its_schema_is_accepted() {
         &OutputContext {
             write_fence: None,
             tool_verdict: None,
+            given: &[],
             spec: Some(&spec(Some("json"), Some(schema))),
             validators: None,
             stage: "summary",
@@ -244,6 +251,7 @@ fn a_submission_violating_its_schema_is_refused_and_records_nothing() {
         &OutputContext {
             write_fence: None,
             tool_verdict: None,
+            given: &[],
             spec: Some(&spec(Some("json"), Some(schema))),
             validators: None,
             stage: "summary",
@@ -274,6 +282,7 @@ fn content_that_is_not_json_fails_a_schema_check_with_a_readable_reason() {
         &OutputContext {
             write_fence: None,
             tool_verdict: None,
+            given: &[],
             spec: Some(&spec(None, Some(json!({"type": "object"})))),
             validators: None,
             stage: "summary",
@@ -299,6 +308,7 @@ fn an_uncompilable_schema_records_the_submission_unchecked() {
         &OutputContext {
             write_fence: None,
             tool_verdict: None,
+            given: &[],
             spec: // A misspelled `type` is the schema this workspace already uses to mean
         // "will not compile" (a typo'd Rhai `@param n strng` produces exactly it).
         Some(&spec(None, Some(json!({"type": "strng"})))),
@@ -323,6 +333,7 @@ fn a_missing_content_argument_is_refused() {
         &OutputContext {
             write_fence: None,
             tool_verdict: None,
+            given: &[],
             spec: None,
             validators: None,
             stage: "summary",
@@ -348,6 +359,7 @@ fn a_blank_submission_is_refused() {
             &OutputContext {
                 write_fence: None,
                 tool_verdict: None,
+                given: &[],
                 spec: None,
                 validators: None,
                 stage: "summary",
@@ -373,6 +385,7 @@ fn an_oversized_submission_is_truncated_and_the_model_is_told() {
         &OutputContext {
             write_fence: None,
             tool_verdict: None,
+            given: &[],
             spec: None,
             validators: None,
             stage: "summary",
@@ -403,6 +416,7 @@ fn a_second_submission_replaces_the_first() {
         &OutputContext {
             write_fence: None,
             tool_verdict: None,
+            given: &[],
             spec: None,
             validators: None,
             stage: "summary",
@@ -420,6 +434,7 @@ fn a_second_submission_replaces_the_first() {
         &OutputContext {
             write_fence: None,
             tool_verdict: None,
+            given: &[],
             spec: None,
             validators: None,
             stage: "summary",
@@ -446,6 +461,7 @@ fn a_window_without_the_region_still_records_the_output() {
         &OutputContext {
             write_fence: None,
             tool_verdict: None,
+            given: &[],
             spec: None,
             validators: None,
             stage: "summary",
@@ -480,6 +496,7 @@ fn artifacts_inside_the_workdir_are_recorded() {
         &OutputContext {
             write_fence: None,
             tool_verdict: None,
+            given: &[],
             spec: None,
             validators: None,
             stage: "present",
@@ -511,6 +528,7 @@ fn an_artifact_outside_the_workdir_refuses_the_whole_submission() {
         &OutputContext {
             write_fence: None,
             tool_verdict: None,
+            given: &[],
             spec: None,
             validators: None,
             stage: "present",
@@ -536,6 +554,7 @@ fn no_artifacts_argument_records_an_empty_list() {
         &OutputContext {
             write_fence: None,
             tool_verdict: None,
+            given: &[],
             spec: None,
             validators: None,
             stage: "present",
@@ -560,6 +579,7 @@ fn artifacts_with_no_workdir_are_refused() {
         &OutputContext {
             write_fence: None,
             tool_verdict: None,
+            given: &[],
             spec: None,
             validators: None,
             stage: "present",
@@ -588,6 +608,7 @@ fn a_long_answer_is_mirrored_as_a_bounded_preview() {
         &OutputContext {
             write_fence: None,
             tool_verdict: None,
+            given: &[],
             spec: None,
             validators: None,
             stage: "summary",
@@ -626,6 +647,7 @@ fn a_submission_that_is_not_the_format_it_claims_is_refused() {
         &OutputContext {
             write_fence: None,
             tool_verdict: None,
+            given: &[],
             spec: Some(&spec(Some("json"), None)),
             validators: None,
             stage: "summary",
@@ -649,6 +671,7 @@ fn a_well_formed_submission_in_a_known_format_is_accepted() {
         &OutputContext {
             write_fence: None,
             tool_verdict: None,
+            given: &[],
             spec: Some(&spec(Some("xml"), None)),
             validators: None,
             stage: "summary",
@@ -673,6 +696,7 @@ fn an_unknown_format_is_still_never_inspected() {
         &OutputContext {
             write_fence: None,
             tool_verdict: None,
+            given: &[],
             spec: Some(&spec(Some("a2ui"), None)),
             validators: None,
             stage: "summary",
@@ -697,6 +721,7 @@ fn the_format_check_reports_before_the_schema_check() {
         &OutputContext {
             write_fence: None,
             tool_verdict: None,
+            given: &[],
             spec: Some(&spec(
                 Some("json"),
                 Some(json!({"type": "object", "required": ["summary"]})),
@@ -761,6 +786,7 @@ fn an_agent_supplied_validator_rejects_a_bad_answer() {
         &OutputContext {
             write_fence: None,
             tool_verdict: None,
+            given: &[],
             spec: Some(&spec_with_validator("a2ui")),
             validators: Some(&vals),
             stage: "summary",
@@ -793,6 +819,7 @@ fn an_agent_supplied_validator_accepts_a_good_answer() {
         &OutputContext {
             write_fence: None,
             tool_verdict: None,
+            given: &[],
             spec: Some(&spec_with_validator("a2ui")),
             validators: Some(&vals),
             stage: "summary",
@@ -820,6 +847,7 @@ fn a_throwing_validator_rejects_the_submission_by_default() {
         &OutputContext {
             write_fence: None,
             tool_verdict: None,
+            given: &[],
             spec: Some(&spec_with_validator("a2ui")),
             validators: Some(&vals),
             stage: "summary",
@@ -856,6 +884,7 @@ fn an_accept_policy_records_the_submission_unchecked() {
         &OutputContext {
             write_fence: None,
             tool_verdict: None,
+            given: &[],
             spec: Some(&spec_with_lenient_validator("a2ui")),
             validators: Some(&vals),
             stage: "summary",
@@ -893,6 +922,7 @@ fn a_broken_validator_is_recorded_once_however_often_it_is_hit() {
             &OutputContext {
                 write_fence: None,
                 tool_verdict: None,
+                given: &[],
                 spec: Some(&spec_with_validator("a2ui")),
                 validators: Some(&vals),
                 stage: "summary",
@@ -922,6 +952,7 @@ fn a_working_validator_records_nothing() {
         &OutputContext {
             write_fence: None,
             tool_verdict: None,
+            given: &[],
             spec: Some(&spec_with_validator("a2ui")),
             validators: Some(&vals),
             stage: "summary",
@@ -946,6 +977,7 @@ fn a_named_validator_with_nothing_compiled_is_skipped() {
         &OutputContext {
             write_fence: None,
             tool_verdict: None,
+            given: &[],
             spec: Some(&spec_with_validator("a2ui")),
             validators: None,
             stage: "summary",
@@ -990,6 +1022,7 @@ fn ctx<'a>(stage: &'a str, stage_names: &'a [String]) -> OutputContext<'a> {
     OutputContext {
         write_fence: None,
         tool_verdict: None,
+        given: &[],
         spec: None,
         validators: None,
         stage,
@@ -1119,6 +1152,7 @@ fn stored_artifacts_are_mirrored_beside_the_answer() {
         &OutputContext {
             write_fence: None,
             tool_verdict: None,
+            given: &[],
             spec: None,
             validators: None,
             stage: "present",
@@ -1196,6 +1230,7 @@ fn a_produced_part_named_as_an_artifact_is_written_to_disk() {
         &OutputContext {
             write_fence: None,
             tool_verdict: None,
+            given: &[],
             spec: None,
             validators: None,
             stage: "describe",
@@ -1256,6 +1291,7 @@ fn a_produced_part_outside_the_write_paths_is_refused() {
             &OutputContext {
                 write_fence: Some(&fence),
                 tool_verdict: None,
+                given: &[],
                 spec: None,
                 validators: None,
                 stage: "describe",
@@ -1306,6 +1342,7 @@ fn an_artifact_that_is_neither_a_file_nor_a_produced_part_is_refused() {
         &OutputContext {
             write_fence: None,
             tool_verdict: None,
+            given: &[],
             spec: None,
             validators: None,
             stage: "describe",
@@ -1381,6 +1418,7 @@ fn a_produced_part_resolves_by_its_file_name() {
         &OutputContext {
             write_fence: None,
             tool_verdict: None,
+            given: &[],
             spec: None,
             validators: None,
             stage: "describe",
@@ -1421,6 +1459,7 @@ fn a_produced_part_resolves_by_sha_prefix() {
         &OutputContext {
             write_fence: None,
             tool_verdict: None,
+            given: &[],
             spec: None,
             validators: None,
             stage: "describe",
@@ -1473,6 +1512,7 @@ fn a_produced_part_whose_store_read_fails_is_refused() {
         &OutputContext {
             write_fence: None,
             tool_verdict: None,
+            given: &[],
             spec: None,
             validators: None,
             stage: "describe",
@@ -1512,6 +1552,7 @@ fn a_produced_part_written_to_a_missing_directory_is_refused() {
         &OutputContext {
             write_fence: None,
             tool_verdict: None,
+            given: &[],
             spec: None,
             validators: None,
             stage: "describe",
@@ -1550,6 +1591,7 @@ fn submit_produced_png(
         &OutputContext {
             write_fence: None,
             tool_verdict: None,
+            given: &[],
             spec: None,
             validators: None,
             stage: "describe",
@@ -1649,6 +1691,7 @@ fn a_repeat_is_the_same_content_and_the_same_unchanged_files() {
     let ctx = OutputContext {
         write_fence: None,
         tool_verdict: None,
+        given: &[],
         spec: None,
         validators: None,
         stage: "build",
@@ -1708,6 +1751,7 @@ fn an_answer_without_files_repeats_on_its_content() {
         &OutputContext {
             write_fence: None,
             tool_verdict: None,
+            given: &[],
             spec: None,
             validators: None,
             stage: "answer",
@@ -1748,6 +1792,7 @@ fn judged_by(
         &OutputContext {
             write_fence: None,
             tool_verdict: verdict,
+            given: &[],
             spec: Some(spec),
             validators: Some(vals),
             stage: "build",
@@ -1811,6 +1856,7 @@ fn the_cheap_checks_come_before_the_tools_verdict() {
     let ctx = OutputContext {
         write_fence: None,
         tool_verdict: Some(&Verdict::Valid),
+        given: &[],
         spec: Some(&OutputSpec {
             format: Some("json".to_string()),
             ..tool_checked(None)
@@ -1850,6 +1896,7 @@ fn submit_under(spec: &OutputSpec, args: serde_json::Value) -> (String, Option<F
     let ctx = OutputContext {
         write_fence: None,
         tool_verdict: None,
+        given: &[],
         spec: Some(spec),
         validators: None,
         stage: "summary",
@@ -2010,4 +2057,331 @@ fn an_answer_repeats_in_either_form() {
         None
     ));
     assert!(!repeats(&json!({}), &recorded, Some(&spec), None));
+}
+
+/// The bytes of the file a run was fed, and of the file it wrote under the
+/// same name, for the input tests below.
+const FED: &[u8] = b"{\"tiles\": [\"the map the run was given\"]}";
+const WROTE: &[u8] = b"{\"tiles\": [\"the run's own map\"]}";
+
+/// A run's window and store with `bytes` fed to it as `name`: stored, and
+/// seeded into `task` the way a spawn's attachment is. Returns the window,
+/// the store, the registry and the input's sha256, which is what the run's
+/// spec lists as given.
+fn window_fed(
+    name: &str,
+    bytes: &[u8],
+) -> (
+    ContextWindow,
+    leviath_core::mime::MemoryBlobStore,
+    leviath_core::mime::MimeRegistry,
+    String,
+) {
+    use leviath_core::mime::{Blob, BlobStore, MemoryBlobStore, MimeRegistry, MimeType, Part};
+    let store = MemoryBlobStore::new();
+    let registry = MimeRegistry::builtin();
+    let blob = Blob::new(MimeType::parse("application/json").unwrap(), bytes.to_vec()).named(name);
+    let reference = store.put("run-1", &blob, &registry).expect("stored");
+    let mut w = win();
+    let content = leviath_core::region::EntryContent::from_parts(vec![
+        Part::stored(reference.clone()).named(name),
+    ]);
+    let tokens = content.tokens(None);
+    w.add_content_entry(
+        leviath_core::ContextCause::Seed,
+        "task",
+        leviath_core::EntryKind::Text,
+        content,
+        tokens,
+    )
+    .expect("seeded");
+    (w, store, registry, reference.sha256)
+}
+
+/// Submit `path` as an artifact from `w`, with `given` as the run's inputs.
+fn submit_fed(
+    w: &mut ContextWindow,
+    store: &leviath_core::mime::MemoryBlobStore,
+    registry: &leviath_core::mime::MimeRegistry,
+    dir: &std::path::Path,
+    given: &[String],
+    path: &str,
+) -> (String, Option<FinalOutput>) {
+    let sink = crate::context_setup::PartSink {
+        store,
+        registry,
+        run_id: "run-1",
+        max_part_bytes: 1 << 20,
+        inline_text_bytes: 1024,
+    };
+    handle_output_tool(
+        &json!({ "content": "the level is built", "artifacts": [path] }),
+        &OutputContext {
+            given,
+            sink: Some(&sink),
+            workdir: Some(dir),
+            ..ctx("output", &[])
+        },
+        0,
+        w,
+    )
+}
+
+/// Every file under `dir`, by path relative to it, sorted.
+fn files_under(dir: &std::path::Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(at) = stack.pop() {
+        for entry in std::fs::read_dir(&at).unwrap() {
+            let path = entry.unwrap().path();
+            match path.is_dir() {
+                true => stack.push(path),
+                false => out.push(
+                    path.strip_prefix(dir)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                ),
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The reported failure (issue 1132): a run fed `a.json` wrote its own
+/// `dir/a.json` and submitted it. The input shared the file's name and was
+/// recorded in its place, while the run's file was written "beside" itself.
+/// The file the run wrote is the artifact, at the path named, with its own
+/// hash, and nothing else lands in the working directory.
+#[test]
+fn a_file_written_under_an_inputs_name_is_recorded_not_the_input() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let (mut w, store, registry, fed) = window_fed("a.json", FED);
+    std::fs::create_dir(dir.path().join("dir")).unwrap();
+    std::fs::write(dir.path().join("dir/a.json"), WROTE).unwrap();
+    let (ack, output) = submit_fed(
+        &mut w,
+        &store,
+        &registry,
+        dir.path(),
+        std::slice::from_ref(&fed),
+        "dir/a.json",
+    );
+    let artifact = &output.expect("recorded").artifacts[0];
+    assert_eq!(artifact.path, "dir/a.json");
+    assert_eq!(artifact.sha256, leviath_core::mime::sha256_hex(WROTE));
+    assert_ne!(artifact.sha256, fed);
+    assert_eq!(artifact.size, WROTE.len() as u64);
+    assert!(!ack.contains("beside"), "{ack}");
+    assert_eq!(files_under(dir.path()), ["dir/a.json"]);
+    assert_eq!(std::fs::read(dir.path().join("dir/a.json")).unwrap(), WROTE);
+}
+
+/// The same when the run rewrote the input in place, at the very name it
+/// was fed under.
+#[test]
+fn an_input_rewritten_in_place_is_recorded_as_rewritten() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let (mut w, store, registry, fed) = window_fed("a.json", FED);
+    std::fs::write(dir.path().join("a.json"), WROTE).unwrap();
+    let (ack, output) = submit_fed(&mut w, &store, &registry, dir.path(), &[fed], "a.json");
+    let artifact = &output.expect("recorded").artifacts[0];
+    assert_eq!(artifact.path, "a.json");
+    assert_eq!(artifact.sha256, leviath_core::mime::sha256_hex(WROTE));
+    assert!(!ack.contains("beside"), "{ack}");
+    assert_eq!(files_under(dir.path()), ["a.json"]);
+}
+
+/// The acknowledgement the model reads names the file it wrote and that
+/// file's size, not the input's.
+#[test]
+fn the_acknowledgement_names_the_written_file_and_its_size() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let (mut w, store, registry, fed) = window_fed("a.json", FED);
+    std::fs::create_dir(dir.path().join("dir")).unwrap();
+    std::fs::write(dir.path().join("dir/a.json"), WROTE).unwrap();
+    let (ack, _) = submit_fed(&mut w, &store, &registry, dir.path(), &[fed], "dir/a.json");
+    assert_eq!(
+        ack,
+        format!(
+            "{ACCEPTED} Artifacts: a.json (application/json, {} B).",
+            WROTE.len()
+        )
+    );
+}
+
+/// A part the run produced (a picture from a tool's result) still answers
+/// its name as it always has, with an input in the window beside it.
+#[test]
+fn a_produced_picture_still_resolves_beside_an_input() {
+    use leviath_core::mime::{Blob, BlobStore, MimeType, Part};
+    let dir = tempfile::tempdir().expect("temp dir");
+    let (mut w, store, registry, fed) = window_fed("image-1.png", FED);
+    let pixels = b"\x89PNG\r\n\x1a\n produced pixels".to_vec();
+    let blob =
+        Blob::new(MimeType::parse("image/png").unwrap(), pixels.clone()).named("image-1.png");
+    let reference = store.put("run-1", &blob, &registry).expect("stored");
+    let content = leviath_core::region::EntryContent::from_parts(vec![
+        Part::stored(reference).named("image-1.png"),
+    ]);
+    let tokens = content.tokens(None);
+    w.add_content_entry(
+        leviath_core::ContextCause::ToolResult,
+        "task",
+        leviath_core::EntryKind::ToolResult {
+            tool_call_id: "c1".into(),
+            tool_name: "draw".into(),
+            is_error: false,
+        },
+        content,
+        tokens,
+    )
+    .expect("a tool's result");
+    let (_, output) = submit_fed(&mut w, &store, &registry, dir.path(), &[fed], "image-1.png");
+    let artifact = &output.expect("recorded").artifacts[0];
+    assert_eq!(artifact.path, "image-1.png");
+    assert_eq!(artifact.sha256, leviath_core::mime::sha256_hex(&pixels));
+    assert_eq!(
+        std::fs::read(dir.path().join("image-1.png")).unwrap(),
+        pixels
+    );
+}
+
+/// An input named on purpose, by its hash, with nothing made under that
+/// name, is refused in words that tell the model it named something it was
+/// given, and nothing is written.
+#[test]
+fn an_input_named_by_its_sha_is_refused_as_an_input() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let (mut w, store, registry, fed) = window_fed("a.json", FED);
+    let prefix = fed.get(..16).unwrap().to_string();
+    let (message, output) = submit_fed(&mut w, &store, &registry, dir.path(), &[fed], &prefix);
+    assert!(output.is_none());
+    assert_eq!(message, refused_as_given(&prefix));
+    assert!(files_under(dir.path()).is_empty());
+}
+
+/// The refusal for a name nothing in the working directory answers and
+/// something the run was given does.
+fn refused_as_given(path: &str) -> String {
+    format!(
+        "[error] artifact '{path}': nothing is at that path in the working directory, and the \
+         name matches something this run was given, not something it made. Name a file the \
+         run wrote in the working directory, or a part it produced."
+    )
+}
+
+/// A mistyped path whose file name is an input's is told what is known:
+/// nothing is at that path, and the name matches something given. It is not
+/// told it named an input on purpose.
+#[test]
+fn a_mistyped_path_with_an_inputs_file_name_says_what_is_known() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let (mut w, store, registry, fed) = window_fed("map.json", FED);
+    let (message, output) = submit_fed(
+        &mut w,
+        &store,
+        &registry,
+        dir.path(),
+        &[fed],
+        "out/levle/map.json",
+    );
+    assert!(output.is_none());
+    assert_eq!(message, refused_as_given("out/levle/map.json"));
+}
+
+/// A part whose bytes are an input's is that input, wherever else it turns
+/// up: a tool that echoed the input back under another name did not make
+/// it, and a file a person sent in a message is given whether or not the
+/// spec lists it.
+#[test]
+fn a_produced_part_with_an_inputs_bytes_is_the_input() {
+    use leviath_core::mime::Part;
+    let dir = tempfile::tempdir().expect("temp dir");
+    let (mut w, store, registry, fed) = window_fed("a.json", FED);
+    let echoed = w.get_region("task").unwrap().content[0]
+        .content
+        .stored()
+        .next()
+        .unwrap()
+        .clone()
+        .named("echo.json");
+    let content = leviath_core::region::EntryContent::from_parts(vec![echoed.clone()]);
+    let tokens = content.tokens(None);
+    w.add_assistant_turn_content("task", leviath_core::EntryKind::Text, content, tokens, None)
+        .expect("echoed");
+    let (message, output) = submit_fed(
+        &mut w,
+        &store,
+        &registry,
+        dir.path(),
+        std::slice::from_ref(&fed),
+        "echo.json",
+    );
+    assert!(output.is_none());
+    assert_eq!(message, refused_as_given("echo.json"));
+    assert!(files_under(dir.path()).is_empty());
+
+    // On an entry marked given instead of listed by the spec: still given,
+    // and so are its bytes under another name.
+    let (mut w, store, registry, _) = window_fed("a.json", FED);
+    w.mark_given("task", None);
+    let content =
+        leviath_core::region::EntryContent::from_parts(vec![Part::text("here it is"), echoed]);
+    let tokens = content.tokens(None);
+    w.add_assistant_turn_content("task", leviath_core::EntryKind::Text, content, tokens, None)
+        .expect("echoed");
+    for name in ["a.json", "echo.json"] {
+        let (message, output) = submit_fed(&mut w, &store, &registry, dir.path(), &[], name);
+        assert!(output.is_none());
+        assert_eq!(message, refused_as_given(name));
+    }
+}
+
+/// An entry's kind says how the model is shown it, not who put it there: a
+/// user-message entry nobody marked given is produced, the way a fan-out's
+/// report of its workers' files is written.
+#[test]
+fn an_unmarked_user_message_part_is_produced() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let (mut w, store, registry, _) = window_fed("a.json", FED);
+    let landed = w.get_region("task").unwrap().content[0].clone();
+    w.get_region_mut("task").unwrap().content.clear();
+    w.add_content_entry(
+        leviath_core::ContextCause::FanOut,
+        "task",
+        leviath_core::EntryKind::UserMessage,
+        landed.content,
+        landed.tokens,
+    )
+    .expect("a report");
+    let (_, output) = submit_fed(&mut w, &store, &registry, dir.path(), &[], "a.json");
+    assert_eq!(output.expect("recorded").artifacts[0].path, "a.json");
+    assert_eq!(std::fs::read(dir.path().join("a.json")).unwrap(), FED);
+}
+
+/// A stage sent back to fix a file it already submitted records the fix.
+/// The copy of the first answer's file kept in `final_output` is not
+/// something the run produced, so it does not stand in for the rewrite.
+#[test]
+fn a_resubmitted_rewrite_is_recorded_not_the_earlier_copy() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let (mut w, store, registry, fed) = window_fed("a.json", FED);
+    std::fs::create_dir(dir.path().join("dir")).unwrap();
+    std::fs::write(dir.path().join("dir/a.json"), WROTE).unwrap();
+    let given = [fed];
+    let (_, first) = submit_fed(&mut w, &store, &registry, dir.path(), &given, "dir/a.json");
+    assert_eq!(
+        first.expect("recorded").artifacts[0].sha256,
+        leviath_core::mime::sha256_hex(WROTE)
+    );
+    let fixed = b"{\"tiles\": [\"the fixed map\"]}";
+    std::fs::write(dir.path().join("dir/a.json"), fixed).unwrap();
+    let (ack, second) = submit_fed(&mut w, &store, &registry, dir.path(), &given, "dir/a.json");
+    let artifact = &second.expect("recorded").artifacts[0];
+    assert_eq!(artifact.path, "dir/a.json");
+    assert_eq!(artifact.sha256, leviath_core::mime::sha256_hex(fixed));
+    assert!(!ack.contains("beside"), "{ack}");
+    assert_eq!(files_under(dir.path()), ["dir/a.json"]);
 }
