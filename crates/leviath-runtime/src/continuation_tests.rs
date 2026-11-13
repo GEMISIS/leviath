@@ -355,6 +355,79 @@ async fn a_placed_continuation_carries_the_regions_and_enters_its_stage() {
     assert!(apply(&mut world, entity).is_none());
 }
 
+/// A region reseeded on continue lands its file as given, though the file's
+/// bytes are not the spec's seed (the run rewrote it before it finished): it
+/// does not answer its name as the run's work, and naming it with nothing at
+/// that path is refused as something the run was given.
+#[tokio::test]
+async fn a_file_reseeded_on_continue_is_given() {
+    use crate::state::context::{BlobState, PartBody, PartState};
+    let dir = tempfile::tempdir().unwrap();
+    let mut prepared = prepare(
+        dir.path(),
+        resumable(finished(RunStatus::Complete)),
+        message("fix the map"),
+        None,
+    )
+    .unwrap();
+    let rewritten = b"{\"tiles\": [\"the map as the run left it\"]}";
+    prepared.reseeded.insert(
+        "refs".into(),
+        SeededContent {
+            text: String::new(),
+            parts: vec![PartState {
+                mime_type: "application/json".into(),
+                body: PartBody::Stored(BlobState {
+                    digest: crate::spec::names::Digest::of(rewritten),
+                    size: rewritten.len() as u64,
+                    width: None,
+                    height: None,
+                    duration_ms: None,
+                    tokens: 1,
+                    stand_in: "[application/json] map.json".into(),
+                }),
+                name: Some("map.json".into()),
+                deliver: None,
+            }],
+        },
+    );
+    let mut world = World::new();
+    let entity = place(&mut world, prepared, crate::spec::env::Bindings::new());
+    apply(&mut world, entity).expect("a continuation was placed");
+    let given_by_spec = spec().given_digests();
+    let sha = leviath_core::mime::sha256_hex(rewritten);
+    assert!(!given_by_spec.contains(&sha), "not the spec's seed");
+
+    let mut window = world.get::<ContextWindow>(entity).unwrap().clone();
+    let (produced, given) = window.stored_parts_by_origin(&given_by_spec);
+    assert!(produced.iter().all(|p| !p.is_named("map.json")));
+    assert!(given.iter().any(|p| p.is_named("map.json")));
+
+    let workdir = tempfile::tempdir().unwrap();
+    let (message, output) = crate::output_tool::handle_output_tool(
+        &serde_json::json!({ "content": "fixed", "artifacts": ["map.json"] }),
+        &crate::output_tool::OutputContext {
+            spec: None,
+            validators: None,
+            stage: "revise",
+            stage_names: &[],
+            workdir: Some(workdir.path()),
+            sink: None,
+            overwrite_artifacts: false,
+            write_fence: None,
+            tool_verdict: None,
+            given: &given_by_spec,
+        },
+        0,
+        &mut window,
+    );
+    assert!(output.is_none());
+    assert!(
+        message.contains("the name matches something this run was given"),
+        "{message}"
+    );
+}
+
 /// Nothing to summarize asks for no summary.
 #[test]
 fn a_continuation_with_nothing_to_summarize_asks_for_none() {

@@ -21247,6 +21247,61 @@ fn one_read_call() -> (
     )
 }
 
+/// A person's answer to a question the model asked is what they sent, file
+/// and all: its entry is marked given, in the conversation and in a region
+/// the stage routes results to. Any other tool's result is the run's own.
+#[test]
+fn an_interaction_answer_is_given_and_a_tools_result_is_not() {
+    use leviath_core::mime::{Blob, BlobStore, MemoryBlobStore, MimeRegistry, MimeType, Part};
+    let registry = MimeRegistry::builtin();
+    let blob = Blob::new(
+        MimeType::parse("image/png").unwrap(),
+        b"\x89PNGsketch".to_vec(),
+    )
+    .named("sketch.png");
+    let part = Part::stored(MemoryBlobStore::new().put("r", &blob, &registry).unwrap())
+        .named("sketch.png");
+    let answer = || {
+        leviath_core::region::EntryContent::from_parts(vec![
+            Part::text("User response: like this"),
+            part.clone(),
+        ])
+    };
+    let land = |window: &mut ContextWindow,
+                tool: &str,
+                routing: Option<&crate::spec::graph::ToolRoutingDef>| {
+        crate::pipeline::apply_one_tool_result(
+            window,
+            crate::pipeline::RoutedCall {
+                name: tool,
+                id: "call-1",
+                arguments: None,
+            },
+            answer(),
+            routing,
+            None,
+            None,
+        );
+    };
+    for tool in crate::dynamic_interaction::BLOCKING_INTERACTION_TOOLS {
+        let mut window = routed_window(&["answers"], &[]);
+        land(&mut window, tool, None);
+        let conversation = window.get_region("conversation").unwrap();
+        assert!(conversation.content[0].is_given(), "{tool}");
+        let (_, given) = window.stored_parts_by_origin(&[]);
+        assert_eq!(given.len(), 1, "{tool}");
+
+        let mut window = routed_window(&["answers"], &[]);
+        land(&mut window, tool, Some(&routed_to("answers")));
+        assert!(window.get_region("answers").unwrap().content[0].is_given());
+    }
+    let mut window = routed_window(&["answers"], &[]);
+    land(&mut window, "read_file", None);
+    assert!(!window.get_region("conversation").unwrap().content[0].is_given());
+    let (produced, given) = window.stored_parts_by_origin(&[]);
+    assert_eq!((produced.len(), given.len()), (1, 0));
+}
+
 /// The pointer that reaches the model when the region *is* visible: it is
 /// already in the prompt, so say where, and do not ask for a tool call.
 ///
@@ -23435,7 +23490,11 @@ mod message_parts {
             "see this\n[image/png, 12 B] hero.png"
         );
         assert_eq!(conv.content[0].kind, leviath_core::EntryKind::UserMessage);
+        // Both writes are what a person sent: marked given, so neither file
+        // answers an artifact's name as the run's own work.
+        assert!(conv.content[0].is_given());
         let art = window.get_region("art").unwrap();
+        assert!(art.content[0].is_given());
         assert_eq!(art.stored_count(), 1);
         assert_eq!(
             art.content[0].content.parts()[0].name.as_deref(),

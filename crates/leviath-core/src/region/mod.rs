@@ -262,7 +262,33 @@ impl RegionEntry {
                 .map(str::to_string),
         })
     }
+
+    /// Mark this entry as given to the run rather than made by it: the
+    /// writer that landed what a person sent sets it, so the stored parts on
+    /// the entry are the run's inputs, not its work. Kept in the entry's
+    /// metadata beside anything else there; metadata that is not an object
+    /// carries nothing else this could sit beside, and is replaced.
+    pub fn mark_given(&mut self) {
+        match &mut self.metadata {
+            Some(serde_json::Value::Object(meta)) => {
+                meta.insert(GIVEN.to_string(), serde_json::Value::Bool(true));
+            }
+            other => *other = Some(serde_json::json!({ GIVEN: true })),
+        }
+    }
+
+    /// Whether [`mark_given`](Self::mark_given) marked this entry.
+    pub fn is_given(&self) -> bool {
+        self.metadata
+            .as_ref()
+            .and_then(|meta| meta.get(GIVEN))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+    }
 }
+
+/// The metadata key [`RegionEntry::mark_given`] sets.
+pub const GIVEN: &str = "given";
 
 mod evict;
 mod keyed;
@@ -1603,6 +1629,29 @@ mod tests {
         assert_eq!(carried.key.as_deref(), Some("k"));
         assert_eq!(carried.timestamp, stamped);
         assert_eq!(dest.current_tokens, 10);
+    }
+
+    /// A mark sits beside the metadata an entry already has, takes the place
+    /// of metadata that is not an object, and is read back only when set.
+    #[test]
+    fn an_entry_marked_given_reads_back_given() {
+        let mut region = Region::new("conversation".to_string(), RegionKind::Temporary, 1_000);
+        region.add_entry("plain".to_string(), 1).unwrap();
+        region.add_checklist_item("item".to_string(), 1).unwrap();
+        assert!(!region.content[0].is_given());
+        region.content[0].mark_given();
+        assert!(region.content[0].is_given());
+        let item = &mut region.content[1];
+        item.mark_given();
+        assert!(item.is_given());
+        assert!(item.as_checklist_item().is_some(), "the item stays an item");
+        let mut odd = region.content[0].clone();
+        odd.metadata = Some(serde_json::json!("not an object"));
+        assert!(!odd.is_given());
+        odd.mark_given();
+        assert_eq!(odd.metadata, Some(serde_json::json!({ GIVEN: true })));
+        odd.metadata = Some(serde_json::json!({ GIVEN: "yes" }));
+        assert!(!odd.is_given(), "only `true` marks it");
     }
 
     #[test]

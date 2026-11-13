@@ -1266,6 +1266,61 @@ fn a_seed_is_trimmed_to_its_region_or_dropped_when_nothing_fits() {
     assert_eq!(fit_seed_to_budget(&"x".repeat(1000), 3), "");
 }
 
+/// A seed is given: each part entry it lands is marked, its text entry is
+/// not, a region the window does not hold takes nothing, and a part the
+/// region refuses marks nothing.
+#[test]
+fn a_seed_marks_each_part_entry_it_lands_as_given() {
+    use crate::state::context::{BlobState, PartBody, PartState};
+    let part = |name: &str, tokens: u32| PartState {
+        mime_type: "application/json".into(),
+        body: PartBody::Stored(BlobState {
+            digest: crate::spec::names::Digest::of(name.as_bytes()),
+            size: 4,
+            width: None,
+            height: None,
+            duration_ms: None,
+            tokens,
+            stand_in: format!("[application/json] {name}"),
+        }),
+        name: Some(name.into()),
+        deliver: None,
+    };
+    let seeded = crate::spec::run_spec::SeededContent {
+        text: "the sheet".into(),
+        parts: vec![part("a.json", 1), part("b.json", 1)],
+    };
+    let mut window = ContextWindow::new(10_000);
+    window.add_region(leviath_core::Region::new(
+        "files".into(),
+        leviath_core::RegionKind::Pinned,
+        5_000,
+    ));
+    window.add_region(leviath_core::Region::new(
+        "tiny".into(),
+        leviath_core::RegionKind::Pinned,
+        1,
+    ));
+    seed_region(&mut window, "files", &seeded);
+    seed_region(&mut window, "nowhere", &seeded);
+    let files = window.get_region("files").unwrap();
+    let marks: Vec<bool> = files.content.iter().map(|e| e.is_given()).collect();
+    assert_eq!(marks, [false, true, true]);
+    let (produced, given) = window.stored_parts_by_origin(&[]);
+    assert!(produced.is_empty());
+    assert_eq!(given.len(), 2);
+
+    seed_region(
+        &mut window,
+        "tiny",
+        &crate::spec::run_spec::SeededContent {
+            text: String::new(),
+            parts: vec![part("big.json", 1_000)],
+        },
+    );
+    assert!(window.get_region("tiny").unwrap().content.is_empty());
+}
+
 #[test]
 fn a_cursor_naming_no_stage_reads_as_the_first() {
     let spec = two_stage_spec();

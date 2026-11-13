@@ -40,6 +40,7 @@ fn ctx() -> OutputContext<'static> {
         sink: None,
         overwrite_artifacts: false,
         tool_verdict: None,
+        given: &[],
     }
 }
 

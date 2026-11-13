@@ -125,6 +125,12 @@ pub(crate) struct OutputContext<'a> {
     /// What the spec's validator tool said about this submission, when it
     /// has one and has answered.
     pub tool_verdict: Option<&'a Verdict>,
+    /// The sha256 of every part the run's spec seeded it with (see
+    /// [`crate::spec::run_spec::RunSpec::given_digests`]), for a run saved
+    /// before seeded entries were marked given. A part with one of these is
+    /// an input wherever it sits in the window, never something the run
+    /// produced, so it never answers an artifact's name.
+    pub given: &'a [String],
 }
 
 /// Apply a `submit_output` call.
@@ -406,13 +412,15 @@ pub(crate) fn record(
     let declared = spec.map(|s| s.artifacts.as_slice()).unwrap_or_default();
     // The parts the run has already produced, so a submission can name one (an
     // image a model drew) as an artifact even though it never touched the
-    // workdir: `resolve` writes it to disk before recording it.
-    let produced = window.stored_parts();
+    // workdir: `resolve` writes it to disk before recording it. The parts it
+    // was given are kept apart: one of them never stands in for the file the
+    // run wrote under the same name, and naming one is refused as an input.
+    let (produced, given) = window.stored_parts_by_origin(ctx.given);
     let ingested = match artifacts::resolve(
         args,
         workdir,
         declared,
-        &produced,
+        &artifacts::Sources { produced, given },
         sink,
         overwrite_artifacts,
         write_fence,

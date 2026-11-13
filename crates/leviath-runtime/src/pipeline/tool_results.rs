@@ -307,6 +307,9 @@ pub(crate) fn apply_one_tool_result(
             .copied()
             .unwrap_or(leviath_core::TaintLevel::Public)
     });
+    // An interaction tool's result is a person's answer, and a file in it is
+    // one they sent: given to the run, not produced by it.
+    let given = crate::dynamic_interaction::BLOCKING_INTERACTION_TOOLS.contains(&call.name);
     let result_kind = || leviath_core::EntryKind::ToolResult {
         tool_call_id: tool_call_id.clone(),
         tool_name: tool_name.clone(),
@@ -317,7 +320,7 @@ pub(crate) fn apply_one_tool_result(
         // Not routed (or routed back to the message stream): the tool_result
         // lives in `conversation`, paired with its tool_use.
         leviath_core::tool_routing::store_result(
-            &mut WindowSink::conversation(window, result_kind(), taint),
+            &mut WindowSink::conversation(window, result_kind(), taint, given),
             result_content,
             result_tokens,
         );
@@ -347,6 +350,7 @@ pub(crate) fn apply_one_tool_result(
                 taint,
                 origin: crate::components::WriteOrigin::Agent,
                 key: key.as_deref(),
+                given,
             },
             target_region,
             result_content,
@@ -354,7 +358,7 @@ pub(crate) fn apply_one_tool_result(
             hidden,
         );
         leviath_core::tool_routing::store_result(
-            &mut WindowSink::conversation(window, result_kind(), taint),
+            &mut WindowSink::conversation(window, result_kind(), taint, given),
             routed.pointer.into(),
             routed.pointer_tokens,
         );
@@ -375,6 +379,10 @@ struct WindowSink<'w> {
     /// marker a full region falls back to go under it too: they are the
     /// same result, however much of it survived.
     key: Option<&'w str>,
+    /// Whether a person sent what this writes (the answer to a question the
+    /// model asked, with any file attached to it), so each entry it lands
+    /// is marked given (see `ContextWindow::mark_given`).
+    given: bool,
 }
 
 impl<'w> WindowSink<'w> {
@@ -385,6 +393,7 @@ impl<'w> WindowSink<'w> {
         window: &'w mut ContextWindow,
         kind: leviath_core::EntryKind,
         taint: Option<leviath_core::TaintLevel>,
+        given: bool,
     ) -> Self {
         Self {
             window,
@@ -393,6 +402,7 @@ impl<'w> WindowSink<'w> {
             taint,
             origin: crate::components::WriteOrigin::System,
             key: None,
+            given,
         }
     }
 }
@@ -403,20 +413,22 @@ impl leviath_core::tool_routing::ResultSink for WindowSink<'_> {
         content: leviath_core::region::EntryContent,
         tokens: usize,
     ) -> leviath_core::Result<()> {
-        self.window
-            .typed_write_keyed(
-                crate::components::TypedWrite {
-                    cause: Some(leviath_core::ContextCause::ToolResult),
-                    origin: self.origin,
-                    region: self.region,
-                    kind: self.kind.clone(),
-                    taint: self.taint,
-                },
-                self.key,
-                content,
-                tokens,
-            )
-            .map(|_| ())
+        self.window.typed_write_keyed(
+            crate::components::TypedWrite {
+                cause: Some(leviath_core::ContextCause::ToolResult),
+                origin: self.origin,
+                region: self.region,
+                kind: self.kind.clone(),
+                taint: self.taint,
+            },
+            self.key,
+            content,
+            tokens,
+        )?;
+        if self.given {
+            self.window.mark_given(self.region, self.key);
+        }
+        Ok(())
     }
 
     fn room(&self) -> usize {

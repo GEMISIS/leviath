@@ -90,6 +90,27 @@ fn a_sticky_entry_round_trips() {
     }
 }
 
+/// An entry marked given round-trips in both forms, sticky or not.
+#[test]
+fn a_given_entry_round_trips() {
+    let given = EntryState {
+        meta: EntryMeta::Given,
+        ..entries().remove(0)
+    };
+    for sticky in [false, true] {
+        let entry = EntryState {
+            sticky,
+            ..given.clone()
+        };
+        let bytes = postcard::to_stdvec(&entry).unwrap();
+        let read: EntryState = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(read, entry);
+        let read: EntryState =
+            serde_json::from_value(serde_json::to_value(&entry).unwrap()).unwrap();
+        assert_eq!(read, entry);
+    }
+}
+
 /// The readable form leaves `sticky` out when it is false, and reads an
 /// entry written without it.
 #[test]

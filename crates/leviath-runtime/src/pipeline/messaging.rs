@@ -205,14 +205,18 @@ fn deliver_with_parts(
     }
     let content = leviath_core::region::EntryContent::from_parts(parts);
     let tokens = sink.tokens_for(&content);
-    if let Err(e) = window.add_content_entry(
+    // Every write here is marked given: the files were sent to the run, so
+    // naming one as an artifact is naming an input (see
+    // `ContextWindow::stored_parts_by_origin`).
+    match window.add_content_entry(
         leviath_core::ContextCause::Message,
         region,
         leviath_core::EntryKind::UserMessage,
         content,
         tokens,
     ) {
-        tracing::warn!(run_id, region, "[mime] message refused: {e}");
+        Ok(()) => window.mark_given(region, None),
+        Err(e) => tracing::warn!(run_id, region, "[mime] message refused: {e}"),
     }
     for inbound in elsewhere {
         let target = inbound.region.clone().unwrap_or_default();
@@ -229,8 +233,11 @@ fn deliver_with_parts(
                 )
                 .map_err(|e| e.to_string())
         });
-        if let Err(e) = landed {
-            tracing::warn!(run_id, region = %target, "[mime] dropped an attached part: {e}");
+        match landed {
+            Ok(()) => window.mark_given(&target, None),
+            Err(e) => {
+                tracing::warn!(run_id, region = %target, "[mime] dropped an attached part: {e}")
+            }
         }
     }
 }
