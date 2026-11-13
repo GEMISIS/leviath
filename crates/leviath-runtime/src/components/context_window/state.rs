@@ -114,15 +114,7 @@ fn entry_state(entry: &RegionEntry) -> EntryState {
                 is_error: *is_error,
             },
         },
-        meta: match entry.as_checklist_item() {
-            Some(item) => EntryMeta::ChecklistItem {
-                id: small(item.id),
-                done: item.done,
-                note: item.note,
-            },
-            None if entry.is_given() => EntryMeta::Given,
-            None => EntryMeta::None,
-        },
+        meta: EntryMeta::of(entry),
         key: entry.key.clone(),
         reasoning: entry.reasoning.clone(),
         sticky: entry.sticky,
@@ -151,6 +143,16 @@ fn entry(state: &EntryState) -> RegionEntry {
                 Some(meta)
             }
             EntryMeta::Given => Some(serde_json::json!({ leviath_core::region::GIVEN: true })),
+            EntryMeta::FileCopy => {
+                Some(serde_json::json!({ leviath_core::region::FILE_COPY: true }))
+            }
+            EntryMeta::Placed(at) => {
+                let pairs: Vec<(&str, &str)> = at
+                    .iter()
+                    .map(|p| (p.path.as_str(), p.sha256.as_str()))
+                    .collect();
+                Some(serde_json::json!({ leviath_core::region::PLACED: pairs }))
+            }
         },
         kind: match &state.kind {
             EntryKind::Text => leviath_core::EntryKind::Text,

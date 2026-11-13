@@ -5,7 +5,11 @@
 //! written to disk, or a file that exists; a part the run was given (an
 //! attachment, an input) is never one, so a file the run wrote under an
 //! input's name is that file, and an input named on its own is refused as
-//! not the run's to hand back; every declared `required` artifact
+//! not the run's to hand back. A part and a file can be two versions of one
+//! thing, and then the file is the one recorded: a part the run copied from
+//! a working-directory file answers only a path nothing is at, and a
+//! produced part the run has put on disk at a path gives way to the file
+//! there. Every declared `required` artifact
 //! must be present; an artifact that a declaration names must be of the
 //! declared type. What survives is typed
 //! by the registry (a declared type wins), hashed, and stored as a part of
@@ -15,6 +19,7 @@
 use leviath_core::mime::{Blob, MimeRegistry, MimeType, Part, sha256_hex};
 use leviath_core::output::{Artifact, ArtifactSpec};
 
+use crate::components::placed_key;
 use crate::context_setup::PartSink;
 
 /// What resolving a submission's artifacts produced.
@@ -31,16 +36,89 @@ pub(super) struct Ingested {
 }
 
 /// The stored parts in the run's window that a submission's names are
-/// looked up among, by where they came from.
-#[derive(Debug, Default)]
-pub(super) struct Sources {
-    /// What the run produced: a tool's result, a model's answer, a worker's
-    /// file handed up. One of these answers an artifact's name.
-    pub produced: Vec<Part>,
-    /// What the run was given: its attachments, inputs, seeds and the files
-    /// a person sent it. One of these never answers an artifact's name; it
-    /// is only recognised, so naming one is refused with the reason.
-    pub given: Vec<Part>,
+/// looked up among, by where they came from. Only a produced part answers
+/// a name ahead of the working directory; a copied one answers when nothing
+/// is at the named path; a given one never does, and is only recognised, so
+/// naming one is refused with the reason.
+pub(super) use crate::components::PartsByOrigin as Sources;
+
+/// Whether the run has reworked `part` on disk: it put the part at a path
+/// under `workdir` (one of `placed`) and the file there now holds other
+/// bytes. A file that is gone, or still holds the part, is not a rework.
+pub(super) fn reworked(
+    part: &Part,
+    placed: &[(String, String)],
+    workdir: Option<&std::path::Path>,
+) -> bool {
+    let (Some(blob), Some(workdir)) = (part.blob(), workdir) else {
+        return false;
+    };
+    placed
+        .iter()
+        .filter(|(_, sha256)| *sha256 == blob.sha256)
+        .filter_map(|(path, _)| std::fs::read(workdir.join(path)).ok())
+        .any(|bytes| sha256_hex(&bytes) != blob.sha256)
+}
+
+/// Where an artifact's bytes were found.
+enum Found {
+    /// A stored part, with its digest: it is put on disk at the named path.
+    Part(Vec<u8>, String),
+    /// The file at the named path.
+    File(Vec<u8>),
+}
+
+/// Find what `path` (a submission's name for an artifact, `full` on disk)
+/// names.
+///
+/// A part the run produced (an image a model drew, a mesh a provider built)
+/// is looked for first, by name and then sha, because a file of the same
+/// name on disk may not be this run's at all. It gives way to the file only
+/// where the run itself put that part: from then on the file is the run's
+/// working copy, and may have been reworked. A name no produced part
+/// answers is read from the workdir, as a file the run wrote. Only when
+/// nothing is there does a part the run copied from a file answer, since a
+/// copy is never newer than the file. A part the run was given is never
+/// looked for: an input sharing a name with the file the run wrote must not
+/// stand in for it.
+fn find(
+    path: &str,
+    full: &std::path::Path,
+    workdir: &std::path::Path,
+    sources: &Sources,
+    sink: Option<&PartSink<'_>>,
+) -> Result<Found, String> {
+    let key = placed_key(full, workdir);
+    let produced = named_part(path, &sources.produced, sink)?.filter(|(_, sha256)| {
+        let own = sources.placed.iter().any(|(p, s)| *p == key && s == sha256);
+        !(own && full.is_file())
+    });
+    if let Some((bytes, sha256)) = produced {
+        return Ok(Found::Part(bytes, sha256));
+    }
+    match std::fs::read(full) {
+        Ok(bytes) => Ok(Found::File(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            match named_part(path, &sources.copied, sink)? {
+                Some((bytes, sha256)) => Ok(Found::Part(bytes, sha256)),
+                None if sources.given.iter().any(|p| p.is_named(path)) => Err(format!(
+                    "[error] artifact '{path}': nothing is at that path in the working \
+                     directory, and the name matches something this run was given, not \
+                     something it made. Name a file the run wrote in the working \
+                     directory, or a part it produced."
+                )),
+                None => Err(format!(
+                    "[error] artifact '{path}' is neither a file in the working directory nor \
+                     a part this run produced. Write the file before naming it, or name a \
+                     produced part."
+                )),
+            }
+        }
+        Err(e) => Err(format!(
+            "[error] artifact '{path}' could not be read: {e}. Write the file before \
+             naming it."
+        )),
+    }
 }
 
 /// One named entry of the `artifacts` argument, before it is checked.
@@ -120,15 +198,15 @@ pub(super) fn unchanged(
         })
 }
 
-/// The bytes and hash of the part this run produced that `name_or_sha` names,
+/// The bytes and hash of the part among `parts` that `name_or_sha` names,
 /// by the one rule every tool uses ([`Part::is_named`]), newest match first.
 /// `None` when no part is named or there is no store to read one from.
-fn produced_part(
+fn named_part(
     name_or_sha: &str,
-    produced: &[Part],
+    parts: &[Part],
     sink: Option<&PartSink<'_>>,
 ) -> Result<Option<(Vec<u8>, String)>, String> {
-    let blob = produced
+    let blob = parts
         .iter()
         .rev()
         .find(|p| p.is_named(name_or_sha))
@@ -199,6 +277,20 @@ fn place_produced(
     Ok(path)
 }
 
+/// How a submission's parts are put on disk, and where they were.
+#[derive(Debug, Default)]
+pub(super) struct Placing<'a> {
+    /// Whether a part may replace a different file at its path.
+    pub overwrite: bool,
+    /// The write paths in force at the stage, which a part written to disk
+    /// is held to. `None` limits nothing beyond the workdir.
+    pub fence: Option<&'a leviath_core::write_paths::WriteFence>,
+    /// Each `(path, sha256)` a part was put on disk at, the path as a
+    /// [`placed_key`]. Filled whether or not the submission is then
+    /// refused: the file is there either way, and is the run's to rework.
+    pub placed: Vec<(String, String)>,
+}
+
 /// Check, type, hash and store the artifacts a submission names.
 pub(super) fn resolve(
     args: &serde_json::Value,
@@ -206,8 +298,7 @@ pub(super) fn resolve(
     declared: &[ArtifactSpec],
     sources: &Sources,
     sink: Option<&PartSink<'_>>,
-    overwrite: bool,
-    fence: Option<&leviath_core::write_paths::WriteFence>,
+    placing: &mut Placing<'_>,
 ) -> Result<Ingested, String> {
     let named = listed(args)?;
     if named.is_empty() {
@@ -258,22 +349,20 @@ pub(super) fn resolve(
                 item.path
             ));
         }
-        // A part the run produced (an image a model drew, a mesh a provider
-        // built) is looked for first, by name and then sha, because a file of
-        // the same name on disk may not be this run's at all. Only a name no
-        // produced part answers to is read from the workdir, as a file the run
-        // wrote. A part the run was given is not looked for here: an input
-        // sharing a name with the file the run wrote must not stand in for it.
-        let (bytes, path) = match produced_part(&item.path, &sources.produced, sink)? {
-            Some((bytes, sha256)) => {
+        let (bytes, path) = match find(&item.path, &full, workdir, sources, sink)? {
+            Found::File(bytes) => (bytes, item.path.clone()),
+            Found::Part(bytes, sha256) => {
                 let path = place_produced(
                     &item.path,
                     &full,
                     &bytes,
                     &sha256,
-                    overwrite,
-                    fence.map(|f| (f, workdir)),
+                    placing.overwrite,
+                    placing.fence.map(|f| (f, workdir)),
                 )?;
+                placing
+                    .placed
+                    .push((placed_key(&workdir.join(&path), workdir), sha256));
                 if path != item.path {
                     moved.push(format!(
                         "'{}' already held a different file, so '{}' was written beside it \
@@ -284,36 +373,6 @@ pub(super) fn resolve(
                 }
                 (bytes, path)
             }
-            None => match std::fs::read(&full) {
-                Ok(bytes) => (bytes, item.path.clone()),
-                Err(e)
-                    if e.kind() == std::io::ErrorKind::NotFound
-                        && sources.given.iter().any(|p| p.is_named(&item.path)) =>
-                {
-                    return Err(format!(
-                        "[error] artifact '{}': nothing is at that path in the working \
-                         directory, and the name matches something this run was given, not \
-                         something it made. Name a file the run wrote in the working \
-                         directory, or a part it produced.",
-                        item.path
-                    ));
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    return Err(format!(
-                        "[error] artifact '{}' is neither a file in the working directory nor \
-                         a part this run produced. Write the file before naming it, or name a \
-                         produced part.",
-                        item.path
-                    ));
-                }
-                Err(e) => {
-                    return Err(format!(
-                        "[error] artifact '{}' could not be read: {e}. Write the file before \
-                         naming it.",
-                        item.path
-                    ));
-                }
-            },
         };
         // A path that read as a file has a final component.
         let file_name = full
@@ -419,8 +478,7 @@ mod tests {
             &specs(),
             &Sources::default(),
             Some(&sink),
-            false,
-            None,
+            &mut Placing::default(),
         )
         .unwrap();
         let names: Vec<&str> = out.records.iter().map(|r| r.name.as_str()).collect();
@@ -449,8 +507,7 @@ mod tests {
             &specs(),
             &Sources::default(),
             Some(&sink),
-            false,
-            None,
+            &mut Placing::default(),
         )
         .unwrap();
         assert_eq!(out.records.len(), 1);
@@ -461,8 +518,7 @@ mod tests {
             &[],
             &Sources::default(),
             None,
-            false,
-            None,
+            &mut Placing::default(),
         )
         .unwrap();
         assert_eq!(out.records[0].mime_type.as_str(), "video/mp4");
@@ -507,8 +563,7 @@ mod tests {
                 &specs(),
                 &Sources::default(),
                 None,
-                false,
-                None,
+                &mut Placing::default(),
             )
             .unwrap_err();
             assert!(err.contains(expect), "{args}: {err}");
@@ -519,8 +574,7 @@ mod tests {
             &[],
             &Sources::default(),
             None,
-            false,
-            None,
+            &mut Placing::default(),
         )
         .unwrap_err();
         assert!(err.contains("working directory"), "{err}");
@@ -532,8 +586,7 @@ mod tests {
                 &[],
                 &Sources::default(),
                 None,
-                false,
-                None
+                &mut Placing::default(),
             )
             .unwrap()
             .records
@@ -577,8 +630,7 @@ mod tests {
             &[],
             &Sources::default(),
             Some(&sink),
-            false,
-            None,
+            &mut Placing::default(),
         )
         .unwrap();
         assert_eq!(out.records.len(), 1);

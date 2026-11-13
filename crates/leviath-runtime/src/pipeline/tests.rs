@@ -21288,7 +21288,7 @@ fn an_interaction_answer_is_given_and_a_tools_result_is_not() {
         land(&mut window, tool, None);
         let conversation = window.get_region("conversation").unwrap();
         assert!(conversation.content[0].is_given(), "{tool}");
-        let (_, given) = window.stored_parts_by_origin(&[]);
+        let given = window.stored_parts_by_origin(&[]).given;
         assert_eq!(given.len(), 1, "{tool}");
 
         let mut window = routed_window(&["answers"], &[]);
@@ -21298,7 +21298,9 @@ fn an_interaction_answer_is_given_and_a_tools_result_is_not() {
     let mut window = routed_window(&["answers"], &[]);
     land(&mut window, "read_file", None);
     assert!(!window.get_region("conversation").unwrap().content[0].is_given());
-    let (produced, given) = window.stored_parts_by_origin(&[]);
+    let crate::components::PartsByOrigin {
+        produced, given, ..
+    } = window.stored_parts_by_origin(&[]);
     assert_eq!((produced.len(), given.len()), (1, 0));
 }
 

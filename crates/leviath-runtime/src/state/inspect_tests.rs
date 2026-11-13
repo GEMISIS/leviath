@@ -474,6 +474,32 @@ fn the_context_reads_region_by_region_and_entry_by_entry() {
     assert_eq!(todo.reasoning.as_deref(), Some("why"));
 }
 
+/// The marks a writer leaves on an entry reach the run's file: given, a
+/// copy of a working-directory file, and where a part was put on disk. A
+/// checklist item comes first, and an unmarked entry keeps nothing.
+#[test]
+fn an_entry_s_marks_are_kept_in_its_state() {
+    let plain = entry(EntryContent::text("hi"), CoreKind::Text);
+    assert_eq!(entry_of(&plain).meta, EntryMeta::None);
+    let mut given = plain.clone();
+    given.mark_given();
+    given.mark_file_copy();
+    assert_eq!(entry_of(&given).meta, EntryMeta::Given);
+    let mut copy = plain.clone();
+    copy.mark_file_copy();
+    copy.mark_placed("art/hero.png", "aa");
+    assert_eq!(entry_of(&copy).meta, EntryMeta::FileCopy);
+    let mut placed = plain.clone();
+    placed.mark_placed("art/hero.png", "aa");
+    assert_eq!(
+        entry_of(&placed).meta,
+        EntryMeta::Placed(vec![crate::state::PlacedAt {
+            path: "art/hero.png".into(),
+            sha256: "aa".into(),
+        }])
+    );
+}
+
 #[test]
 fn an_entry_s_content_comes_back_from_its_state() {
     let plain = entry(EntryContent::text("hi"), CoreKind::Text);

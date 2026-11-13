@@ -134,6 +134,54 @@ pub enum EntryMeta {
     /// What a person sent the run (a message's files, the file in an
     /// answer): its stored parts are the run's inputs, not its work.
     Given,
+    /// What the run read from a working-directory file: its stored parts are
+    /// the file as it was then, and the file now at a path is the newer.
+    FileCopy,
+    /// Where the run has put this entry's stored parts on disk. The file at
+    /// one of these paths is the run's working copy of the part.
+    Placed(Vec<PlacedAt>),
+}
+
+impl EntryMeta {
+    /// What the engine keeps about `entry`, read from its metadata. An entry
+    /// holds one of these: a checklist item first, then given, then a file
+    /// copy, then where its parts were put on disk. Nothing is lost by the
+    /// order, because a place is only ever recorded on an entry that is
+    /// neither given nor a copy.
+    pub fn of(entry: &leviath_core::region::RegionEntry) -> Self {
+        if let Some(item) = entry.as_checklist_item() {
+            return Self::ChecklistItem {
+                id: u32::try_from(item.id).unwrap_or(u32::MAX),
+                done: item.done,
+                note: item.note,
+            };
+        }
+        if entry.is_given() {
+            return Self::Given;
+        }
+        if entry.is_file_copy() {
+            return Self::FileCopy;
+        }
+        match entry.placed() {
+            placed if placed.is_empty() => Self::None,
+            placed => Self::Placed(
+                placed
+                    .into_iter()
+                    .map(|(path, sha256)| PlacedAt { path, sha256 })
+                    .collect(),
+            ),
+        }
+    }
+}
+
+/// One place the run put a stored part on disk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PlacedAt {
+    /// The path, relative to the working directory, its components joined
+    /// by `/`.
+    pub path: String,
+    /// The sha256 of the part put there.
+    pub sha256: String,
 }
 
 /// A typed part of an entry.

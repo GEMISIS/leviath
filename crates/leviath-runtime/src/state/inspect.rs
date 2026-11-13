@@ -470,13 +470,7 @@ pub fn entry_of(entry: &RegionEntry) -> EntryState {
                 is_error: *is_error,
             },
         },
-        meta: entry
-            .as_checklist_item()
-            .map_or(EntryMeta::None, |item| EntryMeta::ChecklistItem {
-                id: item.id as u32,
-                done: item.done,
-                note: item.note,
-            }),
+        meta: EntryMeta::of(entry),
         key: entry.key.clone(),
         reasoning: entry.reasoning.clone(),
         sticky: entry.sticky,

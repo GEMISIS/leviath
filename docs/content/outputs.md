@@ -438,6 +438,18 @@ It can go on a stage's output table too, and a caller's requested shape can set 
 says, `[mime] overwrite_artifacts` in [your config](/docs/configuration#mime) decides, and it is off
 unless you turn it on.
 
+Sometimes the part and the file are two versions of the same thing, and then the file is the one
+recorded:
+
+- A part the run read from the working directory with `context_attach` is a copy of that file as it
+  was then. It answers a name only when nothing is at the named path. So a stage that attaches
+  `art/hero.png` to look at it, redraws the file and submits `art/hero.png` hands in the redrawn
+  file.
+- Once the run has put a produced part on disk at a path, with `context_export` or by naming it in
+  an earlier `submit_output`, the file at that path is the run's working copy. Naming that path
+  records the file as it is now, edits included. If the file is gone, the part is written out
+  again. At any other path the part still comes first.
+
 A stage can say up front which files it hands back:
 
 ```toml
@@ -485,8 +497,11 @@ output = { artifacts = [{ name = "model", mime_type = "model/gltf-binary", requi
 When the stage finishes, the parts it routed are matched against the artifacts it declared, by type
 and in order; if every `required` artifact is matched, they become the run's final output. Only the
 regions this stage's `output_routing` names are searched, so an input mesh sat in another region is
-never mistaken for the one this stage made. If a required artifact has no matching produced part,
-because the model returned only text, the stage falls back to the ordinary `submit_output` nudge.
+never mistaken for the one this stage made. Inside those regions only what the stage made counts:
+not a part the run was given, not a file attached with `context_attach`, and not a produced part
+the stage has since exported and edited on disk. If a required artifact has no matching produced
+part, because the model returned only text, the stage falls back to the ordinary `submit_output`
+nudge.
 
 This is what lets a pure "bytes in, bytes out" pipeline run with no text provider at all: the
 bundled `image-to-model` and `model-to-animated-model` need only Meshy configured.

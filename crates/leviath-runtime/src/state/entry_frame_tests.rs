@@ -111,6 +111,37 @@ fn a_given_entry_round_trips() {
     }
 }
 
+/// An entry marked a file copy, and one recording where its parts were put
+/// on disk, round-trip in both forms, sticky or not.
+#[test]
+fn a_file_copy_and_a_placed_entry_round_trip() {
+    let placed = EntryMeta::Placed(vec![
+        crate::state::PlacedAt {
+            path: "art/hero.png".into(),
+            sha256: "aa".into(),
+        },
+        crate::state::PlacedAt {
+            path: "hero.png".into(),
+            sha256: "aa".into(),
+        },
+    ]);
+    for meta in [EntryMeta::FileCopy, placed] {
+        for sticky in [false, true] {
+            let entry = EntryState {
+                meta: meta.clone(),
+                sticky,
+                ..entries().remove(0)
+            };
+            let bytes = postcard::to_stdvec(&entry).unwrap();
+            let read: EntryState = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(read, entry);
+            let read: EntryState =
+                serde_json::from_value(serde_json::to_value(&entry).unwrap()).unwrap();
+            assert_eq!(read, entry);
+        }
+    }
+}
+
 /// The readable form leaves `sticky` out when it is false, and reads an
 /// entry written without it.
 #[test]

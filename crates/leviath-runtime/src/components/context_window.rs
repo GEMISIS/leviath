@@ -24,6 +24,7 @@ mod writes;
 
 pub use frame::PromptFrame;
 pub(crate) use journal::{ContextJournal, ContextTxn, Pushed};
+pub(crate) use mime::{PartsByOrigin, placed_key};
 pub(crate) use state::part as part_from_state;
 pub(crate) use writes::TypedWrite;
 

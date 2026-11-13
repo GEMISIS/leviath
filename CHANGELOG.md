@@ -295,6 +295,30 @@ same list.
   wherever else they turn up. The copy of an earlier answer's files in `final_output` answers
   nothing either, so a stage sent back to fix a file records the fix. A name with nothing at its
   path that matches only something given is refused, saying exactly that (#1132).
+- `submit_output` records the file a run reworked, not an older version of it held as a part
+  (#1134). A part and a file can be two versions of one thing, and the part answered the file's
+  name first, so the older bytes were recorded and written beside the newer file as
+  `<stem>-<sha8>.<ext>`, or over it with `overwrite_artifacts` on. Three ways led there:
+  - A stage attached `art/hero.png` with `context_attach`, rewrote the file, and submitted its
+    path. An attached part is now marked a copy of a working-directory file, and a copy answers a
+    name only when nothing is at the named path.
+  - A stage exported a picture a model drew with `context_export`, edited the file, and submitted
+    it. A stage submitted a drawn picture, was sent back, fixed the file `submit_output` had
+    written, and submitted again; when the first refusal was the artifact's type, the fixed file
+    could never be accepted. Where the run puts a produced part on disk is now recorded, by both
+    tools, and at that path the file is what is recorded when one is there. Anywhere else the part
+    still comes first, so a file an earlier run left behind does not stand in for it.
+
+  Both marks are kept in the run's file, so they hold across a restart. A run saved before them
+  has none, and its parts answer as they did. The given mark of #1132 is kept there too: the
+  daemon's writer of the run's file dropped it, so after a restart a file a person had sent
+  answered a name again.
+- An output stage whose model makes files records only what the stage made as its answer (#1134).
+  Every stored part in the regions its `output_routing` names was matched against its declared
+  artifacts, so a file the stage attached into one of those regions, or an input seeded there,
+  was handed back as the run's answer with no `submit_output` call. Neither is now, and neither is
+  a produced part the stage has put on disk and reworked since. With nothing left to match, the
+  stage is asked for `submit_output` as before.
 - A model that answers in no text (an image, audio or video model) is sent its stage's prompt and
   nothing else, on every provider. Behind a chat route it was sent the stage's regions as system
   messages and the bare "Begin." turn: OpenRouter's `flux.2-flex` drew a 24-tile sheet that had

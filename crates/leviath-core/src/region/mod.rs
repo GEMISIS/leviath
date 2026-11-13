@@ -269,26 +269,72 @@ impl RegionEntry {
     /// metadata beside anything else there; metadata that is not an object
     /// carries nothing else this could sit beside, and is replaced.
     pub fn mark_given(&mut self) {
-        match &mut self.metadata {
-            Some(serde_json::Value::Object(meta)) => {
-                meta.insert(GIVEN.to_string(), serde_json::Value::Bool(true));
-            }
-            other => *other = Some(serde_json::json!({ GIVEN: true })),
-        }
+        self.set_mark(GIVEN, serde_json::Value::Bool(true));
     }
 
     /// Whether [`mark_given`](Self::mark_given) marked this entry.
     pub fn is_given(&self) -> bool {
-        self.metadata
-            .as_ref()
-            .and_then(|meta| meta.get(GIVEN))
-            .and_then(serde_json::Value::as_bool)
-            == Some(true)
+        self.mark(GIVEN).and_then(serde_json::Value::as_bool) == Some(true)
+    }
+
+    /// Mark this entry as a copy of a working-directory file: the tool that
+    /// read the file into the window sets it, so the stored parts on the
+    /// entry are the file as it was at that moment, and the file now at a
+    /// path is the newer of the two. Kept the way
+    /// [`mark_given`](Self::mark_given) keeps its mark.
+    pub fn mark_file_copy(&mut self) {
+        self.set_mark(FILE_COPY, serde_json::Value::Bool(true));
+    }
+
+    /// Whether [`mark_file_copy`](Self::mark_file_copy) marked this entry.
+    pub fn is_file_copy(&self) -> bool {
+        self.mark(FILE_COPY).and_then(serde_json::Value::as_bool) == Some(true)
+    }
+
+    /// Record that the run put the stored part with digest `sha256`, held
+    /// on this entry, on disk at `path`: from then on the file at that path
+    /// is the run's working copy of the part. Recording the same pair again
+    /// changes nothing.
+    pub fn mark_placed(&mut self, path: &str, sha256: &str) {
+        let mut placed = self.placed();
+        let pair = (path.to_string(), sha256.to_string());
+        if !placed.contains(&pair) {
+            placed.push(pair);
+            self.set_mark(PLACED, serde_json::json!(placed));
+        }
+    }
+
+    /// Every `(path, sha256)` pair [`mark_placed`](Self::mark_placed)
+    /// recorded on this entry, oldest first.
+    pub fn placed(&self) -> Vec<(String, String)> {
+        self.mark(PLACED)
+            .and_then(|pairs| serde_json::from_value(pairs.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// The value filed under `key` in this entry's metadata.
+    fn mark(&self, key: &str) -> Option<&serde_json::Value> {
+        self.metadata.as_ref().and_then(|meta| meta.get(key))
+    }
+
+    /// File `value` under `key` in this entry's metadata, beside anything
+    /// else there; metadata that is not an object is replaced.
+    fn set_mark(&mut self, key: &str, value: serde_json::Value) {
+        match &mut self.metadata {
+            Some(serde_json::Value::Object(meta)) => {
+                meta.insert(key.to_string(), value);
+            }
+            other => *other = Some(serde_json::json!({ key: value })),
+        }
     }
 }
 
 /// The metadata key [`RegionEntry::mark_given`] sets.
 pub const GIVEN: &str = "given";
+/// The metadata key [`RegionEntry::mark_file_copy`] sets.
+pub const FILE_COPY: &str = "file_copy";
+/// The metadata key [`RegionEntry::mark_placed`] sets.
+pub const PLACED: &str = "placed";
 
 mod evict;
 mod keyed;
@@ -1652,6 +1698,34 @@ mod tests {
         assert_eq!(odd.metadata, Some(serde_json::json!({ GIVEN: true })));
         odd.metadata = Some(serde_json::json!({ GIVEN: "yes" }));
         assert!(!odd.is_given(), "only `true` marks it");
+    }
+
+    /// The copy mark and the placed pairs sit beside the given mark and each
+    /// other, and a pair recorded twice is kept once.
+    #[test]
+    fn the_marks_sit_together_on_one_entry() {
+        let mut region = Region::new("conversation".to_string(), RegionKind::Temporary, 1_000);
+        region.add_entry("plain".to_string(), 1).unwrap();
+        let entry = &mut region.content[0];
+        assert!(!entry.is_file_copy());
+        assert!(entry.placed().is_empty());
+        entry.mark_file_copy();
+        entry.mark_given();
+        entry.mark_placed("art/hero.png", "aa");
+        entry.mark_placed("art/hero.png", "aa");
+        entry.mark_placed("out/hero.png", "aa");
+        assert!(entry.is_file_copy());
+        assert!(entry.is_given());
+        assert_eq!(
+            entry.placed(),
+            [
+                ("art/hero.png".to_string(), "aa".to_string()),
+                ("out/hero.png".to_string(), "aa".to_string()),
+            ]
+        );
+        entry.metadata = Some(serde_json::json!({ PLACED: "not pairs", FILE_COPY: 1 }));
+        assert!(entry.placed().is_empty(), "only a list of pairs is read");
+        assert!(!entry.is_file_copy(), "only `true` marks it");
     }
 
     #[test]

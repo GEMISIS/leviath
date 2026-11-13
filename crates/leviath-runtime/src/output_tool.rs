@@ -415,16 +415,26 @@ pub(crate) fn record(
     // workdir: `resolve` writes it to disk before recording it. The parts it
     // was given are kept apart: one of them never stands in for the file the
     // run wrote under the same name, and naming one is refused as an input.
-    let (produced, given) = window.stored_parts_by_origin(ctx.given);
-    let ingested = match artifacts::resolve(
+    let mut placing = artifacts::Placing {
+        overwrite: overwrite_artifacts,
+        fence: write_fence,
+        placed: Vec::new(),
+    };
+    let resolved = artifacts::resolve(
         args,
         workdir,
         declared,
-        &artifacts::Sources { produced, given },
+        &window.stored_parts_by_origin(ctx.given),
         sink,
-        overwrite_artifacts,
-        write_fence,
-    ) {
+        &mut placing,
+    );
+    // Where a part was put on disk is kept even when the submission is then
+    // refused: the file is there, and a stage that reworks it and names it
+    // again means the file.
+    for (path, sha256) in &placing.placed {
+        window.mark_placed(sha256, path);
+    }
+    let ingested = match resolved {
         Ok(ingested) => ingested,
         Err(message) => return (message, None),
     };
@@ -566,5 +576,7 @@ fn fit_to_region(content: &str, budget: usize) -> String {
 mod artifacts;
 pub(crate) mod auto_emit;
 
+#[cfg(test)]
+mod rework_tests;
 #[cfg(test)]
 mod tests;

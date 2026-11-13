@@ -28,7 +28,8 @@ use crate::components::ContextWindow;
 ///
 /// The produced parts are read only from the regions the stage's
 /// `output_routing` names, never the whole window: an input mesh in some other
-/// region must not be mistaken for the animated one this stage made.
+/// region must not be mistaken for the animated one this stage made. Within
+/// those regions only what the stage made counts (see [`made`]).
 #[cfg(test)]
 pub(crate) fn try_emit(
     stage: &crate::spec::graph::StageDef,
@@ -37,7 +38,38 @@ pub(crate) fn try_emit(
     window: &mut ContextWindow,
 ) -> Option<FinalOutput> {
     let targets: Vec<&str> = stage.output_routing.values().map(|r| r.as_str()).collect();
-    try_emit_for(stage.name.as_str(), &targets, spec, now, window)
+    try_emit_for(
+        stage.name.as_str(),
+        &targets,
+        spec,
+        now,
+        window,
+        &Inputs::default(),
+    )
+}
+
+/// What tells a part a stage made from one it did not.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct Inputs<'a> {
+    /// The sha256 of every part the run's spec seeded it with (see
+    /// [`crate::spec::run_spec::RunSpec::given_digests`]).
+    pub(crate) given: &'a [String],
+    /// The run's working directory, when it has one.
+    pub(crate) workdir: Option<&'a std::path::Path>,
+}
+
+/// The parts in the regions `targets` that the stage made and still stands
+/// by: what the run produced there, so nothing it was given and no copy of a
+/// working-directory file it attached, and less any part the run has put on
+/// disk and reworked since. A reworked part is not the answer, the file is,
+/// and only `submit_output` can name a file.
+fn made(window: &ContextWindow, targets: &[&str], inputs: &Inputs<'_>) -> Vec<Part> {
+    let placed = window.stored_parts_by_origin(inputs.given).placed;
+    window
+        .produced_parts_in(targets, inputs.given)
+        .into_iter()
+        .filter(|part| !super::artifacts::reworked(part, &placed, inputs.workdir))
+        .collect()
 }
 
 /// The automatic answer for the stage named `stage`, whose output routing
@@ -48,6 +80,7 @@ pub(crate) fn try_emit_for(
     spec: Option<&OutputSpec>,
     now: i64,
     window: &mut ContextWindow,
+    inputs: &Inputs<'_>,
 ) -> Option<FinalOutput> {
     let specs = spec.map(|s| s.artifacts.as_slice()).unwrap_or_default();
     if specs.is_empty() {
@@ -56,7 +89,7 @@ pub(crate) fn try_emit_for(
     if targets.is_empty() {
         return None;
     }
-    let produced = window.stored_parts_in(targets);
+    let produced = made(window, targets, inputs);
     let records = match_artifacts(specs, &produced)?;
     let content = describe(&records);
     let output = FinalOutput::new(
@@ -88,11 +121,11 @@ pub(crate) fn mismatch(
     targets: &[&str],
     spec: Option<&OutputSpec>,
     window: &ContextWindow,
+    inputs: &Inputs<'_>,
 ) -> Option<String> {
     let specs = spec.map(|s| s.artifacts.as_slice()).unwrap_or_default();
     let pattern = format!("{family}/*");
-    let made: Vec<Part> = window
-        .stored_parts_in(targets)
+    let made: Vec<Part> = made(window, targets, inputs)
         .into_iter()
         .filter(|p| p.mime_type.matches(&pattern))
         .collect();
@@ -229,6 +262,73 @@ mod tests {
         window
     }
 
+    /// The sha256 of the part [`window_with`] holds.
+    fn held_sha() -> String {
+        leviath_core::mime::sha256_hex(&[1, 2, 3, 4])
+    }
+
+    /// Whether the part `window` holds in `art` is emitted as the stage's
+    /// picture, with `inputs` telling what the stage made.
+    fn emits(window: &mut ContextWindow, inputs: &Inputs<'_>) -> bool {
+        let spec = spec_with(vec![artifact_spec("picture", "image/png", true)]);
+        try_emit_for("draw", &["art"], Some(&spec), 0, window, inputs).is_some()
+    }
+
+    /// A file the stage attached into the region its routing names is a copy
+    /// of a working-directory file, not something the stage made, and a part
+    /// the run was given there is an input. Neither is the stage's answer,
+    /// and neither counts as a part of the wrong type.
+    #[test]
+    fn a_copy_or_an_input_in_a_routed_region_is_not_the_answer() {
+        let none = Inputs::default();
+        let mut made = window_with("art", "image/png", "hero.png");
+        assert!(emits(&mut made, &none));
+
+        let mut copied = window_with("art", "image/png", "hero.png");
+        copied.mark_file_copy("art", None);
+        assert!(!emits(&mut copied, &none));
+
+        let mut sent = window_with("art", "image/png", "hero.png");
+        sent.mark_given("art", None);
+        assert!(!emits(&mut sent, &none));
+
+        let mut seeded = window_with("art", "image/png", "hero.png");
+        let given = [held_sha()];
+        let by_spec = Inputs {
+            given: &given,
+            workdir: None,
+        };
+        assert!(!emits(&mut seeded, &by_spec));
+
+        let webp = spec_with(vec![artifact_spec("picture", "image/webp", true)]);
+        assert_eq!(
+            mismatch("draw", "image", &["art"], Some(&webp), &copied, &none),
+            None
+        );
+        assert!(mismatch("draw", "image", &["art"], Some(&webp), &made, &none).is_some());
+    }
+
+    /// A part the stage put on disk and reworked there is not the answer:
+    /// the file is, and only a submission can name it. A file that still
+    /// holds the part, a file that is gone, and a run with no working
+    /// directory change nothing.
+    #[test]
+    fn a_part_reworked_on_disk_is_not_the_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let on_disk = Inputs {
+            given: &[],
+            workdir: Some(dir.path()),
+        };
+        let mut window = window_with("art", "image/png", "hero.png");
+        window.mark_placed(&held_sha(), "hero.png");
+        assert!(emits(&mut window, &on_disk), "nothing is at the path");
+        std::fs::write(dir.path().join("hero.png"), [1, 2, 3, 4]).unwrap();
+        assert!(emits(&mut window, &on_disk), "the file is the part");
+        std::fs::write(dir.path().join("hero.png"), b"reworked").unwrap();
+        assert!(!emits(&mut window, &on_disk));
+        assert!(emits(&mut window, &Inputs::default()), "no workdir");
+    }
+
     #[test]
     fn a_media_part_of_the_wrong_type_is_named_against_what_was_declared() {
         let spec = spec_with(vec![
@@ -236,7 +336,15 @@ mod tests {
             artifact_spec("thumb", "image/jpeg", false),
         ]);
         let window = window_with("art", "image/webp", "image-1.webp");
-        let why = mismatch("edit", "image", &["art"], Some(&spec), &window).expect("a mismatch");
+        let why = mismatch(
+            "edit",
+            "image",
+            &["art"],
+            Some(&spec),
+            &window,
+            &Inputs::default(),
+        )
+        .expect("a mismatch");
         assert!(why.contains("stage 'edit'"), "{why}");
         assert!(why.contains("image/webp (image-1.webp)"), "{why}");
         assert!(why.contains("'picture' as image/png"), "{why}");
@@ -244,7 +352,15 @@ mod tests {
         assert!(why.contains("`image/*`"), "{why}");
         // With nothing required, every declared artifact is named.
         let optional = spec_with(vec![artifact_spec("thumb", "image/jpeg", false)]);
-        let why = mismatch("edit", "image", &["art"], Some(&optional), &window).unwrap();
+        let why = mismatch(
+            "edit",
+            "image",
+            &["art"],
+            Some(&optional),
+            &window,
+            &Inputs::default(),
+        )
+        .unwrap();
         assert!(why.contains("'thumb' as image/jpeg"), "{why}");
     }
 
@@ -253,16 +369,53 @@ mod tests {
         let png = spec_with(vec![artifact_spec("picture", "image/png", true)]);
         let any = spec_with(vec![artifact_spec("picture", "image/*", true)]);
         let webp = window_with("art", "image/webp", "image-1.webp");
-        assert_eq!(mismatch("s", "image", &["art"], None, &webp), None);
-        assert_eq!(mismatch("s", "image", &["art"], Some(&any), &webp), None);
-        assert_eq!(mismatch("s", "video", &["art"], Some(&png), &webp), None);
         assert_eq!(
-            mismatch("s", "image", &["elsewhere"], Some(&png), &webp),
+            mismatch("s", "image", &["art"], None, &webp, &Inputs::default()),
+            None
+        );
+        assert_eq!(
+            mismatch(
+                "s",
+                "image",
+                &["art"],
+                Some(&any),
+                &webp,
+                &Inputs::default()
+            ),
+            None
+        );
+        assert_eq!(
+            mismatch(
+                "s",
+                "video",
+                &["art"],
+                Some(&png),
+                &webp,
+                &Inputs::default()
+            ),
+            None
+        );
+        assert_eq!(
+            mismatch(
+                "s",
+                "image",
+                &["elsewhere"],
+                Some(&png),
+                &webp,
+                &Inputs::default()
+            ),
             None
         );
         let matching = window_with("art", "image/png", "image-1.png");
         assert_eq!(
-            mismatch("s", "image", &["art"], Some(&png), &matching),
+            mismatch(
+                "s",
+                "image",
+                &["art"],
+                Some(&png),
+                &matching,
+                &Inputs::default()
+            ),
             None
         );
         // A part with no name is named by its type.
@@ -281,7 +434,15 @@ mod tests {
                 tokens,
             )
             .unwrap();
-        let why = mismatch("s", "image", &["art"], Some(&png), &unnamed).unwrap();
+        let why = mismatch(
+            "s",
+            "image",
+            &["art"],
+            Some(&png),
+            &unnamed,
+            &Inputs::default(),
+        )
+        .unwrap();
         assert!(why.contains("made image/gif, which"), "{why}");
     }
 
