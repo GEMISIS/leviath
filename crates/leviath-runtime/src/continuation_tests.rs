@@ -118,7 +118,10 @@ fn a_finished_run_can_be_continued_and_nothing_else_can() {
     let spec = spec();
     for status in [
         RunStatus::Complete,
-        RunStatus::Error("boom".into()),
+        RunStatus::Error {
+            message: "boom".into(),
+            kind: None,
+        },
         RunStatus::Cancelled,
     ] {
         assert!(check(&spec, &finished(status)).is_ok());

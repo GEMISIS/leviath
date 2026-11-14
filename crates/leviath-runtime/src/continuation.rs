@@ -115,7 +115,7 @@ pub fn check(spec: &RunSpec, state: &RunState) -> Result<(), SpawnIssues> {
         ));
     }
     match &state.status {
-        RunStatus::Complete | RunStatus::Error(_) | RunStatus::Cancelled => Ok(()),
+        RunStatus::Complete | RunStatus::Error { .. } | RunStatus::Cancelled => Ok(()),
         status => Err(refused(
             IssueCode::Conflict,
             SpecPath::root(),

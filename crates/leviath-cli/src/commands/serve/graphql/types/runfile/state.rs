@@ -853,16 +853,20 @@ impl From<&TransitionRecord> for StageTransition {
     }
 }
 
-/// A run's status, and the error a failed one carries.
-pub(crate) fn status_of(status: &CoreStatus) -> (RunStateStatus, Option<String>) {
+/// A run's status, and the error and the kind of failure a failed one
+/// carries.
+pub(crate) fn status_of(status: &CoreStatus) -> (RunStateStatus, Option<String>, Option<String>) {
+    let plain = |status| (status, None, None);
     match status {
-        CoreStatus::Idle => (RunStateStatus::Idle, None),
-        CoreStatus::Active => (RunStateStatus::Active, None),
-        CoreStatus::Waiting => (RunStateStatus::Waiting, None),
-        CoreStatus::Paused => (RunStateStatus::Paused, None),
-        CoreStatus::Complete => (RunStateStatus::Complete, None),
-        CoreStatus::Error(message) => (RunStateStatus::Error, Some(message.clone())),
-        CoreStatus::Cancelled => (RunStateStatus::Cancelled, None),
+        CoreStatus::Idle => plain(RunStateStatus::Idle),
+        CoreStatus::Active => plain(RunStateStatus::Active),
+        CoreStatus::Waiting => plain(RunStateStatus::Waiting),
+        CoreStatus::Paused => plain(RunStateStatus::Paused),
+        CoreStatus::Complete => plain(RunStateStatus::Complete),
+        CoreStatus::Error { message, kind } => {
+            (RunStateStatus::Error, Some(message.clone()), kind.clone())
+        }
+        CoreStatus::Cancelled => plain(RunStateStatus::Cancelled),
     }
 }
 
@@ -892,6 +896,11 @@ pub(crate) struct RunState {
     pub(crate) status: RunStateStatus,
     /// What went wrong, when `status` is `ERROR`.
     pub(crate) error: Option<String>,
+    /// Which kind of failure it was, when `status` is `ERROR`: a short fixed
+    /// word such as `no-media` or `provider-failure`, to tell one failure
+    /// from another without reading `error`. Null for a failure recorded
+    /// without one.
+    pub(crate) error_kind: Option<String>,
     /// The stage, visit and turn.
     pub(crate) cursor: StateCursor,
     /// What the engine is doing with it.
@@ -1059,11 +1068,12 @@ pub(crate) fn held_issues(
 
 impl From<&CoreState> for RunState {
     fn from(s: &CoreState) -> Self {
-        let (status, error) = status_of(&s.status);
+        let (status, error, error_kind) = status_of(&s.status);
         Self {
             seq: i32::try_from(s.seq).unwrap_or(i32::MAX),
             status,
             error,
+            error_kind,
             cursor: StateCursor::from(&s.cursor),
             phase: RunPhase::from(&s.phase),
             accepts_messages: s.accepts_messages,

@@ -15,6 +15,13 @@ same list.
 
 ### Changed
 
+- Run files move to layout 10, in which a failed run's status holds the kind of failure beside
+  the sentence (#1136). Layout 2 to 9 files are upgraded in place when the daemon starts, the
+  file as it was kept in the run's `legacy/` folder as `run.v<N>.lvr`. A run that failed before
+  the upgrade keeps its sentence and has no kind.
+- `lev run show --json` prints a failed run's status as `{"Error": {"message": ..., "kind": ...}}`,
+  where it was `{"Error": "..."}` (#1136). A row of `lev ps --json` keeps its shape and gains
+  `kind` inside `status.Error`.
 - An "allow for this run" covers more of the shell lines it is given for, so the same line does
   not ask twice (#1118). Four things change in what the check on a line's paths lets through:
   - A short flag with `=` is read as its value, the way a long one is: `-gdir=res://tests` no
@@ -448,6 +455,20 @@ same list.
 
 ### Added
 
+- A failed run says which kind of failure ended it, in a field a caller can match (#1136). Until
+  now the only way to tell one failure from another was to read its sentence, whose wording is
+  free to change. `error_kind` sits beside `error` on a run (`GET /api/runs`, `GET /api/runs/{id}`
+  and its `/result`), on the `agent_completed` event and webhook, and on a `not_running`
+  row of `lev ps --all --json`; GraphQL has `errorKind` on `Run` (with a filter), `RunState`,
+  `StatusChangeOutput` and `RunCompletedEvent`, and an `on_error` hook reads it as
+  `ctx.error_kind`. It is one of `no-media`, `wrong-media`, `cut-off-tool-call`,
+  `provider-failure`, `context-overflow`, `workspace-lost`, `wedged`, `routing-failed`,
+  `routing-unmatched`, `stage-entry-failed`, `workers-failed`, `gate-unsatisfied`, `dead-end`,
+  `final-output-missing`, `hook`, `checkpoint-unanswered`, `journal-unwritable`,
+  `internal-error`, `run-file-unreadable` and `start-refused`, and `null` on a run that did not
+  fail or that failed before kinds were kept. The `[no-media]` tag at the head of that failure's
+  text stays. `leviath_runtime::AgentStatus::Error` gains a `kind` field, and
+  `AgentStatus::failed` builds one.
 - `leviath-runtime`: a program that embeds the runtime can check a run against the user's tool
   permissions before it spawns it. The daemon refuses a spawn whose validator tool would have to
   ask, and that rule and the permission layers it is decided by lived in `lev`, so an embedder's

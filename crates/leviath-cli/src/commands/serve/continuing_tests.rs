@@ -169,7 +169,10 @@ fn every_segment_status_reads_as_a_run_status_word() {
         S::Waiting,
         S::Paused,
         S::Complete,
-        S::Error("x".into()),
+        S::Error {
+            message: "x".into(),
+            kind: None,
+        },
         S::Cancelled,
     ]
     .into_iter()

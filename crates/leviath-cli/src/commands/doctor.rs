@@ -931,7 +931,7 @@ fn finished(run_id: &str, status: &leviath_runtime::components::AgentStatus) -> 
         AgentStatus::Complete => DaemonOutcome::Complete(format!(
             "run {run_id} complete after {iterations} iteration(s)"
         )),
-        AgentStatus::Error { message } => {
+        AgentStatus::Error { message, .. } => {
             DaemonOutcome::Failed(format!("run {run_id} ended in error: {message}"))
         }
         other => DaemonOutcome::Failed(format!("run {run_id} ended {}", other.label())),

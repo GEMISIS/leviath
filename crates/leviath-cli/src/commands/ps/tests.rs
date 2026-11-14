@@ -133,7 +133,8 @@ fn status_cell_falls_back_to_the_bare_status() {
         status_cell(&entry(
             "r",
             AgentStatus::Error {
-                message: "boom".to_string()
+                message: "boom".to_string(),
+                kind: None,
             }
         )),
         "error: boom"
@@ -345,6 +346,7 @@ fn format_runs_shows_a_finished_run_when_nothing_is_running() {
         "worker-1785616492",
         AgentStatus::Error {
             message: "HTTP 402 Payment Required".to_string(),
+            kind: None,
         },
     );
     died.last_progress_at = Some(1_140);
@@ -873,9 +875,13 @@ fn offline_runs_subtracts_the_runs_the_daemon_holds() {
 fn offline_runs_reports_how_a_finished_run_ended() {
     let mut errored = on_disk("boom", RunStatus::Error, 1_000);
     errored.error = Some("provider exploded".to_string());
+    errored.error_kind = Some("provider-failure".to_string());
     let rows = offline_runs(vec![errored], Some(&live_set(&[])), 2_000);
     assert_eq!(rows[0].status, RunStatus::Error);
     assert_eq!(rows[0].error.as_deref(), Some("provider exploded"));
+    assert_eq!(rows[0].error_kind.as_deref(), Some("provider-failure"));
+    let row = serde_json::to_value(&rows[0]).unwrap();
+    assert_eq!(row["error_kind"], "provider-failure");
     assert!(!rows[0].abandoned, "it ended; it was not abandoned");
 }
 

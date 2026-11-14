@@ -1053,15 +1053,44 @@ fn every_run_status_reads_as_the_agent_status_it_names() {
         (RunStatus::Waiting, "waiting"),
         (RunStatus::Paused, "paused"),
         (RunStatus::Complete, "complete"),
-        (RunStatus::Error("x".into()), "error"),
+        (
+            RunStatus::Error {
+                message: "x".into(),
+                kind: None,
+            },
+            "error",
+        ),
         (RunStatus::Cancelled, "cancelled"),
     ] {
         assert_eq!(place::agent_status(&status).label(), label);
     }
     assert_eq!(
-        place::agent_status(&RunStatus::Error("boom".into())),
+        place::agent_status(&RunStatus::Error {
+            message: "boom".into(),
+            kind: None
+        }),
         AgentStatus::Error {
-            message: "boom".into()
+            message: "boom".into(),
+            kind: None,
+        }
+    );
+    // A kind is kept as its label, and reads back as the kind it names. A
+    // label this build does not know reads as no kind.
+    let labelled = |label: &str| {
+        place::agent_status(&RunStatus::Error {
+            message: "boom".into(),
+            kind: Some(label.into()),
+        })
+    };
+    assert_eq!(
+        labelled("no-media"),
+        AgentStatus::failed(crate::RunFailureKind::NoMedia, "boom")
+    );
+    assert_eq!(
+        labelled("a-kind-from-a-later-build"),
+        AgentStatus::Error {
+            message: "boom".into(),
+            kind: None,
         }
     );
 }

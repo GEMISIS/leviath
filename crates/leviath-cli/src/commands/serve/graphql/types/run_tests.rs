@@ -151,6 +151,7 @@ async fn the_fields_a_state_owns_are_set() {
     let mut meta = meta();
     meta.status = leviath_core::run_meta::RunStatus::Error;
     meta.error = Some("provider refused".to_string());
+    meta.error_kind = Some("provider-failure".to_string());
     meta.title = Some("Parser fix".to_string());
     meta.title_error = Some("titling model unavailable".to_string());
     meta.last_progress_at = Some(1_788_924_590);
@@ -168,7 +169,7 @@ async fn the_fields_a_state_owns_are_set() {
 
     let json = ask(
         meta,
-        r#"{ run { status error title titleError lastProgressAt parentId unattended
+        r#"{ run { status error errorKind title titleError lastProgressAt parentId unattended
                    yoloProfileName active { bankedSecs since } workingSecs
                    stageModels { provider model } } }"#,
     )
@@ -176,6 +177,7 @@ async fn the_fields_a_state_owns_are_set() {
     let run = &json["run"];
     assert_eq!(run["status"], "ERROR");
     assert_eq!(run["error"], "provider refused");
+    assert_eq!(run["errorKind"], "provider-failure");
     assert_eq!(run["title"], "Parser fix");
     assert_eq!(run["titleError"], "titling model unavailable");
     assert_eq!(run["lastProgressAt"], 1_788_924_590i64);

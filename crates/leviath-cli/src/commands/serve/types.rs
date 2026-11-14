@@ -639,6 +639,8 @@ pub(super) struct RunResultResp {
     /// run's answer; prefer it over `output` when present.
     pub(super) final_output: Option<FinalOutputResp>,
     pub(super) error: Option<String>,
+    /// Which kind of failure `error` is: a short fixed word to match on.
+    pub(super) error_kind: Option<String>,
     pub(super) prompt_tokens: usize,
     pub(super) completion_tokens: usize,
 }

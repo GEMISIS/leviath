@@ -773,12 +773,13 @@ pub(crate) fn collect_interaction_point(
             // edge - there is nothing to recover from, only a person to wait for
             // who did not come.
             PointOutcome::Unanswered => {
-                state.status = AgentStatus::Error {
-                    message: format!(
+                state.status = AgentStatus::failed(
+                    crate::RunFailureKind::CheckpointUnanswered,
+                    format!(
                         "checkpoint '{name}' went unanswered within the interaction timeout; \
                          the run stopped rather than approving it unread"
                     ),
-                };
+                );
             }
             PointOutcome::Approve { user_text } => {
                 end_wait(&mut state);
@@ -1676,6 +1677,7 @@ mod tests {
                 message: "checkpoint 'plan_approval' went unanswered within the interaction \
                           timeout; the run stopped rather than approving it unread"
                     .to_string(),
+                kind: Some(crate::RunFailureKind::CheckpointUnanswered),
             }
         );
         // Terminal: no transition, so the run stops here rather than moving on

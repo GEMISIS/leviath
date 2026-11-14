@@ -45,6 +45,11 @@ pub(crate) struct StatusChange {
     pub(crate) status: RunStateStatus,
     /// What went wrong, when `status` is `ERROR`.
     pub(crate) error: Option<String>,
+    /// Which kind of failure it was, when `status` is `ERROR`: a short fixed
+    /// word such as `no-media` or `provider-failure`, to tell one failure
+    /// from another without reading `error`. Null for a failure recorded
+    /// without one.
+    pub(crate) error_kind: Option<String>,
 }
 
 change_member!(
@@ -353,8 +358,12 @@ impl From<&Change> for StateChange {
     fn from(change: &Change) -> Self {
         match change {
             Change::Status(status) => {
-                let (status, error) = status_of(status);
-                Self::Status(StatusChange { status, error })
+                let (status, error, error_kind) = status_of(status);
+                Self::Status(StatusChange {
+                    status,
+                    error,
+                    error_kind,
+                })
             }
             Change::Cursor(cursor) => Self::Cursor(CursorChange {
                 cursor: StateCursor::from(cursor),

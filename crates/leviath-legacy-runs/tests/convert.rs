@@ -38,6 +38,8 @@ mod upgrade_layout6;
 mod upgrade_layout7;
 #[path = "convert/upgrade_layout8.rs"]
 mod upgrade_layout8;
+#[path = "convert/upgrade_layout9.rs"]
+mod upgrade_layout9;
 
 use common::{FIXTURES, Run, RunFile};
 use leviath_legacy_runs::{BlueprintSource, ConvertError, is_legacy, meta};
@@ -235,7 +237,7 @@ fn a_finished_run_keeps_its_model_and_tool_calls_as_events() {
 #[test]
 fn an_errored_run_keeps_why() {
     let (_, file) = Run::fixture("errored").converted();
-    let RunStatus::Error(why) = &file.last.status else {
+    let RunStatus::Error { message: why, .. } = &file.last.status else {
         panic!("the run errored");
     };
     assert!(why.contains("API key was rejected"));

@@ -62,7 +62,7 @@ flowchart TD
 | `on_tool_call` | before the policy and taint layers see the calls | the calls and their arguments | the calls |
 | `on_stage_exit` | stage finished, before the next is chosen | stage, regions, parts | region contents |
 | `on_completion` | run finished successfully | the final output | the final output |
-| `on_error` | run finished in error | the error message | the message |
+| `on_error` | run finished in error | the error message and its `error_kind` | the message |
 
 The three region hooks see each region's text under `regions`. Under `parts`, they see the stored
 [parts](/docs/mime) each region holds, as maps with `mime_type`, `name`, `sha256`, `size` and

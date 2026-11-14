@@ -160,6 +160,10 @@ pub(crate) enum ServerEvent {
         /// The run's *error*, if it failed. Named `result` since before a run
         /// could produce one; kept for the consumers that read it.
         result: Option<String>,
+        /// Which kind of failure `result` is, for a run that failed with one
+        /// stated: a short fixed word to match on.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error_kind: Option<String>,
         /// What the run handed back. This is the answer.
         #[serde(skip_serializing_if = "Option::is_none")]
         final_output: Option<FinalOutputResp>,
@@ -792,6 +796,7 @@ mod tests {
             status: "complete".to_string(),
             result: Some("success".to_string()),
             final_output: None,
+            error_kind: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("\"type\":\"agent_completed\""));
@@ -899,6 +904,7 @@ mod tests {
                     status: "complete".to_string(),
                     result: None,
                     final_output: None,
+                    error_kind: None,
                 },
                 "r6",
             ),

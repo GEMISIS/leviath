@@ -37,7 +37,10 @@ fn a_run_with_no_steps_is_listed_as_resolved() {
 fn a_run_is_listed_as_of_its_last_step() {
     let (_dir, path, mut writer) = written();
     let mut next = writer.state().clone();
-    next.status = RunStatus::Error("it broke".to_string());
+    next.status = RunStatus::Error {
+        message: "it broke".to_string(),
+        kind: Some("wedged".to_string()),
+    };
     next.title = Some("A title".to_string());
     next.totals.spend.prompt_tokens = 42;
     next.final_output = Some(FinalOutputState {
@@ -53,6 +56,7 @@ fn a_run_is_listed_as_of_its_last_step() {
     let meta = summary(&RunFileReader::read(&path).unwrap()).unwrap();
     assert_eq!(meta.status, leviath_core::run_meta::RunStatus::Error);
     assert_eq!(meta.error.as_deref(), Some("it broke"));
+    assert_eq!(meta.error_kind.as_deref(), Some("wedged"));
     assert_eq!(meta.title.as_deref(), Some("A title"));
     assert_eq!(meta.prompt_tokens, 42);
     assert_eq!(meta.updated_at, 1234);
@@ -448,7 +452,10 @@ fn a_call_still_out_is_in_flight_on_a_run_that_is_going_and_unsettled_on_one_tha
     for ended in [
         crate::state::RunStatus::Cancelled,
         crate::state::RunStatus::Complete,
-        crate::state::RunStatus::Error("boom".into()),
+        crate::state::RunStatus::Error {
+            message: "boom".into(),
+            kind: None,
+        },
     ] {
         state.status = ended;
         let meta = summary_of(&spec(), &state, 9);

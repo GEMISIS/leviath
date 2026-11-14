@@ -69,7 +69,7 @@ impl RunSegment {
             State::Waiting => Core::WaitingInput,
             State::Paused => Core::Paused,
             State::Complete => Core::Complete,
-            State::Error(_) => Core::Error,
+            State::Error { .. } => Core::Error,
             State::Cancelled => Core::Cancelled,
         })
     }

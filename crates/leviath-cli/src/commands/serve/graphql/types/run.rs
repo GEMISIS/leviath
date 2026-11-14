@@ -122,6 +122,14 @@ impl Run {
         self.meta.error.as_deref()
     }
 
+    /// Which kind of failure `error` is: a short fixed word such as
+    /// `no-media` or `provider-failure`, to match on without reading the
+    /// sentence. Null on every other status, and on a failure recorded
+    /// without one.
+    async fn error_kind(&self) -> Option<&str> {
+        self.meta.error_kind.as_deref()
+    }
+
     /// The initial ask this run was given.
     async fn task(&self) -> &str {
         &self.meta.task
@@ -452,28 +460,7 @@ impl Run {
         // The same walk REST's `tree-status` takes, over the index's own
         // parent map, so it visits the subtree rather than the store.
         let (rollup, ()) = tree::walk(&snapshot, &self.meta, self.now, &mut |_, _, _| ());
-        RunTreeStatus {
-            rollup: TokenUsage {
-                prompt_tokens: BigInt(rollup.prompt_tokens as i64),
-                completion_tokens: BigInt(rollup.completion_tokens as i64),
-                cached_tokens: BigInt(rollup.cached_tokens as i64),
-                cache_write_tokens: BigInt(rollup.cache_write_tokens as i64),
-            },
-            cost: CostFigures {
-                cost_usd: rollup.cost_usd,
-                priced_usd: rollup.cost_priced_usd,
-                reported_calls: rollup.reported_calls,
-                computed_calls: rollup.computed_calls,
-                unknown: rollup.unknown,
-                calls_in_flight: rollup.calls_in_flight,
-                includes_children: true,
-            }
-            .into(),
-            working_secs: BigInt(rollup.working_secs as i64),
-            working_now: as_i32(rollup.working_now),
-            depth: as_i32(rollup.depth),
-            descendant_count: as_i32(rollup.descendants),
-        }
+        RunTreeStatus::of(rollup)
     }
 
     /// A stage's logs.

@@ -2239,9 +2239,7 @@ fn collect_marks_error_on_failure() {
     // `ProviderError::Other`'s Display is the inner message ("boom").
     assert_eq!(
         world.get::<AgentState>(e).unwrap().status,
-        AgentStatus::Error {
-            message: "boom".to_string()
-        }
+        AgentStatus::failed(RunFailureKind::ProviderFailure, "boom")
     );
     assert!(world.get::<AwaitingInference>(e).is_none());
     // The error is routed to the transition logic (which follows an `error`
@@ -2249,7 +2247,7 @@ fn collect_marks_error_on_failure() {
     assert!(world.get::<ResolveTransition>(e).is_some());
     assert_eq!(
         world.get::<StageOutcome>(e).unwrap(),
-        &StageOutcome::Errored("boom".to_string())
+        &StageOutcome::Errored(RunFailureKind::ProviderFailure, "boom".to_string())
     );
 }
 
@@ -2612,7 +2610,7 @@ fn a_bare_names_not_found_falls_through_to_the_next_provider_serving_it() {
         .remove::<ReadyToInfer>()
         .insert(AwaitingInference);
     fail_call(&mut world, &tx, e, http_404(own_404));
-    let AgentStatus::Error { message } = &world.get::<AgentState>(e).unwrap().status else {
+    let AgentStatus::Error { message, .. } = &world.get::<AgentState>(e).unwrap().status else {
         panic!("the stage ends once no route serves the model");
     };
     assert!(
@@ -2696,7 +2694,7 @@ fn a_capability_refusal_moves_the_call_to_the_next_route() {
             .insert(AwaitingInference);
         fail_call(&mut world, &tx, e, refusal());
     }
-    let AgentStatus::Error { message } = &world.get::<AgentState>(e).unwrap().status else {
+    let AgentStatus::Error { message, .. } = &world.get::<AgentState>(e).unwrap().status else {
         panic!("the stage ends once no route is left");
     };
     assert!(
@@ -2942,7 +2940,7 @@ fn an_exhausted_fallback_list_still_terminates_on_a_dead_key() {
 
     assert!(world.get::<ReadyToInfer>(e).is_none());
     assert!(world.get::<ResolveTransition>(e).is_some());
-    let AgentStatus::Error { message } = &world.get::<AgentState>(e).unwrap().status else {
+    let AgentStatus::Error { message, .. } = &world.get::<AgentState>(e).unwrap().status else {
         panic!("an exhausted chain is a terminal error");
     };
     assert!(message.starts_with("the API key was rejected"), "{message}");
@@ -3392,6 +3390,7 @@ fn an_unentered_stage_is_skipped_on_a_failed_run() {
     for status in [
         AgentStatus::Error {
             message: "boom".to_string(),
+            kind: None,
         },
         AgentStatus::Cancelled,
     ] {
@@ -3459,6 +3458,7 @@ fn the_stage_a_run_stops_or_holds_in_reads_as_the_run_does() {
         (
             AgentStatus::Error {
                 message: "boom".to_string(),
+                kind: None,
             },
             "error",
         ),
@@ -3609,7 +3609,9 @@ async fn a_full_window_ends_the_stage_on_the_overflow_without_a_call() {
     );
     assert!(world.get::<ReadyToInfer>(e).is_none());
     assert!(world.get::<ResolveTransition>(e).is_some());
-    let Some(StageOutcome::Errored(message)) = world.get::<StageOutcome>(e) else {
+    let Some(StageOutcome::Errored(RunFailureKind::ContextOverflow, message)) =
+        world.get::<StageOutcome>(e)
+    else {
         panic!("the stage ends on an error");
     };
     assert!(message.starts_with("Token limit exceeded"), "{message}");
@@ -4017,6 +4019,7 @@ fn abort_terminal_work_stops_a_cancelled_agents_in_flight_work() {
         AgentStatus::Complete,
         AgentStatus::Error {
             message: "boom".to_string(),
+            kind: None,
         },
     ] {
         let mut world = World::new();
@@ -5956,7 +5959,9 @@ fn a_media_stage_that_made_nothing_fails_once_its_nudges_are_spent() {
         assert!(world.get::<ReadyToInfer>(entity).is_none());
         assert!(world.get::<ReadyForTransition>(entity).is_none());
     }
-    let Some(StageOutcome::Errored(message)) = world.get::<StageOutcome>(e) else {
+    let Some(StageOutcome::Errored(RunFailureKind::NoMedia, message)) =
+        world.get::<StageOutcome>(e)
+    else {
         panic!("the stage did not fail");
     };
     assert!(
@@ -5969,10 +5974,21 @@ fn a_media_stage_that_made_nothing_fails_once_its_nudges_are_spent() {
     assert!(message.contains("text: \"r\" (1 characters)"), "{message}");
     assert!(matches!(
         &world.get::<AgentState>(e).unwrap().status,
-        AgentStatus::Error { message: said } if said == message
+        AgentStatus::Error { message: said, kind: Some(RunFailureKind::NoMedia) }
+            if said == message
     ));
     // The reply it failed on is still in the conversation.
     assert!(conversation_text(&world, e).contains('r'));
+}
+
+/// The tag the failure's text opens with is its kind's label in brackets,
+/// so the text and the run's `error_kind` name the failure with one word.
+#[test]
+fn the_media_failure_tag_is_its_kinds_label() {
+    assert_eq!(
+        super::media_nudge::NO_MEDIA_TAG,
+        format!("[{}]", RunFailureKind::NoMedia.label())
+    );
 }
 
 /// What the failure says about a reply: stored parts by their size, and a
@@ -10872,9 +10888,10 @@ fn a_run_that_never_produced_its_required_output_errors() {
     run_transition(&mut world);
 
     let status = world.get::<AgentState>(e).unwrap().status.clone();
-    let AgentStatus::Error { message } = status else {
+    let AgentStatus::Error { message, kind } = status else {
         panic!("a run with no answer must not read as success, got {status:?}");
     };
+    assert_eq!(kind, Some(RunFailureKind::FinalOutputMissing));
     assert!(message.contains("final output"), "{message}");
     assert!(message.contains("never called submit_output"), "{message}");
 }
@@ -10906,7 +10923,8 @@ fn a_run_whose_every_submission_was_refused_says_so() {
 
     run_transition(&mut world);
 
-    let AgentStatus::Error { message } = world.get::<AgentState>(e).unwrap().status.clone() else {
+    let AgentStatus::Error { message, .. } = world.get::<AgentState>(e).unwrap().status.clone()
+    else {
         panic!("a run with no answer must not read as success");
     };
     assert!(
@@ -11139,17 +11157,21 @@ fn a_media_stage_that_made_the_wrong_type_fails_rather_than_being_nudged() {
 
     assert!(matches!(
         world.get::<StageOutcome>(unflagged),
-        Some(StageOutcome::Errored(_))
+        Some(StageOutcome::Errored(RunFailureKind::WrongMedia, _))
     ));
     assert!(world.get::<ReadyToInfer>(e).is_none(), "not asked again");
     assert!(world.get::<OutputReentries>(e).is_none());
     assert!(world.get::<crate::persistence::FinalOutput>(e).is_none());
-    let Some(StageOutcome::Errored(why)) = world.get::<StageOutcome>(e) else {
+    let Some(StageOutcome::Errored(_, why)) = world.get::<StageOutcome>(e) else {
         panic!("the stage fails");
     };
     assert!(why.contains("image/webp (image-1.webp)"), "{why}");
     assert!(why.contains("'picture' as image/png"), "{why}");
-    let AgentStatus::Error { message } = &world.get::<AgentState>(e).unwrap().status else {
+    let AgentStatus::Error {
+        message,
+        kind: Some(RunFailureKind::WrongMedia),
+    } = &world.get::<AgentState>(e).unwrap().status
+    else {
         panic!("the status carries the reason");
     };
     assert_eq!(message, why);
@@ -11192,7 +11214,11 @@ fn transition_visit_exhausted_edge_is_a_dead_end_error() {
     // This resolved to `Complete` before, which is how a run silently ended
     // at stage 2 of 5 with the output stage still pending.
     let status = world.get::<AgentState>(e).unwrap().status.clone();
-    let AgentStatus::Error { message } = status else {
+    let AgentStatus::Error {
+        message,
+        kind: Some(RunFailureKind::DeadEnd),
+    } = status
+    else {
         panic!("a dead-ended graph must error, got {status:?}");
     };
     assert!(message.contains("dead-ended"), "{message}");
@@ -11395,7 +11421,7 @@ fn transition_unknown_target_edge_is_a_dead_end_error() {
     // The only declared edge points at a nonexistent stage: nothing can ever
     // follow it, so completing here would be a silent lie.
     let status = world.get::<AgentState>(e).unwrap().status.clone();
-    let AgentStatus::Error { message } = status else {
+    let AgentStatus::Error { message, .. } = status else {
         panic!("an unfollowable graph must error, got {status:?}");
     };
     assert!(message.contains("dead-ended"), "{message}");
@@ -11642,12 +11668,10 @@ fn enter_stage_errors_when_system_prompt_overflows_region() {
 
     run_transition(&mut world);
 
-    assert_eq!(
-        std::mem::discriminant(&world.get::<AgentState>(e).unwrap().status),
-        std::mem::discriminant(&AgentStatus::Error {
-            message: String::new()
-        })
-    );
+    let AgentStatus::Error { kind, .. } = &world.get::<AgentState>(e).unwrap().status else {
+        panic!("a stage that cannot be entered must error the run");
+    };
+    assert_eq!(*kind, Some(RunFailureKind::StageEntryFailed));
     assert!(world.get::<ReadyToInfer>(e).is_none());
 }
 
@@ -11705,7 +11729,8 @@ fn collect_choice_errors_when_system_prompt_overflows() {
     assert_eq!(
         std::mem::discriminant(&world.get::<AgentState>(e).unwrap().status),
         std::mem::discriminant(&AgentStatus::Error {
-            message: String::new()
+            message: String::new(),
+            kind: None,
         })
     );
     assert!(world.get::<AwaitingTransitionResponse>(e).is_none());
@@ -13815,16 +13840,29 @@ fn fail_stage_world_survives_a_gone_or_stateless_entity() {
 
     let gone = world.spawn_empty().id();
     world.despawn(gone);
-    fail_stage_world(&mut world, gone, "boom".to_string());
+    fail_stage_world(
+        &mut world,
+        gone,
+        RunFailureKind::WorkersFailed,
+        "boom".to_string(),
+    );
     assert!(world.get_entity(gone).is_err(), "still gone");
 
     // Present but carrying no `AgentState`: the outcome is still recorded, so
     // whatever runs next sees the stage failed.
     let bare = world.spawn_empty().id();
-    fail_stage_world(&mut world, bare, "boom".to_string());
+    fail_stage_world(
+        &mut world,
+        bare,
+        RunFailureKind::WorkersFailed,
+        "boom".to_string(),
+    );
     assert_eq!(
         world.get::<StageOutcome>(bare),
-        Some(&StageOutcome::Errored("boom".to_string()))
+        Some(&StageOutcome::Errored(
+            RunFailureKind::WorkersFailed,
+            "boom".to_string()
+        ))
     );
     assert!(world.get::<ResolveTransition>(bare).is_some());
 }
@@ -13839,9 +13877,10 @@ fn resolve_transition_routes_error_to_error_edge() {
     let e = spawn_outcome_agent(
         &mut world,
         bp,
-        StageOutcome::Errored("boom".to_string()),
+        StageOutcome::Errored(RunFailureKind::ProviderFailure, "boom".to_string()),
         AgentStatus::Error {
             message: "boom".to_string(),
+            kind: None,
         },
     );
     run_transition(&mut world);
@@ -13872,9 +13911,10 @@ fn resolve_transition_routes_error_down_a_dead_end_edge_when_that_is_the_only_es
     let e = spawn_outcome_agent(
         &mut world,
         bp,
-        StageOutcome::Errored("boom".to_string()),
+        StageOutcome::Errored(RunFailureKind::ProviderFailure, "boom".to_string()),
         AgentStatus::Error {
             message: "boom".to_string(),
+            kind: None,
         },
     );
     run_transition(&mut world);
@@ -13896,14 +13936,18 @@ fn an_error_outcome_with_no_escape_becomes_the_run_status() {
     let e = spawn_outcome_agent(
         &mut world,
         bp,
-        StageOutcome::Errored("Token limit exceeded: no room".to_string()),
+        StageOutcome::Errored(
+            RunFailureKind::ContextOverflow,
+            "Token limit exceeded: no room".to_string(),
+        ),
         AgentStatus::Active,
     );
     run_transition(&mut world);
     assert_eq!(
         world.get::<AgentState>(e).unwrap().status,
         AgentStatus::Error {
-            message: "Token limit exceeded: no room".to_string()
+            message: "Token limit exceeded: no room".to_string(),
+            kind: Some(RunFailureKind::ContextOverflow),
         }
     );
 }
@@ -13918,9 +13962,10 @@ fn resolve_transition_errors_terminally_without_an_error_edge() {
     let e = spawn_outcome_agent(
         &mut world,
         bp,
-        StageOutcome::Errored("boom".to_string()),
+        StageOutcome::Errored(RunFailureKind::ProviderFailure, "boom".to_string()),
         AgentStatus::Error {
             message: "boom".to_string(),
+            kind: None,
         },
     );
     run_transition(&mut world);
@@ -13928,7 +13973,8 @@ fn resolve_transition_errors_terminally_without_an_error_edge() {
     assert_eq!(
         world.get::<AgentState>(e).unwrap().status,
         AgentStatus::Error {
-            message: "boom".to_string()
+            message: "boom".to_string(),
+            kind: Some(RunFailureKind::ProviderFailure),
         }
     );
     assert!(world.get::<StageOutcome>(e).is_none());
@@ -14008,7 +14054,8 @@ fn a_gate_still_applies_when_the_stage_ended_on_an_outcome() {
         run_transition(&mut world);
         assert_eq!(world.get::<StageCursor>(e).unwrap().index, 0, "{outcome:?}");
         match &world.get::<AgentState>(e).unwrap().status {
-            AgentStatus::Error { message } => {
+            AgentStatus::Error { message, kind } => {
+                assert_eq!(*kind, Some(RunFailureKind::GateUnsatisfied));
                 assert!(message.contains("write the brief first"), "{message}");
                 assert!(message.contains("stage 'a'"), "{message}");
             }
@@ -14433,7 +14480,7 @@ fn require_context_regions_proceeds_when_met_capped_or_errored() {
             required_bp(&["context_write"], None),
             StageCursor { index: 0 },
             window_with_plan(false),
-            StageOutcome::Errored("boom".to_string()),
+            StageOutcome::Errored(RunFailureKind::ProviderFailure, "boom".to_string()),
             ResolveTransition,
         ))
         .id();
@@ -15264,7 +15311,10 @@ fn resolve_transition_skips_the_gate_on_an_error_edge() {
     world
         .entity_mut(e)
         .insert(progress_with(0, 0, 0))
-        .insert(StageOutcome::Errored("boom".to_string()));
+        .insert(StageOutcome::Errored(
+            RunFailureKind::ProviderFailure,
+            "boom".to_string(),
+        ));
 
     run_transition(&mut world);
 
@@ -15796,7 +15846,8 @@ fn workspace_check_fails_a_run_whose_directory_is_gone() {
     assert_eq!(
         world.get::<AgentState>(e).unwrap().status,
         AgentStatus::Error {
-            message: "workspace '/definitely/not/a/real/dir' is no longer accessible".to_string()
+            message: "workspace '/definitely/not/a/real/dir' is no longer accessible".to_string(),
+            kind: Some(RunFailureKind::WorkspaceLost),
         }
     );
     assert!(
@@ -15834,7 +15885,8 @@ fn workspace_check_rejects_a_workdir_that_is_a_file() {
     assert_eq!(
         world.get::<AgentState>(e).unwrap().status,
         AgentStatus::Error {
-            message: format!("workspace '{}' is no longer accessible", file.display())
+            message: format!("workspace '{}' is no longer accessible", file.display()),
+            kind: Some(RunFailureKind::WorkspaceLost),
         }
     );
 }
@@ -15950,7 +16002,8 @@ fn run_gate_children(world: &mut World) {
 fn is_terminal_status_classifies_all_variants() {
     assert!(is_terminal_status(&AgentStatus::Complete));
     assert!(is_terminal_status(&AgentStatus::Error {
-        message: "x".to_string()
+        message: "x".to_string(),
+        kind: None,
     }));
     assert!(is_terminal_status(&AgentStatus::Cancelled));
     assert!(!is_terminal_status(&AgentStatus::Active));
@@ -17740,7 +17793,11 @@ fn collect_choice_marks_error_on_failure() {
 
     // The run fails with the routing error. The stage is not failed, so its
     // error edge is not followed and its finished work is not redone.
-    let AgentStatus::Error { message } = world.get::<AgentState>(e).unwrap().status.clone() else {
+    let AgentStatus::Error {
+        message,
+        kind: Some(RunFailureKind::RoutingFailed),
+    } = world.get::<AgentState>(e).unwrap().status.clone()
+    else {
         panic!("the run failed");
     };
     assert!(
@@ -18387,7 +18444,7 @@ fn a_second_unmatched_answer_fails_the_run_only_where_routing_says_fail() {
             );
             continue;
         }
-        let AgentStatus::Error { message } = &state.status else {
+        let AgentStatus::Error { message, .. } = &state.status else {
             panic!("{reply}: {:?}", state.status);
         };
         let why = match reply {
@@ -18403,6 +18460,11 @@ fn a_second_unmatched_answer_fails_the_run_only_where_routing_says_fail() {
                 "the stage after 'a' could not be picked: {why}, asked twice. \
                  routing.on_unmatched = \"fail\" ends the run here; the stage's work is kept"
             )
+        );
+        assert_eq!(
+            state.status,
+            AgentStatus::failed(RunFailureKind::RoutingUnmatched, message.clone()),
+            "{reply}"
         );
         if !may_end {
             assert_eq!(logs, Some(vec![(0, format!("[routing] {message}"))]));
@@ -19009,7 +19071,7 @@ fn an_errored_fan_out_stage_records_the_flag_without_nudging() {
             owing_state(),
             conversation_window(),
             ResolveTransition,
-            StageOutcome::Errored("boom".to_string()),
+            StageOutcome::Errored(RunFailureKind::ProviderFailure, "boom".to_string()),
             crate::persistence::RunOutcomeFlags::default(),
         ))
         .id();
@@ -19107,7 +19169,7 @@ fn a_fan_out_stage_without_flags_is_still_let_through() {
             owing_state(),
             conversation_window(),
             ResolveTransition,
-            StageOutcome::Errored("boom".to_string()),
+            StageOutcome::Errored(RunFailureKind::ProviderFailure, "boom".to_string()),
         ))
         .id();
 
@@ -19305,7 +19367,7 @@ fn an_exhausted_budget_proceeds_even_with_nowhere_to_record_it() {
 #[test]
 fn an_errored_or_capped_stage_is_left_to_its_own_transition() {
     for outcome in [
-        StageOutcome::Errored("boom".to_string()),
+        StageOutcome::Errored(RunFailureKind::ProviderFailure, "boom".to_string()),
         StageOutcome::MaxIterations,
     ] {
         let mut world = World::new();
@@ -19337,7 +19399,7 @@ fn an_errored_or_capped_stage_is_left_to_its_own_transition() {
 #[test]
 fn an_errored_or_capped_stage_still_records_the_missing_output() {
     for outcome in [
-        StageOutcome::Errored("boom".to_string()),
+        StageOutcome::Errored(RunFailureKind::ProviderFailure, "boom".to_string()),
         StageOutcome::MaxIterations,
     ] {
         let mut world = World::new();
@@ -19533,7 +19595,8 @@ fn a_hook_can_refuse_the_stage_and_the_reason_reaches_the_run() {
         r#"fn on_stage_enter(ctx) { #{ action: "cancel", reason: "over budget" } }"#,
     );
     run_stage_hooks(&mut world);
-    let AgentStatus::Error { message } = &world.get::<AgentState>(e).expect("state").status else {
+    let AgentStatus::Error { message, .. } = &world.get::<AgentState>(e).expect("state").status
+    else {
         panic!("a refused stage must error the run");
     };
     assert!(message.contains("over budget"), "{message}");
@@ -19546,7 +19609,11 @@ fn a_hook_that_fails_errors_the_run_rather_than_proceeding() {
     let mut world = World::new();
     let e = spawn_hooked(&mut world, r#"fn on_stage_enter(ctx) { throw "boom" }"#);
     run_stage_hooks(&mut world);
-    let AgentStatus::Error { message } = &world.get::<AgentState>(e).expect("state").status else {
+    let AgentStatus::Error {
+        message,
+        kind: Some(RunFailureKind::Hook),
+    } = &world.get::<AgentState>(e).expect("state").status
+    else {
         panic!("a failing hook must error the run");
     };
     assert!(message.contains("on_stage_enter hook failed"), "{message}");
@@ -19560,7 +19627,8 @@ fn writing_a_region_the_stage_does_not_have_errors_rather_than_being_dropped() {
         r#"fn on_stage_enter(ctx) { #{ action: "modify", value: #{ nope: "x" } } }"#,
     );
     run_stage_hooks(&mut world);
-    let AgentStatus::Error { message } = &world.get::<AgentState>(e).expect("state").status else {
+    let AgentStatus::Error { message, .. } = &world.get::<AgentState>(e).expect("state").status
+    else {
         panic!("writing an unknown region must error");
     };
     assert!(message.contains("no region 'nope'"), "{message}");
@@ -19604,7 +19672,8 @@ fn retry_is_reported_as_unhonourable_rather_than_silently_allowed() {
         r#"fn on_stage_enter(ctx) { #{ action: "retry" } }"#,
     );
     run_stage_hooks(&mut world);
-    let AgentStatus::Error { message } = &world.get::<AgentState>(e).expect("state").status else {
+    let AgentStatus::Error { message, .. } = &world.get::<AgentState>(e).expect("state").status
+    else {
         panic!("an unhonourable outcome must be reported");
     };
     assert!(message.contains("cannot honour"), "{message}");
@@ -19715,7 +19784,8 @@ fn a_region_write_that_does_not_fit_errors() {
         ))
         .id();
     run_stage_hooks(&mut world);
-    let AgentStatus::Error { message } = &world.get::<AgentState>(e).expect("state").status else {
+    let AgentStatus::Error { message, .. } = &world.get::<AgentState>(e).expect("state").status
+    else {
         panic!("a write that does not fit must error");
     };
     assert!(
@@ -19772,7 +19842,8 @@ fn a_refusal_without_a_reason_still_says_it_was_refused() {
     let mut world = World::new();
     let e = spawn_hooked(&mut world, "fn on_stage_enter(ctx) { false }");
     run_stage_hooks(&mut world);
-    let AgentStatus::Error { message } = &world.get::<AgentState>(e).expect("state").status else {
+    let AgentStatus::Error { message, .. } = &world.get::<AgentState>(e).expect("state").status
+    else {
         panic!("a bare false must refuse");
     };
     assert!(message.contains("refused stage 'main'"), "{message}");
@@ -19840,7 +19911,7 @@ fn spawn_after(world: &mut World, src: &str) -> Entity {
 
 fn status_message(world: &World, e: Entity) -> Option<String> {
     match &world.get::<AgentState>(e).expect("state").status {
-        AgentStatus::Error { message } => Some(message.clone()),
+        AgentStatus::Error { message, .. } => Some(message.clone()),
         _ => None,
     }
 }
@@ -20659,15 +20730,55 @@ fn on_error_can_rewrite_the_message() {
         &mut world,
         r#"fn on_error(ctx) { #{ action: "modify", value: "friendly: " + ctx.error } }"#,
         "on_error",
-        AgentStatus::Error {
-            message: "raw failure".to_string(),
-        },
+        AgentStatus::failed(RunFailureKind::NoMedia, "raw failure"),
         None,
     );
     run_terminal(&mut world);
     assert_eq!(
         status_message(&world, e).expect("errored"),
         "friendly: raw failure"
+    );
+    // The failure is the one it was: its kind stays.
+    assert_eq!(
+        world.get::<AgentState>(e).unwrap().status,
+        AgentStatus::failed(RunFailureKind::NoMedia, "friendly: raw failure")
+    );
+}
+
+/// An `on_error` hook reads the failure's kind as a word, and an empty one
+/// for a failure that states none.
+#[test]
+fn on_error_sees_the_kind_of_failure() {
+    let script = r#"fn on_error(ctx) { #{ action: "modify", value: "kind=" + ctx.error_kind } }"#;
+    let mut world = World::new();
+    let stated = spawn_terminal(
+        &mut world,
+        script,
+        "on_error",
+        AgentStatus::failed(RunFailureKind::WrongMedia, "raw failure"),
+        None,
+    );
+    let unstated = spawn_terminal(
+        &mut world,
+        script,
+        "on_error",
+        AgentStatus::Error {
+            message: "raw failure".to_string(),
+            kind: None,
+        },
+        None,
+    );
+    run_terminal(&mut world);
+    assert_eq!(
+        world.get::<AgentState>(stated).unwrap().status,
+        AgentStatus::failed(RunFailureKind::WrongMedia, "kind=wrong-media")
+    );
+    assert_eq!(
+        world.get::<AgentState>(unstated).unwrap().status,
+        AgentStatus::Error {
+            message: "kind=".to_string(),
+            kind: None,
+        }
     );
 }
 
@@ -23038,13 +23149,17 @@ fn process_response_ends_the_stage_after_the_cut_off_budget() {
         assert!(world.get::<ProcessResponse>(e).is_none());
         assert_eq!(
             world.get::<StageOutcome>(e),
-            Some(&StageOutcome::Errored(message.clone()))
+            Some(&StageOutcome::Errored(
+                RunFailureKind::CutOffToolCall,
+                message.clone()
+            ))
         );
     }
     assert_eq!(
         world.get::<AgentState>(observed).unwrap().status,
         AgentStatus::Error {
-            message: message.clone()
+            message: message.clone(),
+            kind: Some(RunFailureKind::CutOffToolCall),
         }
     );
     assert_eq!(

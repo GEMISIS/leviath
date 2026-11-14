@@ -156,6 +156,9 @@ pub(crate) struct OfflineRun {
     /// The recorded error, for a run that ended badly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Which kind of failure `error` is, for one recorded with a kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<String>,
     /// Unix seconds when the run started.
     pub started_at: i64,
     /// Unix seconds of the last snapshot, heartbeat included. Not progress.
@@ -226,6 +229,7 @@ pub(crate) fn offline_runs(
                 run_id: m.run_id,
                 status: m.status,
                 error: m.error,
+                error_kind: m.error_kind,
                 started_at: m.started_at,
                 updated_at: m.updated_at,
                 last_progress_at: m.last_progress_at,

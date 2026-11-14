@@ -190,7 +190,10 @@ fn status_of(status: &AgentStatus) -> RunStatus {
         AgentStatus::Waiting => RunStatus::Waiting,
         AgentStatus::Paused => RunStatus::Paused,
         AgentStatus::Complete => RunStatus::Complete,
-        AgentStatus::Error { message } => RunStatus::Error(message.clone()),
+        AgentStatus::Error { message, kind } => RunStatus::Error {
+            message: message.clone(),
+            kind: kind.map(|kind| kind.label().to_string()),
+        },
         AgentStatus::Cancelled => RunStatus::Cancelled,
     }
 }

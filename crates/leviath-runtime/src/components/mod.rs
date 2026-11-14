@@ -213,6 +213,11 @@ pub enum AgentStatus {
     Error {
         /// What went wrong, as shown to the user and written to the run record.
         message: String,
+        /// Which kind of failure it is, for a caller that branches on one.
+        /// `None` where only the sentence is known: a status read back from
+        /// its label, or from a run file written without kinds.
+        #[serde(default)]
+        kind: Option<RunFailureKind>,
     },
 
     /// Agent was cancelled by the user or system
@@ -220,6 +225,15 @@ pub enum AgentStatus {
 }
 
 impl AgentStatus {
+    /// A failed run's status: what went wrong, and which kind of failure it
+    /// is.
+    pub fn failed(kind: RunFailureKind, message: impl Into<String>) -> Self {
+        Self::Error {
+            message: message.into(),
+            kind: Some(kind),
+        }
+    }
+
     /// The short, stable lowercase word for this status.
     ///
     /// One table, because three readers otherwise drift apart: `lev ps`, the
@@ -249,8 +263,8 @@ impl AgentStatus {
     /// own clients read (see
     /// [`run_status_for_label`](crate::persistence::run_status_for_label)).
     ///
-    /// An error's message does not survive the round trip - the label never
-    /// carried it - so this returns the variant with an empty one. Match on
+    /// An error's message and kind do not survive the round trip - the label
+    /// never carried them - so this returns the variant with neither. Match on
     /// what the status *is*; the message is on the event that carried it.
     pub(crate) fn from_label(label: &str) -> Option<Self> {
         Some(match label {
@@ -261,6 +275,7 @@ impl AgentStatus {
             "complete" => Self::Complete,
             "error" => Self::Error {
                 message: String::new(),
+                kind: None,
             },
             "cancelled" => Self::Cancelled,
             _ => return None,
@@ -274,7 +289,7 @@ impl std::fmt::Display for AgentStatus {
     /// fixed vocabulary is expected.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Error { message } => write!(f, "error: {message}"),
+            Self::Error { message, .. } => write!(f, "error: {message}"),
             other => f.write_str(other.label()),
         }
     }
@@ -285,7 +300,7 @@ impl std::fmt::Display for AgentStatus {
 /// Lives in `leviath-core` because it is kept on the run's record as well as
 /// reported live over the control socket, and re-exported here so every
 /// existing `components::WaitReason` path keeps working.
-pub use leviath_core::run_meta::WaitReason;
+pub use leviath_core::run_meta::{RunFailureKind, WaitReason};
 
 // The context window, which was two thirds of this file. Glob re-exported so
 // every existing `components::ContextWindow` path keeps working.
@@ -486,7 +501,8 @@ mod tests {
         assert_eq!(
             AgentStatus::from_label("error"),
             Some(AgentStatus::Error {
-                message: String::new()
+                message: String::new(),
+                kind: None,
             })
         );
         assert_eq!(AgentStatus::from_label("hibernating"), None);
@@ -1113,6 +1129,7 @@ mod tests {
 
         let error_status = AgentStatus::Error {
             message: "boom".to_string(),
+            kind: None,
         };
         let json = serde_json::to_string(&error_status).unwrap();
         assert!(json.contains("boom"));
@@ -4085,10 +4102,38 @@ mod tests {
         assert_eq!(AgentStatus::Cancelled.label(), "cancelled");
         assert_eq!(
             AgentStatus::Error {
-                message: "boom".to_string()
+                message: "boom".to_string(),
+                kind: None,
             }
             .label(),
             "error"
+        );
+    }
+
+    /// A failure's kind travels with the status as its label, and a status
+    /// written without one, as an older daemon writes it, reads as a failure
+    /// that states none.
+    #[test]
+    fn an_error_carries_its_kind_and_reads_without_one() {
+        let failed = AgentStatus::failed(RunFailureKind::NoMedia, "boom");
+        let written = serde_json::to_value(&failed).unwrap();
+        assert_eq!(
+            written,
+            serde_json::json!({"Error": {"message": "boom", "kind": "no-media"}})
+        );
+        assert_eq!(
+            serde_json::from_value::<AgentStatus>(written).unwrap(),
+            failed
+        );
+        assert_eq!(
+            serde_json::from_value::<AgentStatus>(
+                serde_json::json!({"Error": {"message": "boom"}})
+            )
+            .unwrap(),
+            AgentStatus::Error {
+                message: "boom".to_string(),
+                kind: None,
+            }
         );
     }
 
@@ -4108,7 +4153,8 @@ mod tests {
         }
         assert_eq!(
             AgentStatus::Error {
-                message: "disk full".to_string()
+                message: "disk full".to_string(),
+                kind: None,
             }
             .to_string(),
             "error: disk full"

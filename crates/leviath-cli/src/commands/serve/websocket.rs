@@ -786,6 +786,7 @@ mod tests {
                 status: "complete".to_string(),
                 result: None,
                 final_output: None,
+                error_kind: None,
             },
             ServerEvent::Tokens {
                 agent_id: "a".to_string(),
@@ -1253,6 +1254,7 @@ mod tests {
                     status: "complete".to_string(),
                     result: None,
                     final_output: None,
+                    error_kind: None,
                 },
                 "run-done",
             ),

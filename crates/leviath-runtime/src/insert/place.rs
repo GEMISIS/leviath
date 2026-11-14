@@ -35,8 +35,9 @@ pub(crate) fn agent_status(status: &RunStatus) -> AgentStatus {
         RunStatus::Waiting => AgentStatus::Waiting,
         RunStatus::Paused => AgentStatus::Paused,
         RunStatus::Complete => AgentStatus::Complete,
-        RunStatus::Error(message) => AgentStatus::Error {
+        RunStatus::Error { message, kind } => AgentStatus::Error {
             message: message.clone(),
+            kind: kind.as_deref().and_then(crate::RunFailureKind::from_label),
         },
         RunStatus::Cancelled => AgentStatus::Cancelled,
     }

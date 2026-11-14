@@ -1165,6 +1165,41 @@ async fn run_result_serves_the_submitted_answer_beside_the_log_tail() {
     .await;
 }
 
+/// A failed run's result says what went wrong and which kind of failure it
+/// was.
+#[tokio::test]
+async fn run_result_carries_the_error_and_its_kind() {
+    crate::runstate::with_isolated_runs_dir_async(
+        "agent_result_carries_the_error_and_its_kind",
+        |_d| async move {
+            let run_id = unique_run_id("result-failed");
+            let mut meta = make_run(&run_id);
+            meta.status = leviath_core::run_meta::RunStatus::Error;
+            meta.error = Some("no picture came back".to_string());
+            meta.error_kind = Some("no-media".to_string());
+            create_run(&meta).unwrap();
+            let app = Router::new()
+                .route("/api/runs/{id}/result", get(run_result))
+                .with_state(test_state());
+            let req = Request::builder()
+                .uri(format!("/api/runs/{}/result", run_id))
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(result["status"], "error");
+            assert_eq!(result["error"], "no picture came back");
+            assert_eq!(result["error_kind"], "no-media");
+
+            let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+        },
+    )
+    .await;
+}
+
 /// A run that submitted nothing reports `null` rather than an empty string,
 /// so a consumer can tell "no answer" from "an empty answer".
 #[tokio::test]

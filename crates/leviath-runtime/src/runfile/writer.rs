@@ -298,7 +298,7 @@ impl RunFileWriter {
 fn is_finished(state: &RunState) -> bool {
     matches!(
         state.status,
-        RunStatus::Complete | RunStatus::Error(_) | RunStatus::Cancelled
+        RunStatus::Complete | RunStatus::Error { .. } | RunStatus::Cancelled
     )
 }
 

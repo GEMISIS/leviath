@@ -103,7 +103,7 @@ fn every_change_comes_through() {
     use state::Change as C;
     let stage = StageName::new("s").unwrap();
     let changes: Vec<C> = vec![
-        C::Status(RunStatus::Complete),
+        C::Status(state::RunStatus::Complete),
         C::Cursor(Cursor {
             stage,
             visit: "v".into(),

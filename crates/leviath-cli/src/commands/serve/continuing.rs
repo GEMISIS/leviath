@@ -133,7 +133,7 @@ impl From<SegmentRead> for SegmentResp {
             leviath_runtime::state::RunStatus::Waiting => "waiting_input",
             leviath_runtime::state::RunStatus::Paused => "paused",
             leviath_runtime::state::RunStatus::Complete => "complete",
-            leviath_runtime::state::RunStatus::Error(_) => "error",
+            leviath_runtime::state::RunStatus::Error { .. } => "error",
             leviath_runtime::state::RunStatus::Cancelled => "cancelled",
         };
         let (cost_usd, _) = leviath_runtime::insert::place::cost(&segment.spend);

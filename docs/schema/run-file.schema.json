@@ -3381,7 +3381,23 @@
             "description": "Failed.",
             "properties": {
               "Error": {
-                "type": "string"
+                "properties": {
+                  "kind": {
+                    "description": "Which kind of failure it is, as a\n[`RunFailureKind::label`](leviath_core::run_meta::RunFailureKind::label):\na word, so a kind this build does not know still reads. `None` for\na failure recorded with its sentence alone.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "message": {
+                    "description": "What went wrong.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "message"
+                ],
+                "type": "object"
               }
             },
             "required": [
@@ -11139,7 +11155,23 @@
             "description": "Failed.",
             "properties": {
               "Error": {
-                "type": "string"
+                "properties": {
+                  "kind": {
+                    "description": "Which kind of failure it is, as a\n[`RunFailureKind::label`](leviath_core::run_meta::RunFailureKind::label):\na word, so a kind this build does not know still reads. `None` for\na failure recorded with its sentence alone.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "message": {
+                    "description": "What went wrong.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "message"
+                ],
+                "type": "object"
               }
             },
             "required": [

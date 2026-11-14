@@ -201,6 +201,34 @@ pub(crate) struct RunTreeStatus {
     pub(crate) descendant_count: i32,
 }
 
+impl RunTreeStatus {
+    /// What a walk of a run's subtree added up to.
+    pub(crate) fn of(rollup: crate::commands::serve::tree::Rollup) -> Self {
+        Self {
+            rollup: TokenUsage {
+                prompt_tokens: BigInt(rollup.prompt_tokens as i64),
+                completion_tokens: BigInt(rollup.completion_tokens as i64),
+                cached_tokens: BigInt(rollup.cached_tokens as i64),
+                cache_write_tokens: BigInt(rollup.cache_write_tokens as i64),
+            },
+            cost: CostFigures {
+                cost_usd: rollup.cost_usd,
+                priced_usd: rollup.cost_priced_usd,
+                reported_calls: rollup.reported_calls,
+                computed_calls: rollup.computed_calls,
+                unknown: rollup.unknown,
+                calls_in_flight: rollup.calls_in_flight,
+                includes_children: true,
+            }
+            .into(),
+            working_secs: BigInt(rollup.working_secs as i64),
+            working_now: as_i32(rollup.working_now),
+            depth: as_i32(rollup.depth),
+            descendant_count: as_i32(rollup.descendants),
+        }
+    }
+}
+
 /// How much of a log stream is read when the client does not say.
 pub(crate) const DEFAULT_LOG_TAIL_BYTES: u64 = 32 * 1024;
 

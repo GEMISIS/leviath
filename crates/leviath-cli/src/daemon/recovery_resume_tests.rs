@@ -435,7 +435,10 @@ async fn finished_fan_out_workers_come_back_as_done_after_a_restart() {
     )
     .unwrap();
     change(runs.path(), &failed, |s| {
-        s.status = RunStatus::Error("w2 broke".to_string());
+        s.status = RunStatus::Error {
+            message: "w2 broke".to_string(),
+            kind: None,
+        };
         s.phase = PipelinePhase::Done;
     });
     let config = {

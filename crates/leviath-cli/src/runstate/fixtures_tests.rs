@@ -219,11 +219,14 @@ fn state_of(meta: &RunMeta, spec: &RunSpec, base: Option<RunState>) -> RunState 
         RunStatus::WaitingInput => State::Waiting,
         RunStatus::Paused => State::Paused,
         RunStatus::Complete | RunStatus::CompleteInteractive => State::Complete,
-        RunStatus::Error => State::Error(meta.error.clone().unwrap_or_default()),
+        RunStatus::Error => State::Error {
+            message: meta.error.clone().unwrap_or_default(),
+            kind: meta.error_kind.clone(),
+        },
         RunStatus::Cancelled => State::Cancelled,
     };
     state.phase = match &status {
-        State::Complete | State::Error(_) | State::Cancelled => PipelinePhase::Done,
+        State::Complete | State::Error { .. } | State::Cancelled => PipelinePhase::Done,
         _ => PipelinePhase::ReadyToInfer,
     };
     state.status = status;

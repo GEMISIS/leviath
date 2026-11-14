@@ -38,7 +38,9 @@
 //! stage plans this build does not read, layout 3, whose fan-outs named one
 //! worker, layout 4, whose compaction named one model, layout 5, which kept
 //! neither an idempotency key nor `routing`, layout 6, which had no write
-//! paths, and layout 7, whose stage records counted no resubmissions.
+//! paths, layout 7, whose stage records counted no resubmissions, layout 8,
+//! which accounted only for the model calls that answered, and layout 9,
+//! whose failed runs stated no kind.
 //! [`upgrade()`] rewrites one
 //! in this build's layout in place, and keeps the file as it was in the
 //! run's `legacy/` directory;
@@ -58,6 +60,7 @@ mod layout5;
 mod layout6;
 mod layout7;
 mod layout8;
+mod layout9;
 mod legacy;
 mod manifest;
 mod migrate;
@@ -150,7 +153,7 @@ pub fn is_legacy(run_dir: &Path) -> bool {
     legacy::is_legacy(run_dir)
 }
 
-/// Whether `run_dir` holds a run file in an older layout (2 to 7) that
+/// Whether `run_dir` holds a run file in an older layout (2 to 9) that
 /// [`upgrade()`] would upgrade, told from the file's header alone.
 pub fn needs_upgrade(run_dir: &Path) -> bool {
     upgrade::needs_upgrade(run_dir)
@@ -162,7 +165,8 @@ pub fn needs_upgrade(run_dir: &Path) -> bool {
 /// name). The run reads back as it did: each stage's model and reply cap move
 /// to where this build keeps them, each fan-out becomes one of its stage with
 /// its one worker, which takes every item, a run from before write paths
-/// has none, and each stage record from before resubmissions counts none.
+/// has none, each stage record from before resubmissions counts none, and
+/// a failed run from before kinds states none.
 ///
 /// A directory with no run file in an older layout, one already upgraded
 /// among them, is refused with [`ConvertError::NotOldLayout`], so upgrading

@@ -759,6 +759,7 @@ pub(crate) fn collect_transition_choice(
                             &mut commands,
                             outcome.entity,
                             &mut state,
+                            RunFailureKind::RoutingFailed,
                             err.to_string(),
                         );
                     }
@@ -774,7 +775,7 @@ pub(crate) fn collect_transition_choice(
                                 .logs
                                 .push((cursor.index, format!("[routing] {message}")));
                         }
-                        state.status = AgentStatus::Error { message };
+                        state.status = AgentStatus::failed(RunFailureKind::RoutingFailed, message);
                     }
                 }
                 continue;
@@ -850,7 +851,7 @@ pub(crate) fn collect_transition_choice(
                             .logs
                             .push((cursor.index, format!("[routing] {message}")));
                     }
-                    state.status = AgentStatus::Error { message };
+                    state.status = AgentStatus::failed(RunFailureKind::RoutingUnmatched, message);
                     commands
                         .entity(outcome.entity)
                         .remove::<AwaitingTransitionResponse>();
@@ -971,6 +972,7 @@ pub(crate) fn collect_transition_choice(
                             &mut commands,
                             outcome.entity,
                             &mut state,
+                            RunFailureKind::StageEntryFailed,
                             message,
                         );
                     }

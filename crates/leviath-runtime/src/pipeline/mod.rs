@@ -22,7 +22,7 @@ use crate::compaction_bridge::{
 };
 use crate::components::{
     AgentMessage, AgentState, AgentStatus, AwaitingInteraction, ContextWindow, InferenceConfig,
-    MessageInbox,
+    MessageInbox, RunFailureKind,
 };
 use crate::fanout::FanOutWaiting;
 use crate::inference_bridge::{InferenceJob, InferenceOutcome};

@@ -164,9 +164,10 @@ pub(crate) fn run_stage_enter_hooks(
                 // A hook that fails is not a hook that allowed. Failing the run
                 // is the same stance `enter_stage` takes on a prompt that will
                 // not fit: the stage cannot start as configured.
-                state.status = AgentStatus::Error {
-                    message: format!("on_stage_enter hook failed: {e}"),
-                };
+                state.status = AgentStatus::failed(
+                    RunFailureKind::Hook,
+                    format!("on_stage_enter hook failed: {e}"),
+                );
                 continue;
             }
         };
@@ -175,25 +176,27 @@ pub(crate) fn run_stage_enter_hooks(
             HookOutcome::Allow => {}
             HookOutcome::Modify(value) => {
                 if let Err(e) = apply_modify(&mut window, &value) {
-                    state.status = AgentStatus::Error { message: e };
+                    state.status = AgentStatus::failed(RunFailureKind::Hook, e);
                 }
             }
             HookOutcome::Cancel(reason) => {
                 let why = reason.unwrap_or_else(|| "no reason given".to_string());
-                state.status = AgentStatus::Error {
-                    message: format!("on_stage_enter refused stage '{name}': {why}"),
-                };
+                state.status = AgentStatus::failed(
+                    RunFailureKind::Hook,
+                    format!("on_stage_enter refused stage '{name}': {why}"),
+                );
             }
             // Retrying entry into a stage the agent is already in has no
             // meaning. Saying so beats treating it as `Allow`, which would let
             // a script think it had asked for something.
             HookOutcome::Retry => {
-                state.status = AgentStatus::Error {
-                    message: format!(
+                state.status = AgentStatus::failed(
+                    RunFailureKind::Hook,
+                    format!(
                         "on_stage_enter returned 'retry', which this hook cannot honour \
                          (stage '{name}' is already entered)"
                     ),
-                };
+                );
             }
         }
     }
@@ -204,9 +207,7 @@ pub(crate) fn run_stage_enter_hooks(
 /// Shared by the hooks below so "a failed hook is not an allowed hook" is
 /// written once rather than restated per call site with a chance to drift.
 fn refuse(state: &mut AgentState, hook: &str, what: String) {
-    state.status = AgentStatus::Error {
-        message: format!("{hook}: {what}"),
-    };
+    state.status = AgentStatus::failed(RunFailureKind::Hook, format!("{hook}: {what}"));
 }
 
 /// What `run_before_inference_hooks` selects.
@@ -528,7 +529,7 @@ pub(crate) fn run_terminal_hooks(
                     .map(|o| o.0.content.clone())
                     .unwrap_or_default(),
             ),
-            AgentStatus::Error { message } => ("on_error", message.clone()),
+            AgentStatus::Error { message, .. } => ("on_error", message.clone()),
             _ => continue,
         };
         crate::tick_scope::enter(entity);
@@ -561,6 +562,12 @@ pub(crate) fn run_terminal_hooks(
         // infinite loop rather than one error.
         commands.entity(entity).insert(TerminalHookFired);
 
+        // The kind of failure the run states, which a rewritten message
+        // keeps: none for a run that completed, or a failure stating none.
+        let stated = match &state.status {
+            AgentStatus::Error { kind, .. } => *kind,
+            _ => None,
+        };
         let ctx = serde_json::json!({
             "stage": stage.name,
             "stage_index": cursor.index,
@@ -568,6 +575,9 @@ pub(crate) fn run_terminal_hooks(
             // Named for what it is in each case, so a script reads plainly.
             "output": if hook == "on_completion" { subject.clone() } else { String::new() },
             "error": if hook == "on_error" { subject.clone() } else { String::new() },
+            // The failure's kind, for a script that branches on one; empty
+            // for a run that completed and for a failure that states none.
+            "error_kind": stated.map_or("", RunFailureKind::label),
         });
 
         match run(&script, hook, ctx) {
@@ -597,9 +607,12 @@ pub(crate) fn run_terminal_hooks(
                             "asked to rewrite the answer, but this run submitted none".to_string(),
                         ),
                     },
+                    // The failure is the one it was, said in the hook's
+                    // words: its kind stays.
                     _ => {
                         state.status = AgentStatus::Error {
                             message: text.to_string(),
+                            kind: stated,
                         }
                     }
                 }

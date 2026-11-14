@@ -148,8 +148,20 @@ fn every_status_has_its_word_and_the_finished_ones_are_done() {
         (
             AgentStatus::Error {
                 message: "boom".into(),
+                kind: None,
             },
-            RunStatus::Error("boom".into()),
+            RunStatus::Error {
+                message: "boom".into(),
+                kind: None,
+            },
+            PipelinePhase::Done,
+        ),
+        (
+            AgentStatus::failed(crate::RunFailureKind::NoMedia, "boom"),
+            RunStatus::Error {
+                message: "boom".into(),
+                kind: Some("no-media".into()),
+            },
             PipelinePhase::Done,
         ),
         (

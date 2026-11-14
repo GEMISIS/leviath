@@ -6786,7 +6786,15 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "What went wrong, in a sentence, when the run failed."
+          },
+          "error_kind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Which kind of failure `error` is, to match on without reading the sentence. One of: no-media, wrong-media, cut-off-tool-call, provider-failure, context-overflow, workspace-lost, wedged, routing-failed, routing-unmatched, stage-entry-failed, workers-failed, gate-unsatisfied, dead-end, final-output-missing, hook, checkpoint-unanswered, journal-unwritable, internal-error, run-file-unreadable, start-refused. Null when the run did not fail, and for a failure recorded without a kind (a run from before kinds were kept). More kinds may be added."
           },
           "prompt_tokens": {
             "type": "integer",

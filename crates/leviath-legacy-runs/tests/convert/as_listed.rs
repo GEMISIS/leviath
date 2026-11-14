@@ -189,7 +189,7 @@ fn an_unfinished_run_whose_blueprint_changed_ends_and_says_why() {
     run.meta(|m| m.status = OldStatus::Paused);
     let agents = changed_agents();
     let file = convert_against(&run, &agents);
-    let RunStatus::Error(why) = &file.last.status else {
+    let RunStatus::Error { message: why, .. } = &file.last.status else {
         panic!("{:?}", file.last.status);
     };
     assert!(why.contains("cannot resume"), "{why}");
@@ -287,7 +287,7 @@ fn a_run_waiting_on_a_0_1_0_question_ends_and_says_why() {
         .to_string(),
     );
     let (report, file) = run.converted();
-    let RunStatus::Error(why) = &file.last.status else {
+    let RunStatus::Error { message: why, .. } = &file.last.status else {
         panic!("{:?}", file.last.status);
     };
     assert!(why.contains("What colour?"), "{why}");
@@ -309,7 +309,7 @@ fn a_0_1_0_question_that_does_not_read_is_still_named() {
     run.json("meta.json", |v| v["status"] = json!("waiting_input"));
     run.write("pending.json", "{ not json");
     let (_, file) = run.converted();
-    let RunStatus::Error(why) = &file.last.status else {
+    let RunStatus::Error { message: why, .. } = &file.last.status else {
         panic!("{:?}", file.last.status);
     };
     assert!(why.contains("pending.json"), "{why}");

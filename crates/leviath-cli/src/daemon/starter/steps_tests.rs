@@ -337,7 +337,7 @@ async fn a_refusal_after_the_file_is_written_is_recorded_on_it() {
         .unwrap()
         .status
     {
-        RunStatus::Error(why) => assert!(why.contains("the provider went away")),
+        RunStatus::Error { message: why, .. } => assert!(why.contains("the provider went away")),
         other => panic!("not recorded: {other:?}"),
     }
     // It ended before it entered a stage, so every stage reads never reached
@@ -491,7 +491,13 @@ binds = [{ region = "task" }]
         .unwrap()
         .latest_state()
         .unwrap();
-    assert_eq!(state.status, RunStatus::Error(issues.to_string()));
+    assert_eq!(
+        state.status,
+        RunStatus::Error {
+            message: issues.to_string(),
+            kind: Some("start-refused".into()),
+        }
+    );
 }
 
 /// A stdio MCP server with one tool, `check`, that writes a counter to the

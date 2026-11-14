@@ -53,7 +53,10 @@ pub(crate) fn base() -> RunState {
 pub(crate) fn busy() -> RunState {
     let mut s = base();
     s.seq = 7;
-    s.status = RunStatus::Error("boom".into());
+    s.status = RunStatus::Error {
+        message: "boom".into(),
+        kind: Some("no-media".into()),
+    };
     s.cursor = Cursor {
         stage: stage("build"),
         visit: "v2".into(),
@@ -557,7 +560,10 @@ fn a_settled_ledger_reads_as_the_run_stands() {
             StageStatus::Skipped,
         ),
         (
-            RunStatus::Error("boom".into()),
+            RunStatus::Error {
+                message: "boom".into(),
+                kind: None,
+            },
             StageStatus::Error,
             StageStatus::Skipped,
         ),

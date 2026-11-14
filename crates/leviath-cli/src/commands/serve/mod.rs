@@ -1081,6 +1081,28 @@ mod tests {
         );
     }
 
+    /// A failure's kind is a word a caller matches, so every word this build
+    /// can send is in the guide's table, and in the spec's description of the
+    /// field.
+    #[test]
+    fn every_kind_of_failure_is_explained_in_the_guide() {
+        let section = API_GUIDE
+            .split("### Why a run failed")
+            .nth(1)
+            .expect("api.md has a section on why a run failed");
+        for kind in leviath_core::run_meta::RunFailureKind::ALL {
+            let label = kind.label();
+            assert!(
+                section.contains(&format!("| `{label}` |")),
+                "docs/content/api.md does not explain the failure kind {label}"
+            );
+            assert!(
+                OPENAPI.contains(label),
+                "docs/schema/openapi.json does not list the failure kind {label}"
+            );
+        }
+    }
+
     /// Every `$ref` under `value`, as written.
     fn refs_in(value: &serde_json::Value, out: &mut Vec<String>) {
         match value {

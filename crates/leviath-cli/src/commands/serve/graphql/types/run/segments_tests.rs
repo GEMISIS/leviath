@@ -73,7 +73,13 @@ async fn a_segment_reads_its_own_spend_answer_and_files() {
         },
         // An answer whose bytes did not read is no answer.
         SegmentRead {
-            segment: segment(State::Error("x".into()), true),
+            segment: segment(
+                State::Error {
+                    message: "x".into(),
+                    kind: None,
+                },
+                true,
+            ),
             answer: None,
         },
         SegmentRead {

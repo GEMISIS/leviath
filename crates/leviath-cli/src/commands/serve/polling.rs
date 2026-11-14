@@ -318,10 +318,22 @@ async fn handle_event(
         .await;
     }
     let mut frame = to_server_event(event);
-    if let ServerEvent::AgentCompleted { run_id, result, .. } = &mut frame {
-        // The run's error, from its record, read on the blocking pool.
+    if let ServerEvent::AgentCompleted {
+        run_id,
+        result,
+        error_kind,
+        ..
+    } = &mut frame
+    {
+        // The run's error and its kind, from its record, read on the blocking
+        // pool.
         let id = run_id.clone();
-        *result = blocking(move || runstate::read_meta(&id).ok().and_then(|m| m.error)).await;
+        let failure = blocking(move || {
+            runstate::read_meta(&id)
+                .ok()
+                .map(|m| (m.error, m.error_kind))
+        });
+        (*result, *error_kind) = failure.await.unwrap_or_default();
     }
     super::events::send(&state.event_tx, frame);
 }
@@ -467,6 +479,7 @@ fn to_server_event(event: WorldEvent) -> ServerEvent {
             // fires the moment the run goes terminal, and the persist tick that
             // writes the run file has not necessarily run yet.
             final_output: final_output.map(Into::into),
+            error_kind: None,
         },
         WorldEvent::Log {
             run_id,
@@ -734,6 +747,8 @@ fn completion_payload(
         // Named `result` since before a run could produce one; it carries the
         // run's *error*. The answer is `final_output`, below.
         "result": meta.error,
+        // Which kind of failure that is, for a caller that branches on one.
+        "error_kind": meta.error_kind,
         // Taken from the event, not from `meta`: the webhook fires the moment
         // the run goes terminal, and the persist tick that writes the run file
         // has not necessarily run yet - reading it here would race and deliver
@@ -1401,6 +1416,7 @@ mod tests {
                 meta.callback_url = Some("http://127.0.0.1:0/hook".into());
                 meta.status = leviath_core::run_meta::RunStatus::Error;
                 meta.error = Some("boom".into());
+                meta.error_kind = Some("no-media".into());
                 create_run(&meta).unwrap();
 
                 let (state, mut rx) = state_with(no_daemon_client());
@@ -1420,10 +1436,10 @@ mod tests {
                 // The completion is broadcast with the run's error as the result.
                 let ev = rx.try_recv().unwrap();
                 assert_eq!(tag(&ev), "agent_completed");
-                assert_eq!(
-                    serde_json::to_value(&ev.event).unwrap()["result"].as_str(),
-                    Some("boom")
-                );
+                let frame = serde_json::to_value(&ev.event).unwrap();
+                assert_eq!(frame["result"].as_str(), Some("boom"));
+                // And which kind of failure it was.
+                assert_eq!(frame["error_kind"].as_str(), Some("no-media"));
             },
         )
         .await;
@@ -2303,8 +2319,10 @@ mod tests {
     fn result_stays_the_error_field_it_has_always_been() {
         let mut meta = payload_meta();
         meta.error = Some("provider refused".to_string());
+        meta.error_kind = Some("provider-failure".to_string());
         let payload = completion_payload(&meta, "error", None, "d-2");
         assert_eq!(payload["result"].as_str().unwrap(), "provider refused");
+        assert_eq!(payload["error_kind"].as_str().unwrap(), "provider-failure");
         assert!(payload["final_output"].is_null());
     }
 
@@ -2312,6 +2330,7 @@ mod tests {
     fn a_run_that_submitted_nothing_sends_a_null_answer() {
         let payload = completion_payload(&payload_meta(), "complete", None, "d-3");
         assert!(payload["final_output"].is_null());
+        assert!(payload["error_kind"].is_null());
     }
 
     /// A finished run, `run_id`, whose webhook goes to `url`.

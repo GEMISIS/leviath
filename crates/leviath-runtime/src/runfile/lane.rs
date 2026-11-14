@@ -216,7 +216,7 @@ fn write_step(
         warn_missing_blobs(run_dir, writer.state(), &state);
         let finished = matches!(
             state.status,
-            RunStatus::Complete | RunStatus::Error(_) | RunStatus::Cancelled
+            RunStatus::Complete | RunStatus::Error { .. } | RunStatus::Cancelled
         );
         let seq = match !step.settles.is_empty() && events.is_empty() {
             // Every call the step came to settle was settled already.

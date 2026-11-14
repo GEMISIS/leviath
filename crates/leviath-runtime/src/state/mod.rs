@@ -191,7 +191,7 @@ impl RunState {
         self.settle_stage_here();
         let over = matches!(
             self.status,
-            RunStatus::Complete | RunStatus::Error(_) | RunStatus::Cancelled
+            RunStatus::Complete | RunStatus::Error { .. } | RunStatus::Cancelled
         );
         for rec in self.ledger.iter_mut().filter(|r| over && !r.entered) {
             rec.status = StageStatus::Skipped;
@@ -228,7 +228,15 @@ pub enum RunStatus {
     /// Finished.
     Complete,
     /// Failed.
-    Error(String),
+    Error {
+        /// What went wrong.
+        message: String,
+        /// Which kind of failure it is, as a
+        /// [`RunFailureKind::label`](leviath_core::run_meta::RunFailureKind::label):
+        /// a word, so a kind this build does not know still reads. `None` for
+        /// a failure recorded with its sentence alone.
+        kind: Option<String>,
+    },
     /// Stopped by a person.
     Cancelled,
 }
@@ -411,7 +419,7 @@ impl From<&RunStatus> for StageStatus {
             RunStatus::Waiting => Self::WaitingInput,
             RunStatus::Paused => Self::Paused,
             RunStatus::Complete => Self::Complete,
-            RunStatus::Error(_) => Self::Error,
+            RunStatus::Error { .. } => Self::Error,
             RunStatus::Cancelled => Self::Cancelled,
         }
     }

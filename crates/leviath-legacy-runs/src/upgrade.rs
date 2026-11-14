@@ -1,11 +1,11 @@
-//! Upgrading a run file in binary layout 2 to 8 to this build's layout, in
+//! Upgrading a run file in binary layout 2 to 9 to this build's layout, in
 //! place.
 //!
 //! The upgraded file is the old one with each spec, state and delta frame read
 //! as its layout wrote it and written again as this build writes it, and the
 //! code and owner frames copied byte for byte, since they did not change shape
-//! (see [`crate::layout2`] through [`crate::layout8`]). A spec in layout 7
-//! or 8 already has this build's shape, so it is copied byte for byte too. A frame torn by a
+//! (see [`crate::layout2`] through [`crate::layout9`]). A spec in layout 7,
+//! 8 or 9 already has this build's shape, so it is copied byte for byte too. A frame torn by a
 //! crash at the end of the old file is left out, as any reader of the file would cut it
 //! off. The old file is kept in the run's `legacy/` directory first, and the
 //! new one then replaces it in one step, so the run directory always holds one
@@ -22,7 +22,7 @@ use leviath_runtime::state::{RunState, StateDelta};
 
 use crate::ConvertError;
 use crate::write::LEGACY_DIR;
-use crate::{layout2, layout3, layout4, layout5, layout6, layout7, layout8};
+use crate::{layout2, layout3, layout4, layout5, layout6, layout7, layout8, layout9};
 
 /// What upgrading a run file did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +58,8 @@ enum Layout {
     Seven,
     /// Builds before a run accounted for every call it sent.
     Eight,
+    /// Builds before a failed run stated its kind.
+    Nine,
 }
 
 impl Layout {
@@ -71,6 +73,7 @@ impl Layout {
             (Self::Six, &layout6::FINGERPRINT),
             (Self::Seven, &layout7::FINGERPRINT),
             (Self::Eight, &layout8::FINGERPRINT),
+            (Self::Nine, &layout9::FINGERPRINT),
         ]
         .into_iter()
         .find(|(_, fingerprint)| codec::check_header(head, fingerprint).is_ok())
@@ -87,6 +90,7 @@ impl Layout {
             Self::Six => 6,
             Self::Seven => 7,
             Self::Eight => 8,
+            Self::Nine => 9,
         }
     }
 }
@@ -168,8 +172,8 @@ fn rewrite(
     for frame in &frames {
         let read = |e: codec::CodecError| unreadable(format!("{e}"));
         match frame.kind {
-            // A spec in layout 7 or 8 is this build's.
-            FrameKind::Spec if matches!(layout, Layout::Seven | Layout::Eight) => {
+            // A spec in layout 7, 8 or 9 is this build's.
+            FrameKind::Spec if matches!(layout, Layout::Seven | Layout::Eight | Layout::Nine) => {
                 let spec: RunSpec = frame.decode(bytes).map_err(read)?;
                 run_id.get_or_insert_with(|| spec.run_id.clone());
                 out.extend_from_slice(&bytes[frame.offset..frame.end()]);
@@ -180,7 +184,7 @@ fn rewrite(
                     Layout::Three => frame.decode::<layout3::RunSpec>(bytes).map(Into::into),
                     Layout::Four => frame.decode::<layout4::RunSpec>(bytes).map(Into::into),
                     Layout::Five => frame.decode::<layout5::RunSpec>(bytes).map(Into::into),
-                    Layout::Six | Layout::Seven | Layout::Eight => {
+                    Layout::Six | Layout::Seven | Layout::Eight | Layout::Nine => {
                         frame.decode::<layout6::RunSpec>(bytes).map(Into::into)
                     }
                 }
@@ -189,14 +193,16 @@ fn rewrite(
                 out.extend(crate::write::frame(FrameKind::Spec, &spec));
             }
             // A state and a delta are the same shape in layouts 2 and 3, in
-            // layouts 4 to 7, which hold this build's fan-out, and in layout
-            // 8, which also holds its stage records' resubmissions.
+            // layouts 4 to 7, which hold this build's fan-out, in layout 8,
+            // which also holds its stage records' resubmissions, and in
+            // layout 9, which also accounts for every call.
             FrameKind::State => {
                 let state: RunState = match layout {
                     Layout::Two | Layout::Three => {
                         frame.decode::<layout3::RunState>(bytes).map(Into::into)
                     }
                     Layout::Eight => frame.decode::<layout8::RunState>(bytes).map(Into::into),
+                    Layout::Nine => frame.decode::<layout9::RunState>(bytes).map(Into::into),
                     _ => frame.decode::<layout7::RunState>(bytes).map(Into::into),
                 }
                 .map_err(read)?;
@@ -208,6 +214,7 @@ fn rewrite(
                         frame.decode::<layout3::StateDelta>(bytes).map(Into::into)
                     }
                     Layout::Eight => frame.decode::<layout8::StateDelta>(bytes).map(Into::into),
+                    Layout::Nine => frame.decode::<layout9::StateDelta>(bytes).map(Into::into),
                     _ => frame.decode::<layout7::StateDelta>(bytes).map(Into::into),
                 }
                 .map_err(read)?;

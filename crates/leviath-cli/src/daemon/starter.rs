@@ -498,7 +498,14 @@ pub(crate) fn record_failed(
     let _ = leviath_runtime::host::mark_refused(path);
     let mut writer = leviath_runtime::runfile::RunFileWriter::open(path, Default::default())?;
     let mut failed = state.clone();
-    failed.status = leviath_runtime::state::RunStatus::Error(issues.to_string());
+    failed.status = leviath_runtime::state::RunStatus::Error {
+        message: issues.to_string(),
+        kind: Some(
+            leviath_runtime::RunFailureKind::StartRefused
+                .label()
+                .to_string(),
+        ),
+    };
     failed.phase = leviath_runtime::state::PipelinePhase::Done;
     failed.settle_ledger();
     let events = vec![leviath_runtime::state::RunEvent::Log(issues.to_string())];

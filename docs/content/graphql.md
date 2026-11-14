@@ -358,7 +358,7 @@ here" rather than failing.
 
 ```graphql
 query Lookups($ids: [ID!]!) {
-  run(id: "coder-1788924523-abc123") { id title status error }
+  run(id: "coder-1788924523-abc123") { id title status error errorKind }
   blueprint(name: "coder") { id name version digest source }
   mcpServer(name: "docs") { id name transport endpoint }
   script(ref: { kind: TOOL, name: "summarise", blueprintName: "coder" }) { id path compiles }
@@ -927,7 +927,7 @@ same questions `lev run show` and the REST `spec`, `state`, `deltas` and `graph`
     start: state(at: 0) { seq status cursor { stage } }
     deltas(from: 1, to: 20) {
       seq at
-      changes { __typename ... on StatusChangeOutput { status error } }
+      changes { __typename ... on StatusChangeOutput { status error errorKind } }
       events { __typename ... on InferenceStepOutput { model finishReason } }
     }
     graph {
