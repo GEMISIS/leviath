@@ -288,6 +288,22 @@ same list.
 
 ### Fixed
 
+- A conversation that loses turns in the middle of a stage keeps the stage's system prompt cached
+  (#1139). When the dialogue evicted its oldest turns, was compacted, or a turn in it was rewritten,
+  the prompt frame started over: the system prompt was laid out again with every region's gain in
+  place, everything behind its stable start was written to the cache again (about 40,000 tokens a
+  time in a measured review stage), and the messages went out uncached. The frame now keeps its
+  system blocks when only the dialogue (or the messages leading it) changed, sends the region
+  gains it still owes ahead of the dialogue, and marks only the last message, so the system prompt
+  is read back whole and the dialogue is written once. A region rewritten in place, a checklist
+  that gains an item, and the other changes a turn cannot say still show the window afresh.
+- On a model that takes cache markers through OpenRouter, a marker no longer changes the shape of
+  the message it sits on (#1139). A marked text turn went out as a one-part list and an unmarked
+  one as a string, so when the next request moved the marker to a later message, the message it
+  left changed its bytes ahead of the entry that request meant to read. Text now goes out as
+  parts whether marked or not, and a marker only adds `cache_control`. The same holds for system
+  blocks: one the marker leaves when a growing region gains a chunk no longer turns from a list
+  into a string. A model without markers is sent exactly what it was before.
 - A media stage that fails for making none of its media quotes the model's own words and opens
   with a tag a caller can match (#1136). After three replies without the image, video or audio the
   stage makes, the error gave only how many characters the last reply held, though the nudge sent

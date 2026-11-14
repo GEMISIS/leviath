@@ -784,6 +784,62 @@ mod tests {
         assert_eq!(provider_system_breakpoints(&assembled.system_blocks), 2);
     }
 
+    /// A conversation that evicted its oldest turns while a region gained
+    /// keeps the stage's system prompt, so the prefix counts as held, and
+    /// marks only its last message: none is promised to repeat.
+    #[test]
+    fn an_eviction_keeps_the_prefix_and_marks_only_the_last_message() {
+        let mut window = ContextWindow::new(100_000);
+        window.add_region(stamped_region("brief", RegionKind::Pinned, 1));
+        window.add_region(Region::new(
+            "conversation".to_string(),
+            RegionKind::SlidingWindow {
+                max_items: 3,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
+            100_000,
+        ));
+        let say = |window: &mut ContextWindow, text: &str| {
+            window
+                .add_typed_entry(
+                    "conversation",
+                    leviath_core::EntryKind::UserMessage,
+                    text.to_string(),
+                    10,
+                )
+                .unwrap();
+        };
+        let meta = |frame: Option<PromptFrame>, iteration: usize, previous: Option<u64>| {
+            crate::custom_region::AssembleMeta {
+                stage_name: "work".to_string(),
+                stage_iterations: iteration,
+                previous_system_hash: previous,
+                frame,
+                ..Default::default()
+            }
+        };
+        say(&mut window, "one");
+        say(&mut window, "two");
+        let first = window.assemble_with_meta(&meta(None, 0, None));
+        say(&mut window, "three");
+        say(&mut window, "four");
+        window
+            .add_to_region("brief", "and more".to_string(), 5)
+            .unwrap();
+        let second =
+            window.assemble_with_meta(&meta(Some(first.frame), 1, Some(first.system_hash)));
+
+        assert_eq!(second.system_hash, first.system_hash);
+        let marked: Vec<usize> = second
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.cache_breakpoint)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(marked, [second.messages.len() - 1]);
+    }
+
     #[test]
     fn assemble_stays_within_four_cache_breakpoints() {
         let mut window = ContextWindow::new(1_000_000);

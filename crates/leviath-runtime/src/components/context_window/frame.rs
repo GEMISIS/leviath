@@ -38,16 +38,31 @@
 //! result leaves ("in your context under the 'codebase' heading") stays true:
 //! the continuation is headed by the region's name.
 //!
-//! That only holds while every change is an append, so anything else shows the
-//! window afresh, as it would have been shown before: a re-read that replaces
-//! an entry, a `context_write` over a region, a compaction, a cleared, evicted
-//! or hidden region, a region whose rendering is not its entries in order (a
-//! checklist, a script's), a stored part, a turn of the dialogue written into
-//! another region, and a conversation that lost or rewrote a turn (eviction,
-//! compaction). So does a new stage, and the first call of every stage, where
-//! the tools and hints in front of the regions change anyway. Showing afresh
-//! costs one cache write of what follows the first changed block, which is
-//! what every call cost before.
+//! That only holds while every change to a region is an append, so anything
+//! else shows the window afresh, as it would have been shown before: a re-read
+//! that replaces an entry, a `context_write` over a region, a compaction of a
+//! region, a cleared, evicted or hidden region, a region whose rendering is not
+//! its entries in order (a checklist, a script's), a stored part, a turn of the
+//! dialogue written into another region, and a block of no region that moved.
+//! So does a new stage, and the first call of every stage, where the tools and
+//! hints in front of the regions change anyway. Showing afresh costs one cache
+//! write of what follows the first changed block.
+//!
+//! A conversation that lost or rewrote a turn (its oldest turns evicted, the
+//! dialogue compacted, a turn rewritten), or a head that changed, does not
+//! show the window afresh. The regions the system prompt renders did not
+//! change in any way a turn cannot say; only the dialogue behind it did. So
+//! the frame keeps its system blocks, and a provider reads the whole system
+//! prompt back. What it cannot keep is the messages: none is promised to
+//! repeat, so the request marks only its last message and the dialogue is
+//! written to the cache once, to be read from the next request on. The updates
+//! gathered so far are still owed to the model, since their regions' gains are
+//! in no system block, and the messages they followed may be gone, so they
+//! move to the front of the messages in the order they were gained; what the
+//! regions gained since the last request follows the dialogue, as on any
+//! request. Before this, one eviction in the middle of a stage wrote the system
+//! prompt behind its stable start again, measured at about 40,000 tokens a
+//! time, and sent the dialogue uncached.
 //!
 //! Volatility and cache hints keep their meaning: the blocks a stage holds
 //! still are the ones assembly sorted and hinted when it showed them, so the
@@ -170,24 +185,36 @@ pub(crate) fn frame(previous: Option<&PromptFrame>, live: Live<'_>) -> Framed {
     let carried = previous
         .filter(|p| p.stage == live.stage && live.iteration > 0 && p.loose == loose)
         .and_then(|p| {
+            let turns = gained(p, &shown, &live.regions)?;
             let messages = base(&live, Some(&p.in_place));
             let digests = digests(&messages);
-            if !digests.starts_with(&p.messages) {
-                return None;
-            }
-            let turns = gained(p, &shown, &live.regions)?;
             Some((p, turns, messages, digests))
         });
     let (mut frame, repeated, messages, digests) = match carried {
         Some((previous, turns, messages, digests)) => {
             let mut frame = previous.clone();
+            // The dialogue lost or rewrote a turn (an eviction, a compaction,
+            // a changed head): the system prompt still holds, but no message
+            // is promised to repeat. The updates owed so far go to the front,
+            // in the order they were gained, since the messages they followed
+            // may be gone.
+            let held = digests.starts_with(&previous.messages);
+            if !held {
+                for update in &mut frame.updates {
+                    update.after = 0;
+                }
+            }
             if !turns.is_empty() {
                 frame.updates.push(Update {
                     after: messages.len(),
                     turns,
                 });
             }
-            (frame, previous.sent, messages, digests)
+            let repeated = match held {
+                true => previous.sent,
+                false => 0,
+            };
+            (frame, repeated, messages, digests)
         }
         None => {
             let messages = base(&live, None);

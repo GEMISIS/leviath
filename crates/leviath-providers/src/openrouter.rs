@@ -77,31 +77,40 @@ fn replay_reasoning(
     }
 }
 
-/// Put an ephemeral `cache_control` on the last text in `messages`, the chat
-/// messages one turn converted to, and say whether there was any.
+/// Send each text `content` in `messages` as a single text part, the one form
+/// a marker can be added to, so a message reads the same marked or not.
 ///
-/// A string `content` becomes a single text part carrying the marker, which a
-/// `tool` message takes on this route as well as a user or assistant one. A
-/// turn that only calls tools has no text at all, and is left as it is.
+/// For a model that takes cache markers. A marker used to turn a string into a
+/// one-part list, and the next request, which marks a later message, sent the
+/// same message as a string again: the bytes ahead of the marker it means to
+/// read back had changed. Empty text stays as it is: there is nothing to mark,
+/// and an empty text part is not something to start sending. A `tool` message
+/// takes the list form on this route as well as a user or assistant one.
+#[cfg(feature = "openrouter")]
+fn text_as_parts(messages: &mut [serde_json::Value]) {
+    for message in messages {
+        if let Some(serde_json::Value::String(text)) = message.get_mut("content")
+            && !text.is_empty()
+        {
+            let text = std::mem::take(text);
+            message["content"] = serde_json::json!([{ "type": "text", "text": text }]);
+        }
+    }
+}
+
+/// Put an ephemeral `cache_control` on the last text part in `messages`, the
+/// chat messages one turn converted to (text already in parts, see
+/// [`text_as_parts`]), and say whether there was any. A turn that only calls
+/// tools has no text at all, and is left as it is.
 #[cfg(feature = "openrouter")]
 fn mark_last_text(messages: &mut [serde_json::Value]) -> bool {
     let marker = serde_json::json!({ "type": "ephemeral" });
     for message in messages.iter_mut().rev() {
-        match message.get_mut("content") {
-            Some(serde_json::Value::String(text)) if !text.is_empty() => {
-                let text = std::mem::take(text);
-                message["content"] = serde_json::json!([
-                    { "type": "text", "text": text, "cache_control": marker }
-                ]);
-                return true;
-            }
-            Some(serde_json::Value::Array(parts)) => {
-                if let Some(part) = parts.iter_mut().rev().find(|p| p["type"] == "text") {
-                    part["cache_control"] = marker;
-                    return true;
-                }
-            }
-            _ => {}
+        if let Some(serde_json::Value::Array(parts)) = message.get_mut("content")
+            && let Some(part) = parts.iter_mut().rev().find(|p| p["type"] == "text")
+        {
+            part["cache_control"] = marker;
+            return true;
         }
     }
     false
@@ -297,21 +306,29 @@ impl OpenRouterProvider {
             true => Vec::new(),
             false => prefix::system_messages(&request.system),
         };
+        // Each block goes out as one text part whether or not it carries a
+        // marker, so a marker that moves to a later block on the next request
+        // changes no byte of the block it left but its own `cache_control`.
+        // An empty block keeps the string it always had unless marked.
         let marked = request.system.iter().enumerate();
         for (index, block) in marked.filter(|_| is_anthropic) {
-            match system_breakpoints.contains(&index) {
-                true => messages.push(serde_json::json!({
-                    "role": "system",
-                    "content": [{
-                        "type": "text",
-                        "text": block.text,
-                        "cache_control": { "type": "ephemeral" }
-                    }],
-                })),
-                false => {
-                    messages.push(serde_json::json!({ "role": "system", "content": block.text }))
+            let mut turn = serde_json::json!({ "role": "system", "content": block.text });
+            text_as_parts(std::slice::from_mut(&mut turn));
+            if system_breakpoints.contains(&index) {
+                match &mut turn["content"] {
+                    serde_json::Value::Array(parts) => {
+                        parts[0]["cache_control"] = serde_json::json!({ "type": "ephemeral" });
+                    }
+                    content => {
+                        *content = serde_json::json!([{
+                            "type": "text",
+                            "text": block.text,
+                            "cache_control": { "type": "ephemeral" }
+                        }]);
+                    }
                 }
             }
+            messages.push(turn);
         }
         // A breakpoint that landed on a turn with no text to carry it (a turn
         // that only calls tools) is owed to the next turn that has some.
@@ -319,39 +336,24 @@ impl OpenRouterProvider {
         for msg in &request.messages {
             let mark =
                 is_anthropic && (msg.cache_breakpoint || owed) && breakpoint_count < message_budget;
-            match &msg.content {
-                // A cache-breakpointed text turn (Anthropic-via-OpenRouter) keeps
-                // its ephemeral cache_control wrapper.
-                crate::provider::MessageContent::Text(text) if mark => {
-                    breakpoint_count += 1;
-                    owed = false;
-                    let mut turn = serde_json::json!({
-                        "role": msg.role,
-                        "content": [{
-                            "type": "text",
-                            "text": text,
-                            "cache_control": { "type": "ephemeral" }
-                        }],
-                    });
-                    replay_reasoning(std::slice::from_mut(&mut turn), msg, request, &asked);
-                    messages.push(turn);
-                }
-                // Everything else - including tool_use/tool_result block history -
-                // goes through the OpenAI-format conversion so it round-trips on
-                // non-Anthropic models instead of being sent as raw block JSON.
-                // A breakpoint on a tool turn goes on the last text it became,
-                // which is where an agent's breakpoint almost always lands.
-                _ => {
-                    let mut converted =
-                        crate::openai_compat::message_to_openai(&msg.role, &msg.content);
-                    if mark {
-                        owed = !mark_last_text(&mut converted);
-                        breakpoint_count += usize::from(!owed);
-                    }
-                    replay_reasoning(&mut converted, msg, request, &asked);
-                    messages.extend(converted);
-                }
+            // Every turn, tool_use/tool_result block history included, goes
+            // through the OpenAI-format conversion so it round-trips on
+            // non-Anthropic models instead of being sent as raw block JSON.
+            // For a model that takes markers its text goes out as parts
+            // whether or not it is marked, so a marker that moves to a later
+            // message on the next request changes no byte behind it but its
+            // own. A breakpoint goes on the last text the turn became, which
+            // is where an agent's breakpoint almost always lands.
+            let mut converted = crate::openai_compat::message_to_openai(&msg.role, &msg.content);
+            if is_anthropic {
+                text_as_parts(&mut converted);
             }
+            if mark {
+                owed = !mark_last_text(&mut converted);
+                breakpoint_count += usize::from(!owed);
+            }
+            replay_reasoning(&mut converted, msg, request, &asked);
+            messages.extend(converted);
         }
 
         // A Mistral upstream refuses a user turn after a tool result, which is
@@ -2027,8 +2029,12 @@ mod tests {
         // First message should have cache_control in content block (anthropic model)
         assert!(msgs[0]["content"].is_array());
         assert_eq!(msgs[0]["content"][0]["cache_control"]["type"], "ephemeral");
-        // Second message should be simple string content
-        assert!(msgs[1]["content"].is_string());
+        // The second is in the same form, without the marker: a marker never
+        // changes the shape of a message.
+        assert_eq!(
+            msgs[1]["content"],
+            serde_json::json!([{ "type": "text", "text": "Second" }])
+        );
     }
 
     /// A turn of tool calls, then the turn answering them, as an agent's
@@ -2207,13 +2213,17 @@ mod tests {
         assert_eq!(msgs[0]["content"][0]["cache_control"]["type"], "ephemeral");
         // Markers place its cache: it gets no key.
         assert_eq!(body.get("prompt_cache_key"), None);
-        // A block too short to mark goes as plain text, a message of its own.
+        // A block too short to mark goes as a message of its own, in the same
+        // one-part form without the marker.
         let mut short = request.clone();
         short.system[0].text = "Be brief.".to_string();
         let body = provider.build_request_body(&short);
         assert_eq!(
             body["messages"][0],
-            serde_json::json!({"role": "system", "content": "Be brief."})
+            serde_json::json!({
+                "role": "system",
+                "content": [{ "type": "text", "text": "Be brief." }]
+            })
         );
     }
 
@@ -2496,7 +2506,10 @@ mod tests {
 
         let body = provider.build_request_body(&request);
         let msgs = body["messages"].as_array().unwrap();
-        let bp_count = msgs.iter().filter(|m| m["content"].is_array()).count();
+        let bp_count = msgs
+            .iter()
+            .filter(|m| m["content"][0].get("cache_control").is_some())
+            .count();
         assert_eq!(bp_count, 4);
     }
 

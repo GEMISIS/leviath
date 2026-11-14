@@ -235,12 +235,8 @@ fn a_change_that_is_not_an_append_shows_the_window_afresh() {
     // Another stage, and the first request of this one again.
     afresh(&frame(Some(&first.frame), live("t", 1, &regions)), &regions);
     afresh(&frame(Some(&first.frame), live("s", 0, &regions)), &regions);
-    // The conversation lost or rewrote a turn.
-    let rewritten = with_talk(vec![pinned("codebase", &["a", "b"])], &["x"]);
-    afresh(
-        &frame(Some(&first.frame), live("s", 1, &rewritten)),
-        &rewritten,
-    );
+    // A conversation that lost or rewrote a turn keeps the system prompt: see
+    // `a_conversation_that_evicted_turns_keeps_the_system_prompt`.
     // An entry replaced, as a re-read of the same file does.
     let replaced = with_talk(vec![pinned("codebase", &["b", "a2"])], &["go"]);
     afresh(
@@ -420,4 +416,265 @@ fn a_turn_is_never_placed_between_a_call_and_its_result() {
         leviath_providers::MessageContent::Blocks(b)
             if matches!(b[0], leviath_providers::ContentBlock::ToolResult { .. })
     ));
+}
+
+/// How many of `messages` say exactly `text`.
+fn sent_times(messages: &[Message], text: &str) -> usize {
+    texts(messages).iter().filter(|t| *t == text).count()
+}
+
+const GAINED_B: &str = "user: Text(\"## codebase (continued)\\nb\")";
+const GAINED_C: &str = "user: Text(\"## codebase (continued)\\nc\")";
+const GAINED_D: &str = "user: Text(\"## codebase (continued)\\nd\")";
+
+/// The conversation evicted its oldest turns while `codebase` gained: the
+/// system prompt is the one the last request sent, the update owed from
+/// before moves to the front, the new gain follows the dialogue, nothing is
+/// promised to repeat, and nothing is sent twice.
+#[test]
+fn a_conversation_that_evicted_turns_keeps_the_system_prompt() {
+    let regions = with_talk(vec![pinned("codebase", &["a"])], &["u0", "a0"]);
+    let first = frame(None, live("s", 0, &regions));
+    let regions = with_talk(
+        vec![pinned("codebase", &["a", "b"])],
+        &["u0", "a0", "u1", "a1"],
+    );
+    let second = frame(Some(&first.frame), live("s", 1, &regions));
+    assert_eq!(second.repeated, 2);
+
+    let evicted = with_talk(
+        vec![pinned("codebase", &["a", "b", "c"])],
+        &["u1", "a1", "u2"],
+    );
+    let third = frame(Some(&second.frame), live("s", 2, &evicted));
+    assert_eq!(system_text(&third), system_text(&first));
+    assert_eq!(third.system_hash, first.system_hash);
+    assert_eq!(third.repeated, 0);
+    assert_eq!(
+        texts(&third.messages),
+        [
+            GAINED_B,
+            "user: Text(\"u1\")",
+            "assistant: Text(\"a1\")",
+            "user: Text(\"u2\")",
+            GAINED_C,
+        ]
+    );
+    for said in [GAINED_B, GAINED_C, "user: Text(\"u1\")"] {
+        assert_eq!(sent_times(&third.messages, said), 1, "{said}");
+    }
+    assert_eq!(third.frame.sent, 5);
+}
+
+/// An eviction with no update owed keeps the system prompt and sends the
+/// dialogue as the window holds it now.
+#[test]
+fn an_eviction_with_no_update_owed_sends_the_dialogue_as_it_is() {
+    let regions = with_talk(vec![pinned("codebase", &["a"])], &["u0", "a0", "u1"]);
+    let first = frame(None, live("s", 0, &regions));
+    let evicted = with_talk(vec![pinned("codebase", &["a"])], &["u1", "a1", "u2"]);
+    let second = frame(Some(&first.frame), live("s", 1, &evicted));
+    assert_eq!(system_text(&second), system_text(&first));
+    assert_eq!(second.system_hash, first.system_hash);
+    assert_eq!(second.repeated, 0);
+    assert_eq!(
+        texts(&second.messages),
+        texts(&frame(None, live("s", 0, &evicted)).messages)
+    );
+}
+
+/// The request after a soft restart carries as any other: it repeats all the
+/// soft restart sent and only appends.
+#[test]
+fn the_request_after_an_eviction_carries_normally() {
+    let regions = with_talk(vec![pinned("codebase", &["a"])], &["u0", "a0"]);
+    let first = frame(None, live("s", 0, &regions));
+    let regions = with_talk(vec![pinned("codebase", &["a", "b"])], &["u0", "a0", "u1"]);
+    let second = frame(Some(&first.frame), live("s", 1, &regions));
+    let evicted = with_talk(vec![pinned("codebase", &["a", "b", "c"])], &["u1", "a1"]);
+    let third = frame(Some(&second.frame), live("s", 2, &evicted));
+    assert_eq!(third.repeated, 0);
+
+    let regions = with_talk(
+        vec![pinned("codebase", &["a", "b", "c", "d"])],
+        &["u1", "a1", "u2"],
+    );
+    let fourth = frame(Some(&third.frame), live("s", 3, &regions));
+    assert_eq!(fourth.system_hash, first.system_hash);
+    assert_eq!(fourth.repeated, third.messages.len());
+    assert_eq!(
+        texts(&fourth.messages)[..third.messages.len()],
+        texts(&third.messages)[..]
+    );
+    assert_eq!(
+        texts(&fourth.messages)[third.messages.len()..],
+        ["user: Text(\"u2\")", GAINED_D]
+    );
+}
+
+/// Two evictions in one stage, the second on the very request after the
+/// first: each keeps the system prompt, and every update owed goes to the
+/// front in the order it was gained, once.
+#[test]
+fn two_evictions_in_one_stage_each_keep_the_system_prompt() {
+    let regions = with_talk(vec![pinned("codebase", &["a"])], &["u0", "a0"]);
+    let first = frame(None, live("s", 0, &regions));
+    let regions = with_talk(
+        vec![pinned("codebase", &["a", "b"])],
+        &["u0", "a0", "u1", "a1"],
+    );
+    let second = frame(Some(&first.frame), live("s", 1, &regions));
+    let evicted = with_talk(
+        vec![pinned("codebase", &["a", "b", "c"])],
+        &["u1", "a1", "u2", "a2"],
+    );
+    let third = frame(Some(&second.frame), live("s", 2, &evicted));
+    let evicted_again = with_talk(
+        vec![pinned("codebase", &["a", "b", "c", "d"])],
+        &["u2", "a2", "u3"],
+    );
+    let fourth = frame(Some(&third.frame), live("s", 3, &evicted_again));
+    assert_eq!(system_text(&fourth), system_text(&first));
+    assert_eq!(fourth.system_hash, first.system_hash);
+    assert_eq!(fourth.repeated, 0);
+    assert_eq!(
+        texts(&fourth.messages),
+        [
+            GAINED_B,
+            GAINED_C,
+            "user: Text(\"u2\")",
+            "assistant: Text(\"a2\")",
+            "user: Text(\"u3\")",
+            GAINED_D,
+        ]
+    );
+}
+
+/// An eviction together with a region rewritten in place is a change a turn
+/// cannot say: the window is shown afresh, as before.
+#[test]
+fn an_eviction_with_a_region_rewritten_shows_the_window_afresh() {
+    let regions = with_talk(vec![pinned("codebase", &["a", "b"])], &["u0", "a0", "u1"]);
+    let first = frame(None, live("s", 0, &regions));
+    let moved = with_talk(vec![pinned("codebase", &["b", "a2"])], &["u1", "a1"]);
+    let framed = frame(Some(&first.frame), live("s", 1, &moved));
+    assert_eq!(framed.repeated, 0);
+    assert_eq!(system_text(&framed), ["## codebase\nb\n\na2"]);
+    assert_ne!(framed.system_hash, first.system_hash);
+}
+
+/// On a stage's first request, or under another stage, an eviction shows the
+/// window afresh, its gains in place.
+#[test]
+fn an_eviction_on_a_first_request_or_another_stage_shows_afresh() {
+    let regions = with_talk(vec![pinned("codebase", &["a"])], &["u0", "a0", "u1"]);
+    let first = frame(None, live("s", 0, &regions));
+    let evicted = with_talk(vec![pinned("codebase", &["a", "b"])], &["u1", "a1"]);
+    for (stage, iteration) in [("s", 0), ("t", 1)] {
+        let framed = frame(Some(&first.frame), live(stage, iteration, &evicted));
+        assert_eq!(framed.repeated, 0);
+        assert_eq!(system_text(&framed), ["## codebase\na\n\nb"]);
+        assert_eq!(
+            texts(&framed.messages),
+            ["user: Text(\"u1\")", "assistant: Text(\"a1\")"]
+        );
+    }
+}
+
+/// A head that changed while the regions only gained keeps the system
+/// prompt: the new head leads, and the gain follows the dialogue.
+#[test]
+fn a_changed_head_keeps_the_system_prompt() {
+    let lead = |text: &str| Message {
+        role: "user".to_string(),
+        content: text.into(),
+        cache_breakpoint: false,
+        reasoning: None,
+    };
+    let regions = with_talk(vec![pinned("codebase", &["a"])], &["go"]);
+    let mut first_live = live("s", 0, &regions);
+    first_live.head = vec![lead("parts")];
+    let first = frame(None, first_live);
+    let regions = with_talk(vec![pinned("codebase", &["a", "b"])], &["go"]);
+    let mut moved = live("s", 1, &regions);
+    moved.head = vec![lead("other parts")];
+    let framed = frame(Some(&first.frame), moved);
+    assert_eq!(system_text(&framed), system_text(&first));
+    assert_eq!(framed.system_hash, first.system_hash);
+    assert_eq!(framed.repeated, 0);
+    assert_eq!(
+        texts(&framed.messages),
+        [
+            "user: Text(\"other parts\")",
+            "user: Text(\"go\")",
+            GAINED_B
+        ]
+    );
+}
+
+/// The conversation that survives an eviction can start with a result whose
+/// call was evicted. That result is stripped before anything is placed, so
+/// an update moved to the front lands ahead of the dialogue and never next to
+/// a result with no call.
+#[test]
+fn an_update_moved_to_the_front_never_splits_a_call_from_its_result() {
+    let call = leviath_core::SerializedToolCall {
+        id: "c1".to_string(),
+        name: "read_file".to_string(),
+        arguments: serde_json::json!({}),
+        thought_signature: None,
+    };
+    let result = EntryKind::ToolResult {
+        tool_call_id: "c1".to_string(),
+        tool_name: "read_file".to_string(),
+        is_error: false,
+    };
+    let conversation = |entries: &[(&str, EntryKind)]| {
+        let mut region = Region::new(CONVERSATION.to_string(), RegionKind::Pinned, 10_000);
+        for (text, kind) in entries {
+            region.add_typed_entry(*text, 2, kind.clone()).unwrap();
+        }
+        region
+    };
+    let asked = EntryKind::AssistantTurn {
+        tool_calls: vec![call],
+    };
+    let replied = EntryKind::AssistantTurn { tool_calls: vec![] };
+    let early = [
+        ("go", EntryKind::UserMessage),
+        ("", asked),
+        ("[in codebase]", result.clone()),
+        ("ok", replied.clone()),
+    ];
+    let regions = vec![pinned("codebase", &["a"]), conversation(&early)];
+    let first = frame(None, live("s", 0, &regions));
+    let mut grown = early.to_vec();
+    grown.push(("more", EntryKind::UserMessage));
+    let regions = vec![pinned("codebase", &["a", "b"]), conversation(&grown)];
+    let second = frame(Some(&first.frame), live("s", 1, &regions));
+
+    // The user's turn and the call are evicted; the result survives.
+    let survived = [
+        ("[in codebase]", result),
+        ("ok", replied.clone()),
+        ("more", EntryKind::UserMessage),
+        ("done", replied),
+    ];
+    let regions = vec![
+        pinned("codebase", &["a", "b", "c"]),
+        conversation(&survived),
+    ];
+    let third = frame(Some(&second.frame), live("s", 2, &regions));
+    assert_eq!(third.system_hash, first.system_hash);
+    assert_eq!(third.repeated, 0);
+    assert_eq!(
+        texts(&third.messages),
+        [
+            GAINED_B,
+            "assistant: Text(\"ok\")",
+            "user: Text(\"more\")",
+            "assistant: Text(\"done\")",
+            GAINED_C,
+        ]
+    );
 }

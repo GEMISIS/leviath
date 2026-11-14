@@ -1,4 +1,5 @@
-//! Reasoning kept across a tool call, and a bare name found in the listing.
+//! Reasoning kept across a tool call, a bare name found in the listing, and
+//! what a cache marker changes in two requests in a row.
 
 use super::*;
 use crate::learned::LearnedModel;
@@ -488,4 +489,386 @@ fn a_bare_name_finds_its_listed_price() {
     assert!(provider.pricing("vision-1").is_some());
     assert!(provider.pricing("acme/vision-1").is_some());
     assert!(provider.pricing("other").is_none());
+}
+
+// ─── two requests in a row ──────────────────────────────────────────────
+
+/// `body` with every `cache_control` field removed.
+fn unmarked(mut body: serde_json::Value) -> serde_json::Value {
+    fn strip(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(fields) => {
+                fields.remove("cache_control");
+                fields.values_mut().for_each(strip);
+            }
+            serde_json::Value::Array(items) => items.iter_mut().for_each(strip),
+            _ => {}
+        }
+    }
+    strip(&mut body);
+    body
+}
+
+/// Which of `body`'s messages carry a `cache_control` marker.
+fn marked_messages(body: &serde_json::Value) -> Vec<usize> {
+    body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.to_string().contains("cache_control"))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// A request on an Anthropic model repeats the one before it up to that
+/// request's last marked message, byte for byte, however large the reasoning
+/// turn between them: two reasoning details, one of several thousand
+/// characters of text and of signature. A cache miss on such a request was
+/// once seen through OpenRouter; this pins that what Leviath sends is not
+/// why.
+#[test]
+fn a_large_reasoning_turn_between_two_requests_keeps_the_prefix() {
+    let provider = provider_at(None);
+    let model = "anthropic/claude-sonnet-5.5";
+    let said = |role: &str, text: &str, marked: bool| Message {
+        role: role.to_string(),
+        content: text.into(),
+        cache_breakpoint: marked,
+        reasoning: None,
+    };
+    let called = |id: &str, text: Option<&str>, details: &[serde_json::Value]| {
+        let mut blocks = Vec::new();
+        if let Some(text) = text {
+            blocks.push(ContentBlock::Text {
+                text: text.to_string(),
+            });
+        }
+        blocks.push(ContentBlock::ToolUse {
+            id: id.to_string(),
+            name: "read_file".to_string(),
+            input: json!({ "path": "src/lib.rs" }),
+            thought_signature: None,
+        });
+        Message {
+            role: "assistant".to_string(),
+            content: MessageContent::Blocks(blocks),
+            cache_breakpoint: false,
+            reasoning: crate::openai_compat::details::seal(model, details),
+        }
+    };
+    let answered = |id: &str| Message {
+        role: "user".to_string(),
+        content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+            tool_use_id: id.to_string(),
+            content: "fn a() {}".to_string(),
+            is_error: false,
+        }]),
+        cache_breakpoint: false,
+        reasoning: None,
+    };
+    let system = vec![
+        crate::provider::SystemBlock {
+            text: "You review code. ".repeat(600),
+            cache_hint: leviath_core::CacheHint::Always,
+            region: String::new(),
+            volatility: leviath_core::Volatility::Stable,
+        },
+        crate::provider::SystemBlock {
+            text: format!("## codebase\n{}", "fn a() {}\n".repeat(900)),
+            cache_hint: leviath_core::CacheHint::UntilChanged,
+            region: "codebase".to_string(),
+            volatility: leviath_core::Volatility::Grows,
+        },
+    ];
+    let small = [json!({ "type": "reasoning.text", "text": "Read it.", "signature": "s1" })];
+    let earlier = vec![
+        said("user", "Review the crate.", false),
+        said("assistant", "I will read lib.rs first.", true),
+        called("call_1", None, &small),
+        answered("call_1"),
+        said("user", "## codebase (continued)\nfn b() {}", true),
+    ];
+    let mut first = request(model, earlier.clone());
+    first.system = system.clone();
+
+    let large = [
+        json!({
+            "type": "reasoning.text",
+            "text": "The parser accepts trailing commas. ".repeat(250),
+            "signature": "Eq".repeat(3_000),
+        }),
+        json!({ "type": "reasoning.text", "text": "Now the tests.", "signature": "s2" }),
+    ];
+    let mut later = earlier;
+    later[1].cache_breakpoint = false;
+    later.extend([
+        called("call_2", Some(""), &large),
+        answered("call_2"),
+        said("user", "## codebase (continued)\nfn c() {}", true),
+    ]);
+    let mut second = request(model, later);
+    second.system = system;
+
+    let (a, b) = (
+        provider.build_request_body(&first),
+        provider.build_request_body(&second),
+    );
+    let (a_messages, b_messages) = (
+        a["messages"].as_array().unwrap(),
+        b["messages"].as_array().unwrap(),
+    );
+    // The system messages, markers and all.
+    let system_of = |messages: &[serde_json::Value]| {
+        messages
+            .iter()
+            .filter(|m| m["role"] == "system")
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(system_of(a_messages), system_of(b_messages));
+    assert_eq!(system_of(a_messages).len(), 2);
+    // Every message of the first, unmarked, leads the second.
+    let (a_plain, b_plain) = (unmarked(a.clone()), unmarked(b.clone()));
+    let (a_plain, b_plain) = (
+        a_plain["messages"].as_array().unwrap(),
+        b_plain["messages"].as_array().unwrap(),
+    );
+    assert!(b_plain.len() > a_plain.len());
+    for (index, message) in a_plain.iter().enumerate() {
+        assert_eq!(
+            serde_json::to_string(&b_plain[index]).unwrap(),
+            serde_json::to_string(message).unwrap(),
+            "message {index}"
+        );
+    }
+    // The second marks the message the first marked last, and its own last.
+    let first_last = *marked_messages(&a).last().unwrap();
+    assert_eq!(first_last, a_messages.len() - 1);
+    let second_marks = marked_messages(&b);
+    assert!(second_marks.contains(&first_last), "{second_marks:?}");
+    assert!(
+        second_marks.contains(&(b_messages.len() - 1)),
+        "{second_marks:?}"
+    );
+    // The large details ride on the second's new assistant turn.
+    let replayed_large = b_messages
+        .iter()
+        .filter_map(|m| m.get("reasoning_details"))
+        .any(|d| d.as_array().is_some_and(|d| d.len() == 2));
+    assert!(replayed_large);
+}
+
+/// One message of each kind a conversation carries, each marked when
+/// `marked`: user text, assistant text, an assistant turn with text and a
+/// tool call, a tool result, a turn with empty text, and a blocks turn of
+/// text alone.
+fn every_kind(marked: bool) -> Vec<Message> {
+    let turn = |role: &str, content: MessageContent| Message {
+        role: role.to_string(),
+        content,
+        cache_breakpoint: marked,
+        reasoning: None,
+    };
+    vec![
+        turn("user", "Review the crate.".into()),
+        turn("assistant", "I will read lib.rs first.".into()),
+        turn(
+            "assistant",
+            MessageContent::Blocks(vec![
+                ContentBlock::Text {
+                    text: "Reading.".to_string(),
+                },
+                call_block(),
+            ]),
+        ),
+        turn(
+            "user",
+            MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                tool_use_id: "call_1".to_string(),
+                content: "fn a() {}".to_string(),
+                is_error: false,
+            }]),
+        ),
+        turn("assistant", "".into()),
+        turn(
+            "user",
+            MessageContent::Blocks(vec![ContentBlock::Text {
+                text: "## codebase (continued)\nfn b() {}".to_string(),
+            }]),
+        ),
+    ]
+}
+
+/// On a model that takes markers, a marker adds its `cache_control` and
+/// changes nothing else: each kind of message is the same marked or not.
+#[test]
+fn a_marker_changes_no_byte_of_a_message_but_its_own() {
+    let provider = provider_at(None);
+    let model = "anthropic/claude-sonnet-5.5";
+    for (index, message) in every_kind(true).into_iter().enumerate() {
+        let mut plain = every_kind(false)[index].clone();
+        plain.cache_breakpoint = false;
+        let marked_body = provider.build_request_body(&request(model, vec![message]));
+        let plain_body = provider.build_request_body(&request(model, vec![plain]));
+        assert_eq!(unmarked(marked_body.clone()), plain_body, "kind {index}");
+        // Each kind with text carries the marker; the empty turn has none to
+        // carry, and sends no empty part.
+        let carries = marked_body.to_string().contains("cache_control");
+        assert_eq!(carries, index != 4, "kind {index}");
+    }
+    // All of them at once, every one marked or none.
+    let marked_body = provider.build_request_body(&request(model, every_kind(true)));
+    let plain_body = provider.build_request_body(&request(model, every_kind(false)));
+    assert_eq!(unmarked(marked_body), plain_body);
+    assert_eq!(plain_body["messages"][4]["content"], "");
+    assert_eq!(
+        plain_body["messages"][0]["content"],
+        json!([{ "type": "text", "text": "Review the crate." }])
+    );
+}
+
+/// A marker on a turn with no text is owed to the next turn that has some.
+#[test]
+fn a_marker_on_empty_text_is_carried_by_the_next_text() {
+    let provider = provider_at(None);
+    let mut messages = every_kind(false);
+    messages[4].cache_breakpoint = true;
+    let body = provider.build_request_body(&request("anthropic/claude-sonnet-5.5", messages));
+    assert_eq!(marked_messages(&body), [5]);
+    assert_eq!(body["messages"][4]["content"], "");
+}
+
+/// A model that takes no markers is sent what it was sent before: text as
+/// strings, marked or not.
+#[test]
+fn a_model_without_markers_is_sent_text_as_strings() {
+    let provider = provider_at(None);
+    let expected = json!([
+        { "role": "user", "content": "Review the crate." },
+        { "role": "assistant", "content": "I will read lib.rs first." },
+        {
+            "role": "assistant",
+            "content": "Reading.",
+            "tool_calls": [{
+                "id": "call_1",
+                "type": "function",
+                "function": { "name": "weather", "arguments": "{}" }
+            }]
+        },
+        { "role": "tool", "tool_call_id": "call_1", "content": "fn a() {}" },
+        { "role": "assistant", "content": "" },
+        { "role": "user", "content": "## codebase (continued)\nfn b() {}" },
+    ]);
+    for marked in [false, true] {
+        let body = provider.build_request_body(&request("openai/gpt-5.5", every_kind(marked)));
+        assert_eq!(body["messages"], expected, "marked: {marked}");
+    }
+}
+
+/// A stable head and `chunks` chunks of a growing region, as assembly lays
+/// them out.
+fn grown_system(chunks: usize) -> Vec<crate::provider::SystemBlock> {
+    let mut system = vec![crate::provider::SystemBlock {
+        text: "You review code. ".repeat(600),
+        cache_hint: leviath_core::CacheHint::Always,
+        region: String::new(),
+        volatility: leviath_core::Volatility::Stable,
+    }];
+    system.extend((0..chunks).map(|chunk| crate::provider::SystemBlock {
+        text: format!(
+            "## codebase (continued)\n{}",
+            format!("fn f{chunk}() {{}}\n").repeat(900)
+        ),
+        cache_hint: leviath_core::CacheHint::UntilChanged,
+        region: "codebase".to_string(),
+        volatility: leviath_core::Volatility::Grows,
+    }));
+    system
+}
+
+/// The system messages of `body`.
+fn system_of(body: &serde_json::Value) -> Vec<serde_json::Value> {
+    body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["role"] == "system")
+        .cloned()
+        .collect()
+}
+
+/// A growing region that gains a chunk moves the system marker off a block
+/// whose text did not change. That block reads the same either way: the
+/// marker adds its `cache_control` and changes nothing else.
+#[test]
+fn a_system_marker_that_moves_changes_no_byte_of_the_block_it_left() {
+    let provider = provider_at(None);
+    let model = "anthropic/claude-sonnet-5.5";
+    let body = |chunks: usize| {
+        let mut asked = request(model, vec![user("go")]);
+        asked.system = grown_system(chunks);
+        provider.build_request_body(&asked)
+    };
+    let (before, after) = (body(2), body(3));
+    let marked = |body: &serde_json::Value| {
+        system_of(body)
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.to_string().contains("cache_control"))
+            .map(|(i, _)| i)
+            .collect::<Vec<_>>()
+    };
+    // The fixture moves the marker: the last chunk before, the new one after.
+    assert_eq!(marked(&before), [0, 2]);
+    assert_eq!(marked(&after), [0, 3]);
+    let (before, after) = (system_of(&unmarked(before)), system_of(&unmarked(after)));
+    for (index, block) in before.iter().enumerate() {
+        assert_eq!(
+            serde_json::to_string(&after[index]).unwrap(),
+            serde_json::to_string(block).unwrap(),
+            "system block {index}"
+        );
+    }
+    assert!(before[1]["content"].is_array());
+}
+
+/// An empty system block is sent as it was: a string when unmarked, and a
+/// part carrying the marker when it ends the stable head.
+#[test]
+fn an_empty_system_block_is_sent_as_it_was() {
+    let provider = provider_at(None);
+    let mut system = grown_system(0);
+    system.push(crate::provider::SystemBlock {
+        text: String::new(),
+        ..system[0].clone()
+    });
+    let mut asked = request("anthropic/claude-sonnet-5.5", vec![user("go")]);
+    asked.system = system.clone();
+    let sent = system_of(&provider.build_request_body(&asked));
+    assert_eq!(
+        sent[1]["content"],
+        json!([{ "type": "text", "text": "", "cache_control": { "type": "ephemeral" } }])
+    );
+    // Two more stable blocks take both markers: unmarked, the string it was.
+    system.push(system[0].clone());
+    system.push(system[0].clone());
+    asked.system = system;
+    let sent = system_of(&provider.build_request_body(&asked));
+    assert_eq!(sent[1]["content"], "");
+}
+
+/// A model that takes no markers is sent its system prompt as before: the
+/// stable head and the rest, each one string.
+#[test]
+fn a_model_without_markers_is_sent_its_system_prompt_as_before() {
+    let provider = provider_at(None);
+    for chunks in [2, 3] {
+        let mut asked = request("openai/gpt-5.5", vec![user("go")]);
+        asked.system = grown_system(chunks);
+        let sent = system_of(&provider.build_request_body(&asked));
+        assert_eq!(sent, super::prefix::system_messages(&asked.system));
+        assert_eq!(sent.len(), 2);
+        assert!(sent.iter().all(|m| m["content"].is_string()));
+    }
 }
