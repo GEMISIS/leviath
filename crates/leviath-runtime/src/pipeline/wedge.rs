@@ -224,7 +224,13 @@ pub(crate) fn fail_wedged_runs(
         // Routing it is also what un-wedges it: `ResolveTransition` is a marker a
         // system acts on, so a run whose blueprint declares an `error` edge gets
         // driven into that stage instead of ending here.
-        crate::pipeline::fail_stage(&mut commands, entity, &mut state, message);
+        crate::pipeline::fail_stage(
+            &mut commands,
+            entity,
+            &mut state,
+            RunFailureKind::Wedged,
+            message,
+        );
     }
 }
 

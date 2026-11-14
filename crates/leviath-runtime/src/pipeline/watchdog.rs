@@ -64,6 +64,7 @@ pub(crate) fn check_workspace_health(
             &mut commands,
             entity,
             &mut state,
+            RunFailureKind::WorkspaceLost,
             format!("workspace '{}' is no longer accessible", md.workdir),
         );
     }

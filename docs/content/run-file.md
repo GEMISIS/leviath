@@ -282,8 +282,9 @@ layout-4 compaction model becomes the graph's `compaction.model`, so the run sum
 did. A run from before layout 7 has no write paths, as before, and a run from before layout 8
 counts no resubmissions on any stage. A run from before layout 9 recorded only the model calls
 that answered: each reads as answered, a call it counted as unpriced is unknown for want of a
-price, and it lists no call as out. The file as it was stays in the
-run's `legacy/` folder as `run.v2.lvr` through `run.v8.lvr`, and the directory is saved in the
+price, and it lists no call as out. A run from before layout 10 that failed has the sentence that
+says why and no `error_kind`. The file as it was stays in the
+run's `legacy/` folder as `run.v2.lvr` through `run.v9.lvr`, and the directory is saved in the
 home's backup first. A run file in any other
 layout this build does not know is listed as failed, saying so, and left as it is.
 

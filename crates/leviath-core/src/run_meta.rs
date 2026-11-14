@@ -10,8 +10,11 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+mod failure;
 pub mod revision;
 mod stage_ledger;
+
+pub use failure::RunFailureKind;
 
 // Re-exported flat rather than left behind a path of their own: which file the
 // stage ledger's source lives in is not something a caller should have to type.
@@ -545,6 +548,12 @@ pub struct RunMeta {
     /// What went wrong, set alongside [`RunStatus::Error`]. `None` on every
     /// other status.
     pub error: Option<String>,
+    /// Which kind of failure [`Self::error`] is, as a
+    /// [`RunFailureKind::label`], so a caller can tell one failure from
+    /// another without reading the sentence. `None` on every other status,
+    /// and on a failure recorded without a kind.
+    #[serde(default)]
+    pub error_kind: Option<String>,
     /// Short human-readable title generated from the task prompt (None until generated).
     #[serde(default)]
     pub title: Option<String>,
@@ -861,6 +870,7 @@ impl RunMeta {
             last_progress_at: None,
             active: None,
             error: None,
+            error_kind: None,
             title: None,
             title_error: None,
             metadata: HashMap::new(),

@@ -1463,7 +1463,7 @@ binds = [{ region = "task" }]
                 assert!(
                     !matches!(
                         status_on_disk(runs.path(), &mid),
-                        leviath_runtime::state::RunStatus::Error(_)
+                        leviath_runtime::state::RunStatus::Error { .. }
                     ),
                     "a resumed run is not marked failed"
                 );

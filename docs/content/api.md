@@ -930,8 +930,44 @@ exception is the raw state on `/state` and `/deltas`, which carries the engine's
 | `paused` | Paused, by somebody or by Leviath. Resumes on request |
 | `complete` | Finished, with nothing further to accept |
 | `complete_interactive` | Deprecated: no run reaches it. Removed in 0.8.0 |
-| `error` | Stopped by a failure. The run's `error` carries what went wrong |
+| `error` | Stopped by a failure. The run's `error` carries what went wrong, and `error_kind` says which kind of failure it was |
 | `cancelled` | Stopped from outside. Nothing went wrong, somebody decided |
+
+### Why a run failed
+
+`error` is a sentence for a person, and its wording changes as it gets clearer. To tell one failure
+from another in code, match `error_kind`, which is one of these words:
+
+| `error_kind` | The run stopped because |
+|---|---|
+| `no-media` | A stage that makes an image, a video or audio was answered three times without any |
+| `wrong-media` | A stage that makes media of one type was answered with another |
+| `cut-off-tool-call` | The model's tool call kept being cut off by its output limit |
+| `provider-failure` | A model call failed and there was nothing left to retry or move to. The call's own `failure_kind` says what the provider did |
+| `context-overflow` | The prompt does not fit the model's context window |
+| `workspace-lost` | The run's working directory is gone |
+| `wedged` | The run stopped making progress and could not be moved |
+| `routing-failed` | The call that picks the next stage failed |
+| `routing-unmatched` | The answer that picks the next stage named none of the choices, and `routing.on_unmatched` is `fail` |
+| `stage-entry-failed` | The stage the run was moving to could not be entered |
+| `workers-failed` | A fan-out with `on_worker_failure = "fail_all"` had a worker fail |
+| `gate-unsatisfied` | A stage ran out of turns, or was stopped for repeating itself, with the gate on its way out not met |
+| `dead-end` | A stage ended with no transition it could take |
+| `final-output-missing` | The run reached its end without the final output it requires |
+| `hook` | A hook failed, or refused the run |
+| `checkpoint-unanswered` | A checkpoint that needed a person got no answer in time |
+| `journal-unwritable` | The run's file could not be written |
+| `internal-error` | Leviath itself failed while working on the run |
+| `run-file-unreadable` | The run's file could not be read |
+| `start-refused` | The run was refused before it started |
+
+`error_kind` is `null` on a run that did not fail, and on a failed run from before kinds were kept,
+which has only its sentence. Treat a word you do not know as a failure you have no special case
+for: more kinds may be added.
+
+The same field is on `GET /api/runs/{id}/result`, on the `agent_completed` event and webhook, and
+in GraphQL as `errorKind` on `Run`, `RunState` and `RunCompletedEvent`. A stage whose failure is
+taken by an `error` edge does not fail the run, so it sets neither field.
 
 Leviath pauses a run itself when something outside the run has to change first, and `wait_reason`
 is then `needs_setup`. A paused run comes back paused after a daemon restart.
@@ -2619,7 +2655,7 @@ with either way.
 | `interaction_settled` | An ask is answered, times out, is cancelled or is refused | `request_id`, `kind`, `tool`, `prompt`, `stage`, `settlement`, `asked_at`, `at` |
 | `output_submitted` | A `submit_output` call is accepted | `stage`, `final_output` |
 | `run_continued` | A finished run goes back to work in a new segment, in place or forked | `segment`, `stage`, `forked_from` (a fork only) |
-| `agent_completed` | The run reaches a terminal status | `status`, `result` (its error), `final_output` |
+| `agent_completed` | The run reaches a terminal status | `status`, `result` (its error), `error_kind` (see [why a run failed](#why-a-run-failed)), `final_output` |
 | `daemon_link` | This server's link to the daemon changes | `connected`, `daemon`, `restarted`, `restart_advised` |
 | `config_health` | `config.toml` stops loading, loads again, or breaks for a different reason | `healthy`, `path`, `error`, `config_mtime` |
 | `events_dropped` | This socket fell behind, or the server's own stream from the daemon skipped events | `count` |
@@ -2775,7 +2811,8 @@ Five things to know about the delivery.
 
 **It carries the answer.** `final_output` holds whatever the run submitted, so your receiver
 learns what the run concluded without a second request. The `result` field beside it is the run's
-error. See [Final outputs](/docs/outputs).
+error, and `error_kind` says [which kind of failure](#why-a-run-failed) it was. See
+[Final outputs](/docs/outputs).
 
 **It is signed.** Verify the `X-Leviath-Signature: sha256=<hex>` header against your callback's
 `secret` before trusting the body. The secret never goes into the run's file. The daemon keeps it

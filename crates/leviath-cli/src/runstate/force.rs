@@ -52,7 +52,7 @@ pub(crate) fn force_cancel_in(run_dir: &Path, now: i64) -> ForceCancelOutcome {
             let mut next = writer.state().clone();
             if matches!(
                 next.status,
-                State::Complete | State::Error(_) | State::Cancelled
+                State::Complete | State::Error { .. } | State::Cancelled
             ) {
                 return Ok(ForceCancelOutcome::AlreadyTerminal);
             }

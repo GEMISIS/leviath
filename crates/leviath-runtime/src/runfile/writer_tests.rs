@@ -223,7 +223,13 @@ fn a_finished_run_ends_on_a_checkpoint() {
     write_run(&path, &states, policy);
     let r = RunFileReader::read(&path).unwrap();
     assert_eq!(r.last_checkpoint().0, r.last_seq());
-    for status in [RunStatus::Error("x".into()), RunStatus::Cancelled] {
+    for status in [
+        RunStatus::Error {
+            message: "x".into(),
+            kind: None,
+        },
+        RunStatus::Cancelled,
+    ] {
         let (_d, p) = temp();
         let mut w = RunFileWriter::create(&p, &spec(), &code(), &initial(), policy).unwrap();
         let done = RunState {

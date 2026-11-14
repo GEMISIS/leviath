@@ -12300,6 +12300,12 @@ type RunCompletedEvent implements Event & RunEvent {
 	status: RunStatus!
 	"The run's error, when that is how it ended."
 	error: String
+	"""
+	Which kind of failure that is: a short fixed word such as
+	`no-media`, to match on without reading `error`. Null when
+	the failure states none.
+	"""
+	errorKind: String
 	"The answer it submitted, when there is one."
 	finalOutput: FinalOutputOutput
 	"""
@@ -12810,6 +12816,15 @@ input RunInput {
 	"""
 	error: StringFilter
 	"""
+	Filter on `RunOutput.errorKind`.
+	
+	Which kind of failure `error` is: a short fixed word such as
+	`no-media` or `provider-failure`, to match on without reading the
+	sentence. Null on every other status, and on a failure recorded
+	without one.
+	"""
+	errorKind: StringFilter
+	"""
 	Filter on `RunOutput.task`.
 	
 	The initial ask this run was given.
@@ -13124,6 +13139,13 @@ type RunOutput implements Node {
 	status: RunStatus!
 	"Present only when the status is `ERROR`."
 	error: String
+	"""
+	Which kind of failure `error` is: a short fixed word such as
+	`no-media` or `provider-failure`, to match on without reading the
+	sentence. Null on every other status, and on a failure recorded
+	without one.
+	"""
+	errorKind: String
 	"The initial ask this run was given."
 	task: String!
 	"Inference turns in the current stage, reset on entering a new one."
@@ -13859,6 +13881,13 @@ type RunStateOutput {
 	status: RunStateStatus!
 	"What went wrong, when `status` is `ERROR`."
 	error: String
+	"""
+	Which kind of failure it was, when `status` is `ERROR`: a short fixed
+	word such as `no-media` or `provider-failure`, to tell one failure
+	from another without reading `error`. Null for a failure recorded
+	without one.
+	"""
+	errorKind: String
 	"The stage, visit and turn."
 	cursor: StateCursorOutput!
 	"What the engine is doing with it."
@@ -17547,6 +17576,13 @@ type StatusChangeOutput {
 	status: RunStateStatus!
 	"What went wrong, when `status` is `ERROR`."
 	error: String
+	"""
+	Which kind of failure it was, when `status` is `ERROR`: a short fixed
+	word such as `no-media` or `provider-failure`, to tell one failure
+	from another without reading `error`. Null for a failure recorded
+	without one.
+	"""
+	errorKind: String
 }
 
 "Something that happened during a step that the state alone does not show."

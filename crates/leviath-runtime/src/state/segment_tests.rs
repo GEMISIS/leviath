@@ -3,12 +3,21 @@ use super::*;
 #[test]
 fn a_segment_ends_with_the_run_as_it_stood() {
     let mut state = crate::runfile::reader_tests::scripted_run(2).pop().unwrap();
-    state.status = RunStatus::Error("boom".into());
+    state.status = RunStatus::Error {
+        message: "boom".into(),
+        kind: None,
+    };
     state.totals.spend.priced_usd = 2.0;
     state.totals.tool_calls = 7;
     let file = FileRef::whole(kept_answer_path(1), b"done");
     let end = SegmentEnd::of(&state, Some(file.clone()));
-    assert_eq!(end.status, RunStatus::Error("boom".into()));
+    assert_eq!(
+        end.status,
+        RunStatus::Error {
+            message: "boom".into(),
+            kind: None
+        }
+    );
     assert_eq!(end.stage, state.cursor.stage);
     assert_eq!(end.spend.priced_usd, 2.0);
     assert_eq!(end.tool_calls, 7);

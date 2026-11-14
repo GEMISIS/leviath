@@ -1282,6 +1282,7 @@ async fn the_lane_snapshot_counts_agents_by_status() {
         paused,
         AgentStatus::Error {
             message: "boom".to_string(),
+            kind: None,
         },
     );
     assert_eq!(host.world_mut().lane_snapshot().agents.terminal, 3);
@@ -3056,6 +3057,7 @@ async fn a_message_no_run_will_read_is_refused() {
             "broke",
             AgentStatus::Error {
                 message: "x".to_string(),
+                kind: None,
             },
         ),
         ("stopped", AgentStatus::Cancelled),
@@ -3267,7 +3269,8 @@ fn status_str_covers_all_variants() {
     assert_eq!(status_str(&AgentStatus::Complete), "complete");
     assert_eq!(
         status_str(&AgentStatus::Error {
-            message: "x".to_string()
+            message: "x".to_string(),
+            kind: None,
         }),
         "error"
     );
@@ -4064,6 +4067,7 @@ async fn an_unloaded_run_stays_in_the_listing_with_the_reason_it_ended() {
     let mut host = host_with(vec![]);
     let died = AgentStatus::Error {
         message: "HTTP 402 Payment Required".to_string(),
+        kind: None,
     };
     unload_with(&mut host, "worker-1", died.clone());
 
@@ -5700,7 +5704,8 @@ async fn a_run_whose_file_is_damaged_says_so_and_stays_failed() {
     assert_eq!(
         row.status,
         AgentStatus::Error {
-            message: format!("{DAMAGE}; the file is left as it is")
+            message: format!("{DAMAGE}; the file is left as it is"),
+            kind: Some(crate::RunFailureKind::RunFileUnreadable),
         }
     );
 

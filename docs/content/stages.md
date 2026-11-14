@@ -119,7 +119,8 @@ when = "stuck"               # a runtime signal, not the agent's choice
 `error` fires when a stage cannot go on. A provider refused the request, or the model's replies were
 cut off in the middle of a tool call four times in a row (see
 [stages and models](/docs/agents#stages-and-models)). The recovery stage finds the
-reason in the context. With no `error` edge the run fails.
+reason in the context. With no `error` edge the run fails, and its `error_kind` says
+[which kind of failure](/docs/api#why-a-run-failed) ended it.
 
 A failure of the call that picks the next stage, after the stage's work is done, does not fire
 `error` by default. The run fails with the routing error instead, so finished work is not redone.

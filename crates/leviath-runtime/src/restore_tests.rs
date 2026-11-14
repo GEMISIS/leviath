@@ -204,7 +204,14 @@ fn every_status_and_phase_is_classified() {
     use RestorePriority::{Active, Blocked};
     let cases = [
         (RunStatus::Complete, PipelinePhase::Done, None),
-        (RunStatus::Error("x".into()), PipelinePhase::Done, None),
+        (
+            RunStatus::Error {
+                message: "x".into(),
+                kind: None,
+            },
+            PipelinePhase::Done,
+            None,
+        ),
         (RunStatus::Cancelled, PipelinePhase::Done, None),
         (RunStatus::Paused, PipelinePhase::Paused, Some(Blocked)),
         (
@@ -419,7 +426,10 @@ fn a_fan_out_comes_back_with_the_workers_that_finished_settled() {
     on_disk(
         runs.path(),
         "w-broke",
-        &ended(RunStatus::Error("boom".into())),
+        &ended(RunStatus::Error {
+            message: "boom".into(),
+            kind: None,
+        }),
         false,
     );
     on_disk(
@@ -633,7 +643,7 @@ fn a_resumed_run_keeps_its_blueprints_routing() {
 fn a_run_file_from_before_on_unmatched_resumes_unchanged() {
     use crate::runfile::codec::{FrameKind, encode, frame_at};
     use crate::spec::graph::{OnRoutingError, OnUnmatched, RoutingDef};
-    let bytes = include_bytes!("runfile/fixtures/layout-9-routing.lvr");
+    let bytes = include_bytes!("runfile/fixtures/layout-10-routing.lvr");
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join(leviath_core::files::RUN_FILE), bytes).unwrap();
 

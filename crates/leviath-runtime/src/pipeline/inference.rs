@@ -873,7 +873,10 @@ pub(crate) fn dispatch_inference(
                             .entity(entity)
                             .remove::<ReadyToInfer>()
                             .remove::<DispatchStall>()
-                            .insert(StageOutcome::Errored(overflow.to_string()))
+                            .insert(StageOutcome::Errored(
+                                crate::RunFailureKind::ContextOverflow,
+                                overflow.to_string(),
+                            ))
                             .insert(ResolveTransition);
                     });
                     return;

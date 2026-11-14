@@ -441,7 +441,11 @@ pub(crate) fn build_run_meta(sources: RunMetaSources<'_>, at: RunPosition) -> Ru
         last_progress_at,
         active,
         error: match &state.status {
-            AgentStatus::Error { message } => Some(message.clone()),
+            AgentStatus::Error { message, .. } => Some(message.clone()),
+            _ => None,
+        },
+        error_kind: match &state.status {
+            AgentStatus::Error { kind, .. } => kind.map(|kind| kind.label().to_string()),
             _ => None,
         },
         title: md.title.clone(),
@@ -531,6 +535,7 @@ mod tests {
             AgentStatus::Cancelled,
             AgentStatus::Error {
                 message: "x".to_string(),
+                kind: None,
             },
         ] {
             assert!(is_empty_output(&status, &nothing));
@@ -559,7 +564,8 @@ mod tests {
         assert_eq!(run_status_from(&AgentStatus::Complete), RunStatus::Complete);
         assert_eq!(
             run_status_from(&AgentStatus::Error {
-                message: "x".to_string()
+                message: "x".to_string(),
+                kind: None,
             }),
             RunStatus::Error
         );
@@ -583,6 +589,7 @@ mod tests {
             AgentStatus::Complete,
             AgentStatus::Error {
                 message: "x".to_string(),
+                kind: None,
             },
             AgentStatus::Cancelled,
         ] {
@@ -626,7 +633,8 @@ mod tests {
         );
         assert_eq!(
             stage_status_from(&AgentStatus::Error {
-                message: "x".to_string()
+                message: "x".to_string(),
+                kind: None,
             }),
             StageRunStatus::Error
         );
@@ -813,6 +821,7 @@ mod tests {
         assert_eq!(meta.parent_run_id.as_deref(), Some("parent"));
         assert_eq!(meta.callback_url.as_deref(), Some("http://cb"));
         assert!(meta.error.is_none());
+        assert!(meta.error_kind.is_none());
         // The tree links are carried through from the agent's live state.
         assert_eq!(
             meta.children,
@@ -919,6 +928,7 @@ mod tests {
             AgentStatus::Cancelled,
             AgentStatus::Error {
                 message: "x".to_string(),
+                kind: None,
             },
         ] {
             let meta = build_run_meta(
@@ -1003,9 +1013,7 @@ mod tests {
         let meta = build_run_meta(
             RunMetaSources {
                 md: &metadata(),
-                state: &state(AgentStatus::Error {
-                    message: "boom".to_string(),
-                }),
+                state: &state(AgentStatus::failed(crate::RunFailureKind::NoMedia, "boom")),
                 totals: &TokenTotals::default(),
                 flags: &RunOutcomeFlags::default(),
                 final_output: None,
@@ -1024,6 +1032,8 @@ mod tests {
         );
         assert_eq!(meta.status, RunStatus::Error);
         assert_eq!(meta.error.as_deref(), Some("boom"));
+        // And the kind of failure, as its label.
+        assert_eq!(meta.error_kind.as_deref(), Some("no-media"));
     }
 
     /// A submitted output reaches the run's record and settles the emptiness

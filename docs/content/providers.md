@@ -960,7 +960,9 @@ names what the last reply held, each part by type and size, and quotes its words
 returned nothing can be told apart. The error text opens with the tag `[no-media]`, in the style of
 the provider failure tags (`[bad-request]`), so a caller can tell this failure without reading its
 sentence. It is not a provider failure: no `failure_kind` carries that label, and it is never
-retried or rerouted.
+retried or rerouted. A run that ends on this failure also has `error_kind` set to `no-media`, which
+is the field to match on: every failure has one, and the tag is only on this one. See
+[why a run failed](/docs/api#why-a-run-failed).
 
 **OpenAI**
 

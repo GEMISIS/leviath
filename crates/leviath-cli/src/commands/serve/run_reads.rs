@@ -275,6 +275,7 @@ pub(super) async fn run_result(
             output,
             final_output: runstate::read_final_output(&id).map(Into::into),
             error: meta.error,
+            error_kind: meta.error_kind,
             prompt_tokens: meta.prompt_tokens,
             completion_tokens: meta.completion_tokens,
         }))

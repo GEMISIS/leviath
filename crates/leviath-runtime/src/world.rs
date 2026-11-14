@@ -1451,7 +1451,7 @@ mod tests {
 
         let status = world.agent_status(entity);
         assert!(
-            matches!(status, Some(AgentStatus::Error { ref message })
+            matches!(status, Some(AgentStatus::Error { ref message, kind: Some(crate::RunFailureKind::InternalError) })
                 if message.contains("a pipeline system panicked")
                     && message.contains("blew up on the compute pool")),
             "got: {status:?}"
@@ -1510,7 +1510,7 @@ mod tests {
         );
         let status = world.agent_status(entity);
         assert!(
-            matches!(status, Some(AgentStatus::Error { ref message })
+            matches!(status, Some(AgentStatus::Error { ref message, kind: Some(crate::RunFailureKind::InternalError) })
                 if message.contains("a pipeline system panicked")
                     && message.contains("blew up on this agent")),
             "got: {status:?}"
@@ -1638,7 +1638,7 @@ mod tests {
 
         let status = world.agent_status(e);
         assert!(
-            matches!(status, Some(AgentStatus::Error { ref message })
+            matches!(status, Some(AgentStatus::Error { ref message, .. })
                 if message.contains("never move again")),
             "got: {status:?}"
         );
@@ -1757,7 +1757,8 @@ mod tests {
         assert_eq!(
             std::mem::discriminant(&world.agent_status(e).unwrap()),
             std::mem::discriminant(&AgentStatus::Error {
-                message: String::new()
+                message: String::new(),
+                kind: None,
             })
         );
     }

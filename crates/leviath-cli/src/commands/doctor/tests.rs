@@ -1461,6 +1461,7 @@ async fn finished_reports_an_errored_run() {
             "r-err",
             &AgentStatus::Error {
                 message: "no usable provider".to_string(),
+                kind: None,
             },
         );
         let DaemonOutcome::Failed(detail) = outcome else {

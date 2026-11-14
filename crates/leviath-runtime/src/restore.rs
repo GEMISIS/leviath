@@ -178,7 +178,7 @@ fn worker_result(
             }
             None => Ok(last_reply(state)),
         }),
-        RunStatus::Error(message) => Some(Err(message.clone())),
+        RunStatus::Error { message, .. } => Some(Err(message.clone())),
         RunStatus::Cancelled => Some(Err("worker cancelled".to_string())),
         _ => None,
     }
@@ -462,9 +462,10 @@ pub fn damaged_entry(run_id: &str, why: &str) -> crate::host::RunListEntry {
     crate::host::RunListEntry {
         run_id: run_id.to_string(),
         title: None,
-        status: crate::components::AgentStatus::Error {
-            message: format!("{why}; the file is left as it is"),
-        },
+        status: crate::components::AgentStatus::failed(
+            crate::RunFailureKind::RunFileUnreadable,
+            format!("{why}; the file is left as it is"),
+        ),
         wait_reason: None,
         stage: String::new(),
         stage_index: None,
@@ -501,7 +502,7 @@ pub(crate) enum RestorePriority {
 /// purpose, and restarting the daemon is not them changing their mind.
 pub(crate) fn classify(state: &crate::state::RunState) -> Option<RestorePriority> {
     match &state.status {
-        RunStatus::Complete | RunStatus::Error(_) | RunStatus::Cancelled => None,
+        RunStatus::Complete | RunStatus::Error { .. } | RunStatus::Cancelled => None,
         RunStatus::Paused | RunStatus::Waiting => Some(RestorePriority::Blocked),
         RunStatus::Idle | RunStatus::Active => match state.phase {
             PipelinePhase::FanOut

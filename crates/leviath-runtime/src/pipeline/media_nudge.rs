@@ -38,9 +38,11 @@ pub(crate) fn media_part_count(parts: &[leviath_core::mime::Part], family: &str)
 /// The tag a no-media failure opens with, in the style of the provider
 /// failure tags (`[bad-request]`). It is not one of them: no
 /// `FailureKind` carries this label, so nothing that reads leading tags to
-/// retry, reroute or count a provider failure takes it for one. A caller that
-/// wants to say this failure in its own words reads it at the head of the
-/// stage's or run's `error` text.
+/// retry, reroute or count a provider failure takes it for one. It is the
+/// label of [`RunFailureKind::NoMedia`](crate::RunFailureKind::NoMedia), the
+/// kind a run that ends on this failure states, in brackets: a caller matches
+/// the run's `error_kind`, and one reading only the `error` text finds the
+/// same word at its head.
 pub(crate) const NO_MEDIA_TAG: &str = "[no-media]";
 
 /// How many characters of a reply's words are quoted back before an ellipsis.

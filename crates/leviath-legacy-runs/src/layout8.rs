@@ -21,6 +21,9 @@
 //! their states and deltas through this module too, each with the stage
 //! record (`R`) and the fan-out in progress (`F`) it wrote.
 //!
+//! A run's status is read as layout 9 wrote it (see [`crate::layout9`]),
+//! which is how layout 8 wrote it too.
+//!
 //! What an upgraded file says of its calls is what layout 8 knew. A call
 //! counted unpriced had no reported cost and no rates, so it is unknown for
 //! want of a price. A cost flagged unknown with no call counted was never
@@ -39,10 +42,12 @@ use leviath_runtime::state::journal::{
 use leviath_runtime::state::{
     self as state, BlobFile, Clock, ContextDiff, ContextState, Cursor, FinalOutputState, Flags,
     Grants, MessageState, OpenInteraction, PendingBatch, PipelinePhase, PointProgress,
-    ReadPathCounts, RunFiles, RunStatus, StageProgress, StageStatus, ToolResultState,
-    TransitionRecord, WaitState,
+    ReadPathCounts, RunFiles, StageProgress, StageStatus, ToolResultState, TransitionRecord,
+    WaitState,
 };
 use serde::Deserialize;
+
+use crate::layout9::RunStatus;
 
 /// The fingerprint in the header of every layout-8 run file.
 pub(crate) const FINGERPRINT: [u8; 32] = [
@@ -270,7 +275,7 @@ impl From<ContinuedState> for state::ContinuedState {
             stage: c.stage,
             forked_from: c.forked_from,
             previous: c.previous.map(|end| state::SegmentEnd {
-                status: end.status,
+                status: end.status.into(),
                 stage: end.stage,
                 spend: end.spend.into(),
                 tool_calls: end.tool_calls,
@@ -458,7 +463,7 @@ impl<F: Into<state::FanOutState>, R: Into<state::StageRecord>> From<RunState<F, 
     fn from(s: RunState<F, R>) -> Self {
         Self {
             seq: s.seq,
-            status: s.status,
+            status: s.status.into(),
             cursor: s.cursor,
             phase: s.phase,
             accepts_messages: s.accepts_messages,
@@ -536,7 +541,7 @@ impl<F: Into<state::FanOutState>, R: Into<state::StageRecord>> From<Change<F, R>
     fn from(c: Change<F, R>) -> Self {
         use state::Change as C;
         match c {
-            Change::Status(v) => C::Status(v),
+            Change::Status(v) => C::Status(v.into()),
             Change::Cursor(v) => C::Cursor(v),
             Change::Phase(v) => C::Phase(v),
             Change::AcceptsMessages(v) => C::AcceptsMessages(v),

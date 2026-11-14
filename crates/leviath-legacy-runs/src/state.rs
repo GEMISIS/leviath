@@ -57,11 +57,13 @@ fn status(meta: &RunMeta) -> RunStatus {
         OldStatus::WaitingInput => RunStatus::Waiting,
         OldStatus::Complete | OldStatus::CompleteInteractive => RunStatus::Complete,
         OldStatus::Paused => RunStatus::Paused,
-        OldStatus::Error => RunStatus::Error(
-            meta.error
+        OldStatus::Error => RunStatus::Error {
+            message: meta
+                .error
                 .clone()
                 .unwrap_or_else(|| "the run failed and did not say why".into()),
-        ),
+            kind: None,
+        },
         OldStatus::Cancelled => RunStatus::Cancelled,
     }
 }
@@ -261,7 +263,7 @@ pub(crate) fn last(
         && *gone > 0
         && !matches!(
             state.status,
-            RunStatus::Complete | RunStatus::Error(_) | RunStatus::Cancelled
+            RunStatus::Complete | RunStatus::Error { .. } | RunStatus::Cancelled
         )
         && f.active.is_empty()
         && f.queued.is_empty()
@@ -282,7 +284,7 @@ pub(crate) fn last(
     if let Some(why) = spec.origin.never_resumes()
         && !matches!(
             state.status,
-            RunStatus::Complete | RunStatus::Error(_) | RunStatus::Cancelled
+            RunStatus::Complete | RunStatus::Error { .. } | RunStatus::Cancelled
         )
     {
         report.note(crate::recorded::stopped(meta, why));
@@ -352,7 +354,10 @@ fn interrupt_running_calls(state: &mut RunState, report: &mut Report) {
 
 /// End a run that cannot carry on, saying why.
 fn end(state: &mut RunState, why: String) {
-    state.status = RunStatus::Error(why);
+    state.status = RunStatus::Error {
+        message: why,
+        kind: None,
+    };
     state.phase = PipelinePhase::Done;
     state.pending = None;
 }

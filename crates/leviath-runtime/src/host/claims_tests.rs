@@ -228,7 +228,10 @@ fn held_keys_are_read_from_the_runs_records() {
         runs.path(),
         "c-refused",
         Some(asked("k-2", b"two")),
-        Some(RunStatus::Error("could not bind".into())),
+        Some(RunStatus::Error {
+            message: "could not bind".into(),
+            kind: None,
+        }),
     );
     mark_refused(
         &runs
@@ -241,7 +244,10 @@ fn held_keys_are_read_from_the_runs_records() {
         runs.path(),
         "d-failed-later",
         Some(asked("k-3", b"three")),
-        Some(RunStatus::Error("on its first step".into())),
+        Some(RunStatus::Error {
+            message: "on its first step".into(),
+            kind: None,
+        }),
     );
     std::fs::create_dir_all(runs.path().join("e-junk")).unwrap();
     std::fs::write(

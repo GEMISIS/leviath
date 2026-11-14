@@ -675,7 +675,8 @@ fn label_and_terminal_cover_all_statuses() {
     assert_eq!(label(&AgentStatus::Cancelled), "cancelled");
     assert_eq!(
         label(&AgentStatus::Error {
-            message: "boom".to_string()
+            message: "boom".to_string(),
+            kind: None,
         }),
         "error: boom"
     );
@@ -687,6 +688,7 @@ fn label_and_terminal_cover_all_statuses() {
         AgentStatus::Cancelled,
         AgentStatus::Error {
             message: "x".to_string(),
+            kind: None,
         },
     ] {
         assert!(is_terminal(&s));
@@ -1103,6 +1105,7 @@ async fn wait_requires_id_and_returns_when_terminal_or_missing() {
         Ok(String::new()),
         vec![Some(AgentStatus::Error {
             message: "boom".to_string(),
+            kind: None,
         })],
         false,
     );

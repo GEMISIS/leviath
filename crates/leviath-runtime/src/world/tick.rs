@@ -22,7 +22,12 @@ impl PipelineWorld {
         };
         let message = panic_status_message(&panicked.message);
         match panicked.entity {
-            Some(entity) if self.set_status(self.own(entity), AgentStatus::Error { message }) => {
+            Some(entity)
+                if self.set_status(
+                    self.own(entity),
+                    AgentStatus::failed(crate::RunFailureKind::InternalError, message),
+                ) =>
+            {
                 tracing::error!(
                     ?entity,
                     panic = %panicked.message,
@@ -65,9 +70,10 @@ impl PipelineWorld {
             self.world
                 .entity_mut(entity)
                 .remove::<crate::tick_scope::PanickedInParallel>();
-            let status = AgentStatus::Error {
-                message: panic_status_message(&message),
-            };
+            let status = AgentStatus::failed(
+                crate::RunFailureKind::InternalError,
+                panic_status_message(&message),
+            );
             // The entity came straight out of the query above, so it exists.
             let _ = self.set_status(self.own(entity), status);
         }

@@ -88,7 +88,7 @@ pub(crate) fn fail_runs_with_unwritable_journals(
         if let Some(mut buffer) = buffer {
             buffer.logs.push((0, format!("[journal] {message}")));
         }
-        state.status = AgentStatus::Error { message };
+        state.status = AgentStatus::failed(RunFailureKind::JournalUnwritable, message);
     }
 }
 

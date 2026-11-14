@@ -127,7 +127,7 @@ pub fn stage_records(spec: &RunSpec, state: &RunState) -> Vec<StageRecord> {
     let ended = matches!(
         state.status,
         crate::state::RunStatus::Complete
-            | crate::state::RunStatus::Error(_)
+            | crate::state::RunStatus::Error { .. }
             | crate::state::RunStatus::Cancelled
     );
     for call in &state.open_calls {

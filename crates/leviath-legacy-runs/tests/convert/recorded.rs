@@ -156,7 +156,7 @@ fn an_unfinished_run_whose_blueprint_is_gone_converts_and_says_it_cannot_resume(
     run.journal(|r| r.retain(|r| !matches!(r, JournalRecord::StatusChanged { .. })));
     run.meta(|m| m.status = OldStatus::Paused);
     let (report, file) = run.converted();
-    let RunStatus::Error(why) = &file.last.status else {
+    let RunStatus::Error { message: why, .. } = &file.last.status else {
         panic!("{:?}", file.last.status);
     };
     assert!(why.contains("cannot resume"), "{why}");

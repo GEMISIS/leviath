@@ -102,7 +102,10 @@ async fn finished_failed_and_cancelled_runs_stay_on_disk() {
     let manifest = coder(agent.path());
     for status in [
         RunStatus::Complete,
-        RunStatus::Error("boom".to_string()),
+        RunStatus::Error {
+            message: "boom".to_string(),
+            kind: None,
+        },
         RunStatus::Cancelled,
     ] {
         let run_id = run_on_disk(Config::default(), registry(), runs.path(), &manifest);
@@ -282,7 +285,7 @@ async fn a_run_whose_file_is_damaged_is_listed_failed_and_left_as_it_is() {
         panic!("one row: {:?}", recovered.held)
     };
     assert_eq!(row.run_id, run_id);
-    let AgentStatus::Error { message } = &row.status else {
+    let AgentStatus::Error { message, .. } = &row.status else {
         panic!("failed: {:?}", row.status)
     };
     assert!(message.contains(&where_), "{message}");
@@ -313,7 +316,10 @@ async fn reload_run_pages_in_a_cancelled_run_paused_but_not_a_finished_one() {
     change(runs.path(), &complete, |s| s.status = RunStatus::Complete);
     let failed = run_on_disk(Config::default(), registry(), runs.path(), &manifest);
     change(runs.path(), &failed, |s| {
-        s.status = RunStatus::Error("boom".to_string());
+        s.status = RunStatus::Error {
+            message: "boom".to_string(),
+            kind: None,
+        };
     });
     let live = run_on_disk(Config::default(), registry(), runs.path(), &manifest);
 
@@ -328,7 +334,8 @@ async fn reload_run_pages_in_a_cancelled_run_paused_but_not_a_finished_one() {
         assert_eq!(
             reload_run(&mut world, &starter, &failed, purpose).err(),
             Some(NotPlaced::Stopped(AgentStatus::Error {
-                message: "boom".to_string()
+                message: "boom".to_string(),
+                kind: None,
             }))
         );
     }

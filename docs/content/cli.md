@@ -1158,7 +1158,7 @@ you are driving Leviath from a scheduler.
 | `waiting` | Blocked. The reason follows the colon |
 | `complete` | Finished |
 | `cancelled` | Cancelled with `lev cancel`. `lev resume` brings it back |
-| `error` | Ended with the error shown |
+| `error` | Ended with the error shown. With `--json` a row also says [which kind of failure](/docs/api#why-a-run-failed) it was: `status.Error.kind` on a run the daemon holds, and `error_kind` on a `not_running` row of `--all` |
 
 A `waiting` run always says what it is blocked on, because the answer decides whether you
 need to do anything. These are stopped until a person acts:

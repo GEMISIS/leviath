@@ -623,7 +623,10 @@ fn answer() -> FinalOutputState {
 fn state() -> CoreState {
     CoreState {
         seq: 4,
-        status: RunStatus::Error("boom".into()),
+        status: RunStatus::Error {
+            message: "boom".into(),
+            kind: Some("no-media".into()),
+        },
         cursor: Cursor {
             stage: stage("implement"),
             visit: "v2".into(),
@@ -1018,7 +1021,10 @@ impl Probe {
             RunStatus::Waiting,
             RunStatus::Paused,
             RunStatus::Complete,
-            RunStatus::Error("boom".into()),
+            RunStatus::Error {
+                message: "boom".into(),
+                kind: None,
+            },
             RunStatus::Cancelled,
         ];
         let mut out = vec![RunState::from(&state())];
@@ -1212,6 +1218,7 @@ async fn every_field_of_every_converted_type_resolves() {
     let full = &json["states"][0];
     assert_eq!(full["status"], "ERROR");
     assert_eq!(full["error"], "boom");
+    assert_eq!(full["errorKind"], "no-media");
     assert_eq!(full["phase"]["kind"], "AWAITING_CHOICE");
     assert_eq!(full["phase"]["edges"][0], "review");
     assert_eq!(full["cursor"]["stage"], "implement");

@@ -148,7 +148,9 @@ pub mod world;
 // `duplicated_attributes` lint under `-D warnings`).
 mod test_support;
 
-pub use components::{AgentState, AgentStatus, ContextWindow, ParentRef, SubAgentChildren};
+pub use components::{
+    AgentState, AgentStatus, ContextWindow, ParentRef, RunFailureKind, SubAgentChildren,
+};
 pub use embed::{AgentWorld, AgentWorldBuilder, BasicToolService, EmbedError, EventStream, RunId};
 pub use fanout::{FanOutSpawner, FanOutSpawnerRes};
 pub use host::{ControlOp, PreparedRun, RunStarter, WorldEvent, WorldHost};

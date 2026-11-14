@@ -507,6 +507,10 @@ frames! {
             status: RunStatus,
             /// The run's error, when that is how it ended.
             error: Option<String>,
+            /// Which kind of failure that is: a short fixed word such as
+            /// `no-media`, to match on without reading `error`. Null when
+            /// the failure states none.
+            error_kind: Option<String>,
             /// The answer it submitted, when there is one.
             final_output: Option<FinalOutput>,
         }
@@ -997,6 +1001,7 @@ pub(crate) fn run_frame(stamped: Stamped) -> Option<RunEventFrame> {
             run_id,
             status,
             result,
+            error_kind,
             final_output: output,
         } => RunCompletedEvent::new(
             head,
@@ -1005,6 +1010,7 @@ pub(crate) fn run_frame(stamped: Stamped) -> Option<RunEventFrame> {
             (
                 RunStatus::from_wire(&status),
                 result,
+                error_kind,
                 output.map(final_output),
             ),
         )

@@ -279,7 +279,10 @@ fn every_old_status_reads_as_a_new_one() {
             OldStatus::Error,
             None,
             None,
-            RunStatus::Error("the run failed and did not say why".into()),
+            RunStatus::Error {
+                message: "the run failed and did not say why".into(),
+                kind: None,
+            },
             PipelinePhase::Done,
         ),
         (

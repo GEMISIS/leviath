@@ -897,6 +897,7 @@ fn finish_fan_out(world: &mut World, parent: Entity, w: FanOutWaiting) {
         crate::pipeline::fail_stage_world(
             world,
             parent,
+            crate::RunFailureKind::WorkersFailed,
             format!(
                 "fan_out: {} worker(s) failed (on_worker_failure = fail_all)",
                 w.failures.len()
@@ -1078,7 +1079,7 @@ fn worker_terminal_result(world: &World, worker: Entity) -> Option<Result<String
                     .unwrap_or_default())),
             }
         }
-        Some(AgentStatus::Error { message }) => Some(Err(message)),
+        Some(AgentStatus::Error { message, .. }) => Some(Err(message)),
         Some(AgentStatus::Cancelled) => Some(Err("worker cancelled".to_string())),
         Some(_) => None,
     }
@@ -1395,7 +1396,8 @@ mod tests {
         assert_eq!(
             std::mem::discriminant(&status_of(world, e)),
             std::mem::discriminant(&AgentStatus::Error {
-                message: String::new()
+                message: String::new(),
+                kind: None,
             })
         );
     }
@@ -2593,10 +2595,18 @@ mod tests {
             worker,
             AgentStatus::Error {
                 message: "boom".to_string(),
+                kind: None,
             },
         );
         fan_out_collect(&mut world);
         assert_errored(&world, e);
+        assert_eq!(
+            status_of(&world, e),
+            AgentStatus::failed(
+                crate::RunFailureKind::WorkersFailed,
+                "fan_out: 1 worker(s) failed (on_worker_failure = fail_all)"
+            )
+        );
         assert_eq!(world.get::<StageCursor>(e).unwrap().index, 0); // no merge
     }
 
@@ -2618,6 +2628,7 @@ mod tests {
             kids[0],
             AgentStatus::Error {
                 message: "worker a died".to_string(),
+                kind: None,
             },
         );
         complete_worker(&mut world, kids[1], "b ok");
@@ -2997,6 +3008,7 @@ mod tests {
             errored,
             AgentStatus::Error {
                 message: "x".to_string(),
+                kind: None,
             },
         );
         assert_eq!(

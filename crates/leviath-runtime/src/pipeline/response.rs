@@ -577,15 +577,17 @@ pub(crate) fn collect_inference(
                 // Record the error and route it to the stage's transition logic
                 // (which follows an `error`-conditioned edge if the stage has one,
                 // e.g. → error_recovery, or terminates the run otherwise).
-                state.status = AgentStatus::Error {
-                    message: message.clone(),
-                };
+                state.status =
+                    AgentStatus::failed(RunFailureKind::ProviderFailure, message.clone());
                 commands
                     .entity(outcome.entity)
                     .remove::<AwaitingInference>()
                     .remove::<InFlightWork>()
                     .remove::<super::RoutesTried>()
-                    .insert(StageOutcome::Errored(message))
+                    .insert(StageOutcome::Errored(
+                        RunFailureKind::ProviderFailure,
+                        message,
+                    ))
                     .insert(ResolveTransition);
             }
         }
@@ -778,8 +780,9 @@ pub(crate) struct StageProgress {
 /// when the stage errored, hit its iteration cap, or stopped making progress.
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub(crate) enum StageOutcome {
-    /// The stage errored (carries the error message for the terminal case).
-    Errored(String),
+    /// The stage errored: which kind of failure, and the sentence that says
+    /// it (the run's error when no edge takes it on).
+    Errored(RunFailureKind, String),
     /// The stage hit its `max_iterations` cap.
     MaxIterations,
     /// A `stuck` edge tripped mid-stage; carries the human-readable reason.
@@ -870,12 +873,14 @@ pub(crate) fn process_response(
                     buffer.logs.push((idx, format!("[error] {message}")));
                 }
                 if let Some(mut state) = state {
-                    state.status = AgentStatus::Error {
-                        message: message.clone(),
-                    };
+                    state.status =
+                        AgentStatus::failed(RunFailureKind::CutOffToolCall, message.clone());
                 }
-                e.insert(StageOutcome::Errored(message))
-                    .insert(ResolveTransition);
+                e.insert(StageOutcome::Errored(
+                    RunFailureKind::CutOffToolCall,
+                    message,
+                ))
+                .insert(ResolveTransition);
                 continue;
             }
             progress.cut_off_nudges += 1;
@@ -1041,14 +1046,12 @@ pub(crate) fn handle_empty_response(
                     sink.as_ref(),
                 );
                 if let Some(state) = state.as_deref_mut() {
-                    state.status = AgentStatus::Error {
-                        message: message.clone(),
-                    };
+                    state.status = AgentStatus::failed(RunFailureKind::NoMedia, message.clone());
                 }
                 commands
                     .entity(entity)
                     .remove::<ReadyForTransition>()
-                    .insert(StageOutcome::Errored(message))
+                    .insert(StageOutcome::Errored(RunFailureKind::NoMedia, message))
                     .insert(ResolveTransition);
                 continue;
             }

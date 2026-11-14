@@ -254,6 +254,7 @@ fn a_run_first_seen_terminal_gets_a_complete_story_in_one_pass() {
             0,
             AgentStatus::Error {
                 message: "boom".to_string(),
+                kind: None,
             },
         ),
     ));
@@ -399,7 +400,8 @@ fn terminal_label_maps_every_status() {
     assert_eq!(terminal_label(&AgentStatus::Complete), Some("complete"));
     assert_eq!(
         terminal_label(&AgentStatus::Error {
-            message: "x".to_string()
+            message: "x".to_string(),
+            kind: None,
         }),
         Some("error")
     );

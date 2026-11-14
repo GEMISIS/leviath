@@ -176,6 +176,7 @@ fn every_frame() -> Vec<ServerEvent> {
                 truncated: true,
                 artifacts: Vec::new(),
             }),
+            error_kind: None,
         },
         ServerEvent::DaemonLink {
             connected: true,
@@ -698,11 +699,13 @@ fn a_status_this_build_does_not_know_is_unknown() {
         status: "hibernating".to_string(),
         result: Some("boom".to_string()),
         final_output: None,
+        error_kind: Some("no-media".to_string()),
     };
     match run_frame(stamped(frame)).expect("a run frame") {
         RunEventFrame::RunCompleted(completed) => {
             assert_eq!(completed.status, RunStatus::Unknown);
             assert_eq!(completed.error.as_deref(), Some("boom"));
+            assert_eq!(completed.error_kind.as_deref(), Some("no-media"));
             assert!(completed.final_output.is_none());
         }
         _ => panic!("a completion frame converts to a completion frame"),

@@ -418,7 +418,13 @@ pub(crate) fn require_final_output(
             if let Some(flags) = flags.as_mut() {
                 flags.0.output_forced += 1;
             }
-            super::transition::fail_stage(&mut commands, entity, &mut state, why);
+            super::transition::fail_stage(
+                &mut commands,
+                entity,
+                &mut state,
+                RunFailureKind::WrongMedia,
+                why,
+            );
             continue;
         }
         // Its own budget, not the stage's `max_revisits`. Those are different

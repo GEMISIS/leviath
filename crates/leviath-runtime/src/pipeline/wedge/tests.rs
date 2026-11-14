@@ -42,12 +42,13 @@ fn error_message(status: &AgentStatus) -> String {
     assert_eq!(
         std::mem::discriminant(status),
         std::mem::discriminant(&AgentStatus::Error {
-            message: String::new()
+            message: String::new(),
+            kind: None,
         }),
         "expected the run to be failed, got: {status:?}"
     );
     match status {
-        AgentStatus::Error { message } => message.clone(),
+        AgentStatus::Error { message, .. } => message.clone(),
         other => format!("{other:?}"),
     }
 }
@@ -65,6 +66,10 @@ fn a_run_no_system_can_reach_is_failed() {
     let message = error_message(&status_of(&world, e));
     assert!(message.contains("implement"), "names the stage: {message}");
     assert!(message.contains("never move again"), "{message}");
+    assert_eq!(
+        status_of(&world, e),
+        AgentStatus::failed(crate::RunFailureKind::Wedged, message.clone())
+    );
     // The record is spent, and the operator sees why in the stage log.
     assert!(world.get::<Wedged>(e).is_none());
     let logs = &world.get::<StageIoBuffer>(e).unwrap().logs;
@@ -275,6 +280,7 @@ fn a_finished_run_is_left_to_the_host() {
         AgentStatus::Cancelled,
         AgentStatus::Error {
             message: "already failed".to_string(),
+            kind: None,
         },
     ] {
         let mut world = World::new();

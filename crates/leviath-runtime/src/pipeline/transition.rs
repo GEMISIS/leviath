@@ -269,14 +269,13 @@ pub(crate) fn fail_stage(
     commands: &mut Commands,
     entity: Entity,
     state: &mut AgentState,
+    kind: RunFailureKind,
     message: String,
 ) {
-    state.status = AgentStatus::Error {
-        message: message.clone(),
-    };
+    state.status = AgentStatus::failed(kind, message.clone());
     commands
         .entity(entity)
-        .insert(StageOutcome::Errored(message))
+        .insert(StageOutcome::Errored(kind, message))
         .insert(ResolveTransition);
 }
 
@@ -286,17 +285,20 @@ pub(crate) fn fail_stage(
 /// A no-op for an entity that has already despawned, matching the rest of the
 /// exclusive-system helpers: a run that went away mid-tick has nothing left to
 /// route.
-pub(crate) fn fail_stage_world(world: &mut World, entity: Entity, message: String) {
+pub(crate) fn fail_stage_world(
+    world: &mut World,
+    entity: Entity,
+    kind: RunFailureKind,
+    message: String,
+) {
     let Ok(mut entity_mut) = world.get_entity_mut(entity) else {
         return;
     };
     if let Some(mut state) = entity_mut.get_mut::<AgentState>() {
-        state.status = AgentStatus::Error {
-            message: message.clone(),
-        };
+        state.status = AgentStatus::failed(kind, message.clone());
     }
     entity_mut
-        .insert(StageOutcome::Errored(message))
+        .insert(StageOutcome::Errored(kind, message))
         .insert(ResolveTransition);
 }
 
@@ -331,7 +333,7 @@ fn escape(
     [first, second]: [EdgeCondition; 2],
     window: &mut ContextWindow,
     state: &mut AgentState,
-    message: &str,
+    (kind, message): (RunFailureKind, &str),
 ) -> StageResolution {
     let found = find_conditioned_edge(graph, stage, &visits.0, first)
         .or_else(|| find_conditioned_edge(graph, stage, &visits.0, second));
@@ -343,9 +345,7 @@ fn escape(
             StageResolution::Next(Box::new(next))
         }
         None => {
-            state.status = AgentStatus::Error {
-                message: message.to_string(),
-            };
+            state.status = AgentStatus::failed(kind, message);
             StageResolution::TerminalError
         }
     }
@@ -396,14 +396,14 @@ pub(crate) fn resolve_transition(
             // not be able to go on, and the dead-end arm below falls back the
             // other way; a run whose author wrote only the `dead_end` escape
             // should not die because what went wrong was spelled "error".
-            Some(StageOutcome::Errored(message)) => escape(
+            Some(StageOutcome::Errored(kind, message)) => escape(
                 graph,
                 stage,
                 &visits,
                 [EdgeCondition::Error, EdgeCondition::DeadEnd],
                 &mut window,
                 &mut state,
-                message,
+                (*kind, message),
             ),
             Some(StageOutcome::MaxIterations) => {
                 // Whatever runs next - a max_iterations edge target, the normal
@@ -460,10 +460,13 @@ pub(crate) fn resolve_transition(
                 [EdgeCondition::DeadEnd, EdgeCondition::Error],
                 &mut window,
                 &mut state,
-                &format!(
-                    "stage '{}' dead-ended: every declared transition's target has spent \
+                (
+                    RunFailureKind::DeadEnd,
+                    &format!(
+                        "stage '{}' dead-ended: every declared transition's target has spent \
                      its max_revisits budget before an output or terminal stage was reached",
-                    stage.name
+                        stage.name
+                    ),
                 ),
             ),
             other => other,
@@ -499,9 +502,12 @@ pub(crate) fn resolve_transition(
                         [EdgeCondition::MaxIterations, EdgeCondition::Error],
                         &mut window,
                         &mut state,
-                        &format!(
-                            "stage '{}' ended without satisfying the gate to '{}': {message}",
-                            stage.name, graph.stages[next.idx].name
+                        (
+                            RunFailureKind::GateUnsatisfied,
+                            &format!(
+                                "stage '{}' ended without satisfying the gate to '{}': {message}",
+                                stage.name, graph.stages[next.idx].name
+                            ),
                         ),
                     ),
                     None => resolution,
@@ -516,8 +522,9 @@ pub(crate) fn resolve_transition(
                 // polling `status` must not read it as success either.
                 let owed_output = graph.stages.iter().any(|s| s.require_output);
                 state.status = match owed_output && submitted.is_none() {
-                    true => AgentStatus::Error {
-                        message: format!(
+                    true => AgentStatus::failed(
+                        RunFailureKind::FinalOutputMissing,
+                        format!(
                             "the run finished without the final output it requires; {}",
                             super::submission::SubmissionRefusals::reason(
                                 refusals,
@@ -528,7 +535,7 @@ pub(crate) fn resolve_transition(
                                     .map(|s| s.name.as_str()),
                             )
                         ),
-                    },
+                    ),
                     false => AgentStatus::Complete,
                 };
                 commands
@@ -614,7 +621,8 @@ pub(crate) fn resolve_transition(
                         }
                     }
                     Err(message) => {
-                        state.status = AgentStatus::Error { message };
+                        state.status =
+                            AgentStatus::failed(RunFailureKind::StageEntryFailed, message);
                         commands
                             .entity(entity)
                             .remove::<ResolveTransition>()
@@ -1042,7 +1050,7 @@ pub fn force_transition(world: &mut World, agent: crate::world::AgentId, target_
                 Some((stage_inf, setup, name, taken))
             }
             Err(message) => {
-                state.status = AgentStatus::Error { message };
+                state.status = AgentStatus::failed(RunFailureKind::StageEntryFailed, message);
                 None
             }
         }

@@ -298,9 +298,12 @@ pub(crate) async fn bind_paged(
         .ok_or(NotPlaced::Missing)?;
     let revive = match (&run.state.status, purpose) {
         (RunStatus::Complete, _) => return Err(NotPlaced::Stopped(AgentStatus::Complete)),
-        (RunStatus::Error(message), _) => {
+        (RunStatus::Error { message, kind }, _) => {
             return Err(NotPlaced::Stopped(AgentStatus::Error {
                 message: message.clone(),
+                kind: kind
+                    .as_deref()
+                    .and_then(leviath_runtime::RunFailureKind::from_label),
             }));
         }
         (RunStatus::Cancelled, PageIn::Address) => {

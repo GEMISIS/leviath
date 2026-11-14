@@ -74,12 +74,13 @@ fn error_message(status: &AgentStatus) -> String {
     assert_eq!(
         std::mem::discriminant(status),
         std::mem::discriminant(&AgentStatus::Error {
-            message: String::new()
+            message: String::new(),
+            kind: None,
         }),
         "expected the run to be failed, got: {status:?}"
     );
     match status {
-        AgentStatus::Error { message } => message.clone(),
+        AgentStatus::Error { message, .. } => message.clone(),
         other => format!("{other:?}"),
     }
 }
@@ -105,6 +106,10 @@ fn a_run_whose_journal_cannot_be_written_is_failed() {
     assert!(
         message.contains("journal could not be written"),
         "{message}"
+    );
+    assert_eq!(
+        status_of(&world, e),
+        AgentStatus::failed(crate::RunFailureKind::JournalUnwritable, message.clone())
     );
     let logs = &world.get::<StageIoBuffer>(e).unwrap().logs;
     assert!(
