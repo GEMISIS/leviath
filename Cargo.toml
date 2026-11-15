@@ -303,7 +303,7 @@ axum = { version = "0.8", features = ["ws", "multipart"] }
 # uses - so this adds a server-side TLS *listener* without adding a second TLS
 # implementation or a second crypto provider, which is what the policy above
 # is about.
-axum-server = { version = "0.8", features = ["tls-rustls"] }
+axum-server = { version = "0.9", features = ["tls-rustls"] }
 # `compression-*` for `lev serve`'s responses: a run listing is JSON with a
 # great deal of repetition, and a console on the other end of a tunnel reads
 # it at a tenth of the bytes. Both codecs were already in the lockfile through
