@@ -45,8 +45,8 @@ fn remote_of(file: &Value) -> Result<RemoteFile> {
         expires_at: file
             .get("expirationTime")
             .and_then(Value::as_str)
-            .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
-            .map(|t| t.timestamp()),
+            .and_then(leviath_core::clock::parse_rfc3339)
+            .map(|t| t.unix_timestamp()),
     })
 }
 

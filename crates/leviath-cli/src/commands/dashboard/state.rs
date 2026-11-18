@@ -644,8 +644,7 @@ impl Dashboard {
     }
 
     pub(super) fn add_log(&mut self, msg: String) {
-        let now = chrono::Local::now();
-        let timestamp = now.format("%H:%M:%S").to_string();
+        let timestamp = leviath_core::clock::time_of_day(leviath_core::clock::local_now());
         self.log.push(LogEntry {
             timestamp,
             message: msg.clone(),

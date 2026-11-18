@@ -471,7 +471,7 @@ binds = [{ region = "task" }]
     let v: serde_json::Value =
         serde_json::from_str(json.trim()).expect("the clock answered with JSON");
     assert!(
-        chrono::DateTime::parse_from_rfc3339(v["utc"].as_str().expect("utc")).is_ok(),
+        leviath_core::clock::parse_rfc3339(v["utc"].as_str().expect("utc")).is_some(),
         "{json}"
     );
 }

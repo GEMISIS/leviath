@@ -67,7 +67,13 @@ pub fn workspace_root() -> PathBuf {
 
 /// Today as `YYYY-MM-DD`, UTC, so two machines on one day agree.
 pub fn today() -> String {
-    chrono::Utc::now().format("%Y-%m-%d").to_string()
+    let day = time::OffsetDateTime::now_utc().date();
+    format!(
+        "{:04}-{:02}-{:02}",
+        day.year(),
+        u8::from(day.month()),
+        day.day()
+    )
 }
 
 #[cfg(test)]

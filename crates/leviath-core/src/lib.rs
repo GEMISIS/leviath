@@ -11,6 +11,7 @@
 //! - **Lifecycle**: Policies for eviction, compaction, and context management
 
 pub mod cache;
+pub mod clock;
 pub mod config;
 pub mod context;
 pub mod context_cause;

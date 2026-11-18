@@ -320,7 +320,7 @@ async fn an_idle_limit_finishes_a_final_stage() {
     host.world_mut().run_until_idle(20).await;
     assert!(parked(&host, chat));
 
-    let now = chrono::Utc::now().timestamp();
+    let now = leviath_core::duration::now_secs();
     host.world_mut()
         .world_mut()
         .get_mut::<crate::pipeline::StageProgress>(chat.entity())
@@ -551,7 +551,7 @@ async fn a_parked_run_can_be_paused_and_its_idle_limit_waits() {
     host.world_mut().run_until_idle(20).await;
     assert!(parked(&host, chat));
     assert!(host.world_mut().pause(chat));
-    let now = chrono::Utc::now().timestamp();
+    let now = leviath_core::duration::now_secs();
     host.world_mut()
         .world_mut()
         .get_mut::<crate::pipeline::StageProgress>(chat.entity())

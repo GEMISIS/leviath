@@ -27,7 +27,7 @@
 //! otherwise have to build a runtime to await a function that never yields.
 
 use super::*;
-use chrono::{DateTime, Datelike, FixedOffset, Local, Timelike, Utc};
+use leviath_core::clock::{self, OffsetDateTime};
 
 // ── current_time ──────────────────────────────────────────────────────────
 
@@ -35,27 +35,27 @@ use chrono::{DateTime, Datelike, FixedOffset, Local, Timelike, Utc};
 ///
 /// Takes both renderings of the same moment plus the zone name, rather than
 /// reading the clock itself, so every field can be asserted against a fixed
-/// instant. A function that called `Utc::now()` internally could only be tested
+/// instant. A function that read the clock internally could only be tested
 /// against itself.
 ///
-/// `local` is a [`FixedOffset`] rather than a `Local`: it carries the offset as
-/// data, so a test can build any zone without the host being in it.
+/// `local` carries its offset as data, so a test can build any zone without
+/// the host being in it.
 pub(crate) fn describe_instant(
-    utc: DateTime<Utc>,
-    local: DateTime<FixedOffset>,
+    utc: OffsetDateTime,
+    local: OffsetDateTime,
     zone: Option<&str>,
 ) -> Value {
-    let iso = local.iso_week();
+    let (iso_year, iso_week, _) = local.to_iso_week_date();
     json!({
-        "utc": utc.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        "local": local.to_rfc3339_opts(chrono::SecondsFormat::Secs, false),
+        "utc": clock::rfc3339_utc(utc),
+        "local": clock::rfc3339(local),
         "timezone": zone,
-        "utc_offset": local.offset().to_string(),
-        "unix": utc.timestamp(),
-        "date": local.format("%Y-%m-%d").to_string(),
-        "time": local.format("%H:%M:%S").to_string(),
-        "weekday": local.format("%A").to_string(),
-        "iso_week": format!("{}-W{:02}", iso.year(), iso.week()),
+        "utc_offset": clock::offset(local.offset()),
+        "unix": utc.unix_timestamp(),
+        "date": clock::date(local.date()),
+        "time": clock::time_of_day(local),
+        "weekday": local.weekday().to_string(),
+        "iso_week": format!("{iso_year}-W{iso_week:02}"),
         "day_of_year": local.ordinal(),
         "hour_24": local.hour(),
     })
@@ -368,10 +368,9 @@ impl BuiltinTools {
 
     /// The current instant, in UTC and in the host's local zone.
     fn current_time(&self) -> String {
-        let now = Utc::now();
-        let local = Local::now().fixed_offset();
+        let local = clock::local_now();
         let zone = iana_time_zone::get_timezone().ok();
-        pretty(&describe_instant(now, local, zone.as_deref()))
+        pretty(&describe_instant(local, local, zone.as_deref()))
     }
 
     /// What machine this is.
@@ -475,13 +474,15 @@ mod tests {
     /// A fixed instant, so every field is asserted against a known answer
     /// rather than against whatever the clock said. 2026-08-18 is a Tuesday,
     /// day 230 of the year, in ISO week 34.
-    fn fixed() -> (DateTime<Utc>, DateTime<FixedOffset>) {
-        let utc = DateTime::parse_from_rfc3339("2026-08-18T19:32:07Z")
-            .expect("a literal RFC3339 instant parses")
-            .with_timezone(&Utc);
-        let local = DateTime::parse_from_rfc3339("2026-08-18T14:32:07-05:00")
-            .expect("a literal RFC3339 instant parses");
-        (utc, local)
+    fn fixed() -> (OffsetDateTime, OffsetDateTime) {
+        (
+            instant("2026-08-18T19:32:07Z"),
+            instant("2026-08-18T14:32:07-05:00"),
+        )
+    }
+
+    fn instant(text: &str) -> OffsetDateTime {
+        clock::parse_rfc3339(text).expect("a literal RFC 3339 instant parses")
     }
 
     #[test]
@@ -506,10 +507,8 @@ mod tests {
     /// one: it is already the 19th in UTC while the user is still on the 18th.
     #[test]
     fn calendar_fields_follow_the_local_day_not_the_utc_one() {
-        let utc = DateTime::parse_from_rfc3339("2026-08-19T02:30:00Z")
-            .expect("literal parses")
-            .with_timezone(&Utc);
-        let local = DateTime::parse_from_rfc3339("2026-08-18T21:30:00-05:00").expect("literal");
+        let utc = instant("2026-08-19T02:30:00Z");
+        let local = instant("2026-08-18T21:30:00-05:00");
         let v = describe_instant(utc, local, None);
         assert_eq!(v["date"], "2026-08-18");
         assert_eq!(v["weekday"], "Tuesday");
@@ -529,10 +528,10 @@ mod tests {
         let utc = v["utc"].as_str().expect("utc is a string");
         let local = v["local"].as_str().expect("local is a string");
         // Same moment, two renderings: parsed back to UTC they must agree.
-        let a = DateTime::parse_from_rfc3339(utc).expect("utc round-trips");
-        let b = DateTime::parse_from_rfc3339(local).expect("local round-trips");
-        assert_eq!(a.timestamp(), b.timestamp());
-        assert_eq!(v["unix"].as_i64(), Some(a.timestamp()));
+        let a = clock::parse_rfc3339(utc).expect("utc round-trips");
+        let b = clock::parse_rfc3339(local).expect("local round-trips");
+        assert_eq!(a.unix_timestamp(), b.unix_timestamp());
+        assert_eq!(v["unix"].as_i64(), Some(a.unix_timestamp()));
     }
 
     #[test]

@@ -368,7 +368,7 @@ fn answer_dropped(step: Option<crate::runfile::lane::RunFileStep>) {
 
 /// Now, in unix seconds.
 fn now() -> i64 {
-    chrono::Utc::now().timestamp()
+    leviath_core::duration::now_secs()
 }
 
 /// Name the files written beside `run_id`'s run file since its last step,

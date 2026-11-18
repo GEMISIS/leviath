@@ -108,7 +108,6 @@ tracing-subscriber = { workspace = true }
 rhai = { workspace = true }
 glob = { workspace = true }
 dirs = { workspace = true }
-chrono = { workspace = true }
 bevy_ecs = { workspace = true }
 crossterm = { workspace = true }
 ratatui = { workspace = true }

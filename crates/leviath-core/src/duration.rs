@@ -79,6 +79,15 @@ pub fn now_secs_u64() -> u64 {
     now_secs() as u64
 }
 
+/// The current Unix time in whole milliseconds, for stamps that order events
+/// within one second. Zero on an unset clock, as [`now_secs`] is.
+pub fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 /// The JSON key carrying a run's age in seconds, on every API that serves runs.
 pub const AGE_SECS_KEY: &str = "age_secs";
 
@@ -171,6 +180,11 @@ mod tests {
         assert!(
             (1_704_067_200..4_102_444_800).contains(&unsigned),
             "{unsigned}"
+        );
+        let millis = now_millis();
+        assert!(
+            (now * 1_000..(now + 60) * 1_000).contains(&millis),
+            "{millis}"
         );
     }
 }

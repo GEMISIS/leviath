@@ -745,7 +745,7 @@ pub(crate) fn enter_stage(
     // left. A self-transition closes and reopens: it is an entry like any other,
     // and the visit number the transition event carries counts it as one.
     if let Some(ledger) = ledger {
-        let at = chrono::Utc::now().timestamp();
+        let at = leviath_core::duration::now_secs();
         if let Some(rec) = ledger.0.get_mut(cursor.index) {
             rec.close_visit(at);
         }

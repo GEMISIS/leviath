@@ -67,7 +67,7 @@ impl BatchDispatch<'_> {
                 execution_id: self.execution_of(id),
                 outcome: Some(crate::runfile::outcome_of(result.as_str())),
                 result,
-                at: chrono::Utc::now().timestamp(),
+                at: leviath_core::duration::now_secs(),
             })
             .collect();
         if !lane.is_empty() {
@@ -77,7 +77,7 @@ impl BatchDispatch<'_> {
                     .map(|c| (c.id.clone(), self.execution_of(&c.id)))
                     .collect(),
                 requested_by: self.requested_by.to_string(),
-                at: chrono::Utc::now().timestamp(),
+                at: leviath_core::duration::now_secs(),
             });
         }
         records
@@ -113,7 +113,7 @@ impl BatchDispatch<'_> {
                     thought_signature: c.thought_signature.clone(),
                 })
                 .collect(),
-            at: chrono::Utc::now().timestamp(),
+            at: leviath_core::duration::now_secs(),
             stage_index: self.stage_index,
             iteration: self.iteration,
             visit_id: self.visit_id.to_string(),
@@ -139,7 +139,7 @@ pub(crate) fn journal_artifacts(
             RunRecord::ArtifactsProduced {
                 execution_id: execution_id.clone(),
                 artifacts: artifacts.clone(),
-                at: chrono::Utc::now().timestamp(),
+                at: leviath_core::duration::now_secs(),
             },
         );
     }

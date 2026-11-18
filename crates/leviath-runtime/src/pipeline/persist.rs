@@ -249,7 +249,7 @@ pub(crate) fn reflect_interaction_status(
     let Some(hub) = hub else { return };
     let pending: std::collections::HashSet<String> =
         hub.pending().into_iter().map(|(id, _)| id).collect();
-    let now = chrono::Utc::now().timestamp();
+    let now = leviath_core::duration::now_secs();
     for (entity, mut state, marked, progress) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
         match (pending.contains(&state.agent_id), marked.is_some()) {
@@ -532,7 +532,7 @@ fn build_snapshots(
     ) in agents.iter_mut()
     {
         crate::tick_scope::enter(entity);
-        let now = chrono::Utc::now().timestamp();
+        let now = leviath_core::duration::now_secs();
 
         let status = crate::persistence::run_status_from(&state.status);
         // The parking markers, gathered here because this is where they are

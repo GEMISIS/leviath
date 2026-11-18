@@ -792,7 +792,7 @@ fn broken_config_footer(path: &std::path::Path) -> Option<String> {
 /// once. Without `--all` an unreachable daemon is fatal, because a listing of
 /// live runs with no daemon to list them is simply an error.
 pub async fn send_list(client: &ControlClient, args: &PsArgs) -> anyhow::Result<()> {
-    let now = chrono::Utc::now().timestamp();
+    let now = leviath_core::duration::now_secs();
     match (client.list().await, args.all) {
         (
             Ok(ControlResponse::List {

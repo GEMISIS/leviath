@@ -1209,7 +1209,7 @@ async fn each_re_drive_reports_providers_out_of_service() {
         "openrouter",
         leviath_providers::UnavailableReason::CreditsExhausted,
         None,
-        chrono::Utc::now().timestamp(),
+        leviath_core::duration::now_secs(),
         &policy,
     );
     host.world_mut().world_mut().insert_resource(circuits);
@@ -3777,7 +3777,7 @@ async fn a_status_event_carries_why_a_run_is_parked_and_re_fires_when_that_chang
 #[tokio::test]
 async fn emit_events_holds_a_terminal_agent_while_its_title_is_still_coming() {
     let mut host = host_with(vec![]);
-    let now = chrono::Utc::now().timestamp();
+    let now = leviath_core::duration::now_secs();
 
     let root = {
         let mut s = agent_state("root");

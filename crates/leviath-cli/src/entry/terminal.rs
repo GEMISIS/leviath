@@ -155,7 +155,7 @@ pub(super) async fn real_rage(args: commands::rage::RageArgs) -> anyhow::Result<
         env_names: Box::new(|| std::env::vars().map(|(name, _)| name).collect()),
         daemon: Box::new(real_daemon_snapshot),
         install: Box::new(commands::rage::real_install_description),
-        now: Box::new(chrono::Local::now),
+        now: Box::new(leviath_core::clock::local_now),
         data_dir,
     };
     // The probe below is synchronous over an async client, so it runs on a

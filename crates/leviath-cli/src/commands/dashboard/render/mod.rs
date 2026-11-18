@@ -406,7 +406,7 @@ mod tests {
             title: Some("My Test".to_string()),
             model: Some("claude-sonnet-4-20250514".to_string()),
             parent_id: None,
-            started_at: chrono::Utc::now().timestamp() - 60,
+            started_at: leviath_core::duration::now_secs() - 60,
             last_progress_at: None,
             runtime_secs: 0,
             clock_now: 0,
@@ -1135,8 +1135,8 @@ regions = []
                 entered: true,
                 prompt_tokens: 100,
                 completion_tokens: 50,
-                started_at: Some(chrono::Utc::now().timestamp() - 60),
-                ended_at: Some(chrono::Utc::now().timestamp() - 30),
+                started_at: Some(leviath_core::duration::now_secs() - 60),
+                ended_at: Some(leviath_core::duration::now_secs() - 30),
                 ..crate::runstate::StageRecord::new("plan".to_string(), 0)
             },
             crate::runstate::StageRecord {
@@ -1144,7 +1144,7 @@ regions = []
                 entered: true,
                 prompt_tokens: 200,
                 completion_tokens: 80,
-                started_at: Some(chrono::Utc::now().timestamp() - 30),
+                started_at: Some(leviath_core::duration::now_secs() - 30),
                 ..crate::runstate::StageRecord::new("implement".to_string(), 1)
             },
             crate::runstate::StageRecord::new("review".to_string(), 2),

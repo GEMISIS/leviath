@@ -1771,7 +1771,7 @@ async fn dispatch_parks_an_agent_whose_provider_circuit_is_open() {
         "cfg",
         leviath_providers::UnavailableReason::CreditsExhausted,
         None,
-        chrono::Utc::now().timestamp(),
+        leviath_core::duration::now_secs(),
         &policy,
     );
     world.insert_resource(circuits);
@@ -1809,7 +1809,7 @@ async fn dispatch_proceeds_once_the_cooldown_lets_a_probe_through() {
         "cfg",
         leviath_providers::UnavailableReason::CreditsExhausted,
         None,
-        chrono::Utc::now().timestamp() - 61,
+        leviath_core::duration::now_secs() - 61,
         &policy,
     );
     world.insert_resource(circuits);
@@ -2555,7 +2555,7 @@ fn an_upstream_outage_is_not_counted_against_the_gateway() {
 
     let circuits = world.resource::<ProviderCircuits>();
     assert!(circuits.last_failure("openrouter").is_none());
-    assert!(!circuits.is_open("openrouter", chrono::Utc::now().timestamp(), &policy));
+    assert!(!circuits.is_open("openrouter", leviath_core::duration::now_secs(), &policy));
 }
 
 /// A bare model name leaves the route to the machine, so a provider that
@@ -2985,7 +2985,7 @@ fn provider_fatal_failures_trip_the_breaker_and_a_success_clears_it() {
     };
     world.insert_resource(ProviderCircuits::default());
     world.insert_resource(policy);
-    let now = chrono::Utc::now().timestamp();
+    let now = leviath_core::duration::now_secs();
 
     for _ in 0..2 {
         let e = world
@@ -3043,7 +3043,7 @@ fn a_success_between_failures_clears_the_count_end_to_end() {
         failures_before_open: 3,
         cooldown_secs: 300,
     };
-    let now = chrono::Utc::now().timestamp();
+    let now = leviath_core::duration::now_secs();
     let (mut world, tx) = world_with_results();
     world.insert_resource(ProviderCircuits::default());
     world.insert_resource(policy);
@@ -3107,7 +3107,7 @@ fn a_slow_provider_keeps_its_place_where_a_refused_one_loses_it() {
         failures_before_open: 2,
         cooldown_secs: 300,
     };
-    let now = chrono::Utc::now().timestamp();
+    let now = leviath_core::duration::now_secs();
 
     // The label is the channel: `failure_kind` reads it back off the message,
     // which is the only thing that survives into a Rhai provider and out again.
@@ -3186,7 +3186,7 @@ fn an_ordinary_error_does_not_count_against_the_provider() {
 
     assert!(!world.resource::<ProviderCircuits>().is_open(
         "dead",
-        chrono::Utc::now().timestamp(),
+        leviath_core::duration::now_secs(),
         &policy
     ));
 }
@@ -4714,7 +4714,7 @@ fn dispatch_persistence_appends_ride_the_snapshot_when_heartbeat_is_due() {
     let _ = rx.try_recv().expect("first job");
 
     // Age the watermark past the heartbeat window, then buffer a line.
-    let stale = chrono::Utc::now().timestamp() - (PERSIST_HEARTBEAT_SECS + 1);
+    let stale = leviath_core::duration::now_secs() - (PERSIST_HEARTBEAT_SECS + 1);
     world
         .get_mut::<PersistWatermark>(e)
         .unwrap()
@@ -4954,7 +4954,7 @@ fn dispatch_persistence_taint_audit_is_not_rewritten_when_unchanged() {
 
     // Force a heartbeat snapshot with no new gate events: the audit rides
     // along exactly once.
-    let stale = chrono::Utc::now().timestamp() - (PERSIST_HEARTBEAT_SECS + 1);
+    let stale = leviath_core::duration::now_secs() - (PERSIST_HEARTBEAT_SECS + 1);
     world
         .get_mut::<PersistWatermark>(e)
         .unwrap()
@@ -10236,7 +10236,7 @@ async fn a_restart_keeps_the_visits_answer() {
     let alone = tg::graph(vec![tg::stage("s")], layout.clone());
     let onward = tg::graph(vec![tg::stage("s"), tg::stage("t")], layout);
     let (mut world, mut rx, _lane) = announcing_world();
-    let now = chrono::Utc::now().timestamp();
+    let now = leviath_core::duration::now_secs();
     let mut record = leviath_core::run_meta::StageRecord::new("s".into(), 0);
     record.begin_visit(now - 60, "v".into());
     let answer = leviath_core::output::FinalOutput::new("x", None, "s".into(), now - 30);
@@ -13716,7 +13716,7 @@ fn detect_stuck_stage_stamps_the_stage_clock_on_first_sight() {
 
     // Backdate the stamp past the threshold and it trips.
     let mut progress = world.get_mut::<StageProgress>(e).unwrap();
-    progress.stage_started_at = Some(chrono::Utc::now().timestamp() - 11 * 60);
+    progress.stage_started_at = Some(leviath_core::duration::now_secs() - 11 * 60);
     run_detect_stuck(&mut world);
     let reason = stuck_reason_of(world.get::<StageOutcome>(e)).expect("a Stuck outcome");
     assert!(reason.contains("minutes"), "got: {reason}");
@@ -16472,7 +16472,7 @@ async fn reflect_keeps_a_wait_on_a_person_off_the_stage_clock() {
 
     let mut world = World::new();
     world.insert_resource(hub.clone());
-    let now = chrono::Utc::now().timestamp();
+    let now = leviath_core::duration::now_secs();
     // Two minutes into the stage when the prompt opens.
     let e = world
         .spawn((
@@ -16509,7 +16509,7 @@ async fn reflect_keeps_a_wait_on_a_person_off_the_stage_clock() {
     let progress = world.get::<StageProgress>(e).unwrap();
     assert_eq!(progress.waiting_since, None, "the wait is over");
     let started = progress.stage_started_at.expect("the clock is kept");
-    let elapsed = chrono::Utc::now().timestamp() - started;
+    let elapsed = leviath_core::duration::now_secs() - started;
     assert!(
         (0..=3).contains(&(elapsed - 120)),
         "the stage is still two minutes in, not an hour and two: elapsed {elapsed}s"
@@ -16555,7 +16555,7 @@ fn reflect_credits_nothing_when_no_wait_was_recorded() {
     let hub = InteractionHub::new(); // empty: nothing pending
     let mut world = World::new();
     world.insert_resource(hub);
-    let started = chrono::Utc::now().timestamp() - 300;
+    let started = leviath_core::duration::now_secs() - 300;
     let e = world
         .spawn((
             reflect_state("a", AgentStatus::Waiting),

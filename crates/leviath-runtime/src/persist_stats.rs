@@ -153,7 +153,7 @@ impl PersistLaneStats {
             run_id: run_id.to_string(),
             path: path.display().to_string(),
             message: message.to_string(),
-            at: chrono::Utc::now().timestamp(),
+            at: leviath_core::duration::now_secs(),
         };
         *leviath_core::sync::lock(&self.last) = Some(error.clone());
         error

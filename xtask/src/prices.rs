@@ -299,7 +299,13 @@ pub fn render_table(table: &Table) -> String {
 /// The unit rows a person last checked more than [`UNIT_ROW_STALE_DAYS`]
 /// before `today`, or on a day that does not parse.
 pub fn stale_unit_rows(table: &Table, today: &str) -> Vec<String> {
-    let parse = |d: &str| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok();
+    let parse = |d: &str| {
+        let mut parts = d.splitn(3, '-');
+        let year = parts.next()?.parse().ok()?;
+        let month: u8 = parts.next()?.parse().ok()?;
+        let day = parts.next()?.parse().ok()?;
+        time::Date::from_calendar_date(year, month.try_into().ok()?, day).ok()
+    };
     let Some(now) = parse(today) else {
         return Vec::new();
     };
@@ -310,7 +316,7 @@ pub fn stale_unit_rows(table: &Table, today: &str) -> Vec<String> {
         .filter(|row| row.source != LITELLM_UNIT_SOURCE)
         .filter_map(|row| {
             let old = match parse(&row.checked_on) {
-                Some(day) => (now - day).num_days() > UNIT_ROW_STALE_DAYS,
+                Some(day) => (now - day).whole_days() > UNIT_ROW_STALE_DAYS,
                 None => true,
             };
             old.then(|| {

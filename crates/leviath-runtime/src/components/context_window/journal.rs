@@ -266,7 +266,7 @@ impl ContextWindow {
             cause,
             regions,
             execution_id: journal.executing.clone(),
-            at: chrono::Utc::now().timestamp(),
+            at: leviath_core::duration::now_secs(),
         };
         // A journal that has closed takes nothing: the world drops its sender
         // as it stops, and a write racing that is a write nobody is waiting

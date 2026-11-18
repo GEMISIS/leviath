@@ -53,12 +53,8 @@ impl Dashboard {
                 let total = h.points.len();
                 match h.points.get(i) {
                     Some(p) => {
-                        let when = chrono::DateTime::from_timestamp(p.at, 0)
-                            .map(|t| {
-                                t.with_timezone(&chrono::Local)
-                                    .format("%H:%M:%S")
-                                    .to_string()
-                            })
+                        let when = leviath_core::clock::local_at(p.at)
+                            .map(leviath_core::clock::time_of_day)
                             .unwrap_or_default();
                         format!(
                             " ⏪ point {}/{} · {} · {} ",
@@ -958,7 +954,7 @@ mod tests {
             title: Some("My Test".to_string()),
             model: None,
             parent_id: None,
-            started_at: chrono::Utc::now().timestamp() - 60,
+            started_at: leviath_core::duration::now_secs() - 60,
             last_progress_at: None,
             runtime_secs: 0,
             clock_now: 0,
@@ -1987,7 +1983,7 @@ regions = []
             entered: true,
             prompt_tokens: 100,
             completion_tokens: 50,
-            started_at: Some(chrono::Utc::now().timestamp() - 30),
+            started_at: Some(leviath_core::duration::now_secs() - 30),
             ..crate::runstate::StageRecord::new("main".to_string(), 0)
         }]
         .into();
@@ -2061,7 +2057,7 @@ regions = []
         let rec = crate::runstate::StageRecord {
             status: crate::runstate::StageRunStatus::Active,
             entered: true,
-            started_at: Some(chrono::Utc::now().timestamp() - 30),
+            started_at: Some(leviath_core::duration::now_secs() - 30),
             ..crate::runstate::StageRecord::new("main".to_string(), 0)
         };
         agent.stages = vec![rec.clone(), rec].into();
@@ -2104,7 +2100,7 @@ regions = []
         agent.stages = vec![crate::runstate::StageRecord {
             status: crate::runstate::StageRunStatus::Active,
             entered: true,
-            started_at: Some(chrono::Utc::now().timestamp() - 30),
+            started_at: Some(leviath_core::duration::now_secs() - 30),
             ..crate::runstate::StageRecord::new("main".to_string(), 0)
         }]
         .into();
@@ -2221,7 +2217,7 @@ regions = []
             entered: true,
             prompt_tokens: 100,
             completion_tokens: 50,
-            started_at: Some(chrono::Utc::now().timestamp() - 30),
+            started_at: Some(leviath_core::duration::now_secs() - 30),
             ..crate::runstate::StageRecord::new("implement".to_string(), 1)
         }]
         .into();
@@ -2269,8 +2265,8 @@ regions = []
             entered: true,
             prompt_tokens: 100,
             completion_tokens: 50,
-            started_at: Some(chrono::Utc::now().timestamp() - 60),
-            ended_at: Some(chrono::Utc::now().timestamp() - 10),
+            started_at: Some(leviath_core::duration::now_secs() - 60),
+            ended_at: Some(leviath_core::duration::now_secs() - 10),
             ..crate::runstate::StageRecord::new("plan".to_string(), 0)
         }]
         .into();
@@ -2349,7 +2345,7 @@ regions = []
             entered: true,
             prompt_tokens: 100,
             completion_tokens: 50,
-            started_at: Some(chrono::Utc::now().timestamp() - 30),
+            started_at: Some(leviath_core::duration::now_secs() - 30),
             ..crate::runstate::StageRecord::new("main".to_string(), 0)
         }]
         .into();

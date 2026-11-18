@@ -166,10 +166,13 @@ toml = { version = "1.0", features = ["preserve_order"] }
 # from values and would drop every comment a bundled agent carries).
 toml_edit = "0.25"
 anyhow = "1.0"
-chrono = "0.4"
-# The IANA zone name (`America/Chicago`) behind the `current_time` tool. Already
-# in the lock file transitively via chrono, which uses it for `Local`; named here
-# so the tool reports the same zone chrono resolved rather than a second answer.
+# Calendar dates and the host's local UTC offset (`leviath_core::clock`). `std`
+# has neither, and the offset is an OS call the workspace cannot make itself
+# because it forbids `unsafe`. No `macros` or `formatting`: the few shapes
+# Leviath prints are written out by hand.
+time = { version = "0.3", default-features = false, features = ["std", "local-offset", "parsing"] }
+# The IANA zone name (`America/Chicago`) behind the `current_time` tool, which
+# an offset alone cannot give.
 iana-time-zone = "0.1"
 # The user's locale for the `locale_info` tool. `std` exposes none: Unix has
 # `LANG`/`LC_ALL`, Windows and macOS answer only through an OS call, and the

@@ -481,7 +481,7 @@ pub(crate) fn detect_stuck_stage(
     mut commands: Commands,
 ) {
     use crate::spec::graph::EdgeCondition;
-    let now = chrono::Utc::now().timestamp();
+    let now = leviath_core::duration::now_secs();
     crate::tick_scope::clear();
     for (entity, state, spec, cursor, mut progress, visits, mut window, buffer) in agents.iter_mut()
     {

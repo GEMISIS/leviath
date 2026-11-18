@@ -722,7 +722,7 @@ impl Region {
         self.content.push(RegionEntry {
             content,
             tokens,
-            timestamp: chrono::Utc::now().timestamp(),
+            timestamp: crate::duration::now_secs(),
             metadata,
             kind,
             key: key.map(str::to_string),

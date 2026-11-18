@@ -158,7 +158,7 @@ pub(crate) fn expire_idle_conversations(
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
-    let now = chrono::Utc::now().timestamp();
+    let now = leviath_core::duration::now_secs();
     for (entity, mut state, spec, cursor, mut progress, buffer) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
         if state.status != AgentStatus::Waiting {
@@ -255,7 +255,7 @@ pub(crate) fn end_conversation(
     if state.status == AgentStatus::Waiting {
         state.status = AgentStatus::Active;
     }
-    let now = chrono::Utc::now().timestamp();
+    let now = leviath_core::duration::now_secs();
     if let Some(mut progress) = agent.get_mut::<StageProgress>() {
         super::persist::credit_wait_to_stage_clock(&mut progress, now);
     }

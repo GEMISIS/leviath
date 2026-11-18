@@ -141,7 +141,7 @@ pub(crate) fn observe_lifecycle(
         agents.iter_mut()
     {
         crate::tick_scope::enter(entity);
-        let now_ms = chrono::Utc::now().timestamp_millis();
+        let now_ms = leviath_core::duration::now_millis();
         let sink = telemetry.0.as_ref();
         let mut ts = ts;
         let (mut st, is_new) = match ts.as_deref() {

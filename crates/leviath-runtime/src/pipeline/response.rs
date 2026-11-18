@@ -183,7 +183,7 @@ pub(crate) fn collect_inference(
     } = breaker;
     crate::tick_scope::clear();
     let policy = policy.map(|p| *p).unwrap_or_default();
-    let now = chrono::Utc::now().timestamp();
+    let now = leviath_core::duration::now_secs();
     while let Ok(mut outcome) = results.0.try_recv() {
         let Ok((
             mut state,
@@ -1116,7 +1116,7 @@ pub(crate) fn handle_empty_response(
                 sink.as_ref(),
             );
             if super::conversation::parks_after_reply(stage, ended.is_some()) {
-                let now = chrono::Utc::now().timestamp();
+                let now = leviath_core::duration::now_secs();
                 super::conversation::park(
                     &mut commands,
                     entity,

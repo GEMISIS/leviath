@@ -510,7 +510,7 @@ pub(crate) fn record_failed(
     failed.settle_ledger();
     let events = vec![leviath_runtime::state::RunEvent::Log(issues.to_string())];
     writer
-        .record(failed, chrono::Utc::now().timestamp(), events)
+        .record(failed, leviath_core::duration::now_secs(), events)
         .map(drop)
 }
 

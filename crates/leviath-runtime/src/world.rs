@@ -925,7 +925,7 @@ impl PipelineWorld {
             .get_resource::<crate::pipeline::CircuitPolicy>()
             .copied()
             .unwrap_or_default();
-        circuits.open_circuits(chrono::Utc::now().timestamp(), &policy)
+        circuits.open_circuits(leviath_core::duration::now_secs(), &policy)
     }
 
     /// The answer to "the daemon has been quiet for hours - is anything
@@ -1344,7 +1344,7 @@ mod tests {
             "openrouter",
             leviath_providers::UnavailableReason::CreditsExhausted,
             None,
-            chrono::Utc::now().timestamp(),
+            leviath_core::duration::now_secs(),
             &policy,
         );
         world.world_mut().insert_resource(circuits);
@@ -1371,7 +1371,7 @@ mod tests {
                 "openrouter",
                 leviath_providers::UnavailableReason::AuthFailed,
                 None,
-                chrono::Utc::now().timestamp(),
+                leviath_core::duration::now_secs(),
                 &default_policy,
             );
         }
@@ -1566,8 +1566,9 @@ mod tests {
         // says what it needs instead of hanging - and, since a missing
         // provider is one config edit away from being present, it parks rather
         // than dies, so the edit can be followed by `lev resume`.
-        let past =
-            chrono::Utc::now().timestamp() - crate::pipeline::DEFAULT_STALL_TIMEOUT_SECS as i64 - 1;
+        let past = leviath_core::duration::now_secs()
+            - crate::pipeline::DEFAULT_STALL_TIMEOUT_SECS as i64
+            - 1;
         world
             .world_mut()
             .get_mut::<crate::pipeline::DispatchStall>(e.entity())
@@ -2024,7 +2025,7 @@ mod tests {
             "openrouter",
             leviath_providers::UnavailableReason::CreditsExhausted,
             None,
-            chrono::Utc::now().timestamp(),
+            leviath_core::duration::now_secs(),
             &policy,
         );
         world.world_mut().insert_resource(circuits);

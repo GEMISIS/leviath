@@ -657,7 +657,7 @@ pub(crate) fn lane_barrier(world: &World, run_id: &str) -> oneshot::Receiver<App
     let (ack, landed) = oneshot::channel();
     let mut step = crate::runfile::lane::RunFileStep::events(
         run_id,
-        chrono::Utc::now().timestamp(),
+        leviath_core::duration::now_secs(),
         Vec::new(),
     );
     step.acks.push(ack);
@@ -693,7 +693,7 @@ pub fn fork(
         source.spec.run_id.to_string(),
     );
     spec.run_id = run_id;
-    spec.created_at = chrono::Utc::now().timestamp();
+    spec.created_at = leviath_core::duration::now_secs();
     spec.delivery.callback = None;
     spec.delivery.idempotency = None;
     spec.listed = None;

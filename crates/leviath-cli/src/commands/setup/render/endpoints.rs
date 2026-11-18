@@ -262,7 +262,7 @@ mod tests {
         );
         assert!(screen.contains("(8 detected)"), "{screen}");
         assert!(screen.contains("Default model: m3"), "{screen}");
-        w.endpoints[0].checked_at = Some(chrono::Utc::now().timestamp());
+        w.endpoints[0].checked_at = Some(leviath_core::duration::now_secs());
         let screen = rendered(&w);
         assert!(screen.contains("and 2 more · checked just now"), "{screen}");
 

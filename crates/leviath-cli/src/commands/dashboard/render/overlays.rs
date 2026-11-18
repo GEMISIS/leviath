@@ -660,7 +660,7 @@ mod tests {
             title: Some("My Test".to_string()),
             model: None,
             parent_id: None,
-            started_at: chrono::Utc::now().timestamp() - 60,
+            started_at: leviath_core::duration::now_secs() - 60,
             last_progress_at: None,
             runtime_secs: 0,
             clock_now: 0,

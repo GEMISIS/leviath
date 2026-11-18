@@ -276,7 +276,7 @@ pub(crate) fn rotate_open_circuits(
         return; // no breaker installed
     };
     let policy = policy.map(|p| *p).unwrap_or_default();
-    let now = chrono::Utc::now().timestamp();
+    let now = leviath_core::duration::now_secs();
     for (entity, state, mut si) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
         if state.status != crate::components::AgentStatus::Active {
@@ -670,7 +670,7 @@ mod tests {
     fn world_with_open(open: &[&str]) -> World {
         let mut world = World::new();
         let mut circuits = ProviderCircuits::default();
-        let now = chrono::Utc::now().timestamp();
+        let now = leviath_core::duration::now_secs();
         for name in open {
             for _ in 0..policy().failures_before_open {
                 circuits.record_failure(
@@ -820,7 +820,7 @@ mod tests {
         // the breaker silently doing nothing.
         let mut world = World::new();
         let mut circuits = ProviderCircuits::default();
-        let now = chrono::Utc::now().timestamp();
+        let now = leviath_core::duration::now_secs();
         let default_policy = CircuitPolicy::default();
         for _ in 0..default_policy.failures_before_open {
             circuits.record_failure(

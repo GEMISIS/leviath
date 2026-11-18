@@ -154,7 +154,7 @@ pub struct RageEnv {
     /// How this `lev` was installed, in words.
     pub install: Box<dyn Fn() -> String + Send + Sync>,
     /// The clock, for the bundle's name and its timestamps.
-    pub now: Box<dyn Fn() -> chrono::DateTime<chrono::Local> + Send + Sync>,
+    pub now: Box<dyn Fn() -> leviath_core::clock::OffsetDateTime + Send + Sync>,
 }
 
 /// A bundle that was written.
@@ -181,11 +181,15 @@ pub(crate) async fn build(
     output: Option<&Path>,
 ) -> anyhow::Result<Outcome> {
     let now = (env.now)();
-    let root = format!("leviath-rage-{}", now.format("%Y%m%d-%H%M%S"));
+    let root = format!(
+        "leviath-rage-{}-{}",
+        leviath_core::clock::date(now.date()).replace('-', ""),
+        leviath_core::clock::time_of_day(now).replace(':', "")
+    );
     let zip_path = output
         .map(Path::to_path_buf)
         .unwrap_or_else(|| env.cwd.join(format!("{root}.zip")));
-    let bundle = collect::collect(env, sel, &now.to_rfc3339()).await;
+    let bundle = collect::collect(env, sel, &leviath_core::clock::rfc3339(now)).await;
     let zip_bytes = archive::write_zip(&bundle, &root, &zip_path)?;
     let sections = bundle.sections();
     let redactions = bundle.redactions();

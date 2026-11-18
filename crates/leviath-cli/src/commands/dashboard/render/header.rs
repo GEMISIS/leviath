@@ -240,7 +240,7 @@ mod tests {
             title: Some("My Test".to_string()),
             model: Some("claude-sonnet-4-20250514".to_string()),
             parent_id: None,
-            started_at: chrono::Utc::now().timestamp() - 60,
+            started_at: leviath_core::duration::now_secs() - 60,
             last_progress_at: None,
             runtime_secs: 0,
             clock_now: 0,
@@ -460,7 +460,7 @@ mod tests {
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-frozen", AgentDisplayStatus::Waiting);
         // Alive for an hour, at work for 30 seconds of it.
-        agent.started_at = chrono::Utc::now().timestamp() - 3600;
+        agent.started_at = leviath_core::duration::now_secs() - 3600;
         agent.runtime_secs = 30;
         terminal
             .draw(|f| {
@@ -500,7 +500,7 @@ mod tests {
             entered: true,
             prompt_tokens: 200,
             completion_tokens: 80,
-            started_at: Some(chrono::Utc::now().timestamp() - 30),
+            started_at: Some(leviath_core::duration::now_secs() - 30),
             ..crate::runstate::StageRecord::new("main".to_string(), 0)
         });
         dash.selected_stage = 0;

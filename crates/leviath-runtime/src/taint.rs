@@ -423,7 +423,7 @@ impl TaintGate {
     ) {
         self.audit_stages.push(self.stage);
         self.audit_log.push(GateEvent {
-            timestamp: chrono::Utc::now().timestamp(),
+            timestamp: leviath_core::duration::now_secs(),
             agent_id: agent_id.to_string(),
             tool_name: tool_name.to_string(),
             taint_level,

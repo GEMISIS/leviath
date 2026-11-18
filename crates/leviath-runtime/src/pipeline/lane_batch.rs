@@ -473,7 +473,7 @@ fn journal_batch(
                         execution_id: minted.get(call_id).cloned().unwrap_or_default(),
                         outcome: Some(crate::runfile::outcome_of(result.as_str())),
                         result: result.clone(),
-                        at: chrono::Utc::now().timestamp(),
+                        at: leviath_core::duration::now_secs(),
                     },
                 );
             });
