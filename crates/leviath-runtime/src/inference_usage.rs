@@ -81,7 +81,7 @@ pub(crate) fn record_call(
     metadata: Option<&RunMetadata>,
     call: &CallUsage<'_>,
 ) {
-    let at = chrono::Utc::now().timestamp();
+    let at = leviath_core::duration::now_secs();
     if let Some(totals) = totals {
         totals.add_call(call.usage, call.cost);
     }

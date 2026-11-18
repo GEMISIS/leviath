@@ -383,7 +383,7 @@ pub(crate) fn require_final_output(
             stage.name.as_str(),
             &targets,
             stage_inf.and_then(|si| si.output.as_ref()),
-            chrono::Utc::now().timestamp(),
+            leviath_core::duration::now_secs(),
             &mut window,
             &inputs,
         ) {

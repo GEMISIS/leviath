@@ -185,7 +185,7 @@ pub(crate) fn fail_wedged_runs(
     if limit == 0 {
         return; // watchdog disabled
     }
-    let now = chrono::Utc::now().timestamp();
+    let now = leviath_core::duration::now_secs();
     for (entity, wedged, mut state, buffer) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
         // A terminal agent is the goal, not a problem, and the host reaps it. A

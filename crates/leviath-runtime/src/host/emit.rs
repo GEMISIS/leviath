@@ -38,7 +38,7 @@ impl WorldHost {
         // the components it reads.
         let mut to_reap: Vec<(String, Entity, RunListEntry)> = Vec::new();
         let mut to_park: Vec<(String, Entity, RunListEntry)> = Vec::new();
-        let now = chrono::Utc::now().timestamp();
+        let now = leviath_core::duration::now_secs();
         // Read once for the whole pass: the operator can change these while
         // the daemon runs, and a pass that used two different lists partway
         // through would announce one run's threshold and not another's.

@@ -314,9 +314,9 @@ pub(crate) fn remote_from(body: &serde_json::Value, ttl_secs: u64) -> Result<Rem
         .ok_or_else(|| ProviderError::InvalidResponse(format!("an upload with no id: {body}")))?;
     let expires_at = match body.get("expires_at") {
         Some(serde_json::Value::Number(n)) => n.as_i64(),
-        Some(serde_json::Value::String(s)) => chrono::DateTime::parse_from_rfc3339(s)
-            .ok()
-            .map(|t| t.timestamp()),
+        Some(serde_json::Value::String(s)) => {
+            leviath_core::clock::parse_rfc3339(s).map(|t| t.unix_timestamp())
+        }
         _ => None,
     }
     .or(Some(leviath_core::duration::now_secs() + ttl_secs as i64));

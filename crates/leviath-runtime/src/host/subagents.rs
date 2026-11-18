@@ -345,7 +345,7 @@ impl WorldHost {
                 entry.status = AgentStatus::Cancelled;
                 entry.wait_reason = None;
             }
-            self.record_finished(entry, chrono::Utc::now().timestamp());
+            self.record_finished(entry, leviath_core::duration::now_secs());
         }
         forced
     }

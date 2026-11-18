@@ -118,7 +118,7 @@ impl LearnedModel {
     /// and answers every call to it with a 404. Read off the listing, that
     /// 404 looks like an outage of a listed model and is retried, so the date
     /// is the one signal that the model is gone for good.
-    pub fn retired_by(&self, today: chrono::NaiveDate) -> Option<&str> {
+    pub fn retired_by(&self, today: leviath_core::clock::Date) -> Option<&str> {
         self.retires
             .as_deref()
             .filter(|date| retirement_day(date).is_some_and(|day| day <= today))
@@ -314,16 +314,16 @@ impl LearnedModels {
 }
 
 /// Today's date in UTC, the calendar a provider's shutdown date is written in.
-fn today() -> chrono::NaiveDate {
-    chrono::Utc::now().date_naive()
+fn today() -> leviath_core::clock::Date {
+    leviath_core::clock::today_utc()
 }
 
 /// The day a published retirement date names: `YYYY-MM-DD`, or a timestamp
 /// that starts with one (`2026-09-24T00:00:00Z`). `None` for anything else,
 /// which leaves the model in service: retiring a model on a date nobody can
 /// read would take away a route that works.
-fn retirement_day(date: &str) -> Option<chrono::NaiveDate> {
-    chrono::NaiveDate::parse_from_str(date.trim().get(..10)?, "%Y-%m-%d").ok()
+fn retirement_day(date: &str) -> Option<leviath_core::clock::Date> {
+    leviath_core::clock::parse_date(date.trim().get(..10)?)
 }
 
 /// Unix seconds for an RFC 3339 timestamp of the form `YYYY-MM-DDTHH:MM:SSZ`.
@@ -585,8 +585,8 @@ mod tests {
         assert_eq!(listed[1].pricing, Some(ModelPricing::flat(1.0, 2.0)));
     }
 
-    fn day(text: &str) -> chrono::NaiveDate {
-        chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d").unwrap()
+    fn day(text: &str) -> leviath_core::clock::Date {
+        leviath_core::clock::parse_date(text).unwrap()
     }
 
     fn retiring(date: &str) -> LearnedModel {

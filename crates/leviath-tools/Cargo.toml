@@ -26,9 +26,8 @@ saphyr-parser = { workspace = true }
 csv = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true }
-# The clock behind `current_time`, plus the IANA zone name chrono's `Local`
-# already resolved internally but does not expose.
-chrono = { workspace = true }
+# The IANA zone name (`America/Chicago`) the `current_time` tool reports beside
+# the local offset.
 iana-time-zone = { workspace = true }
 # The per-user config/data directories `environment_info` reports. Already the
 # workspace's answer for "where does this platform put these", so the tool says

@@ -16,7 +16,7 @@ fn agent_state(status: AgentStatus) -> AgentState {
 /// An agent holding no phase marker at all, first seen that way `age` seconds
 /// ago. This is the state the pipeline's invariants say cannot happen.
 fn spawn_wedged(world: &mut World, age: i64) -> Entity {
-    let now = chrono::Utc::now().timestamp();
+    let now = leviath_core::duration::now_secs();
     world
         .spawn((
             agent_state(AgentStatus::Active),
@@ -85,7 +85,7 @@ fn a_run_no_system_can_reach_is_failed() {
 fn inside_the_grace_period_it_is_only_recorded() {
     let mut world = World::new();
     world.insert_resource(WedgeTimeout(300));
-    let now = chrono::Utc::now().timestamp();
+    let now = leviath_core::duration::now_secs();
     let e = world
         .spawn((agent_state(AgentStatus::Active), StageIoBuffer::default()))
         .id();
@@ -361,7 +361,7 @@ fn a_recovered_agent_starts_a_fresh_clock() {
 fn an_agent_without_a_stage_log_still_fails() {
     let mut world = World::new();
     world.insert_resource(WedgeTimeout(300));
-    let now = chrono::Utc::now().timestamp();
+    let now = leviath_core::duration::now_secs();
     let e = world
         .spawn((
             agent_state(AgentStatus::Active),

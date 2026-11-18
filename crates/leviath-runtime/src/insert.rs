@@ -90,7 +90,7 @@ pub fn insert(
             spec.run_id.as_str(),
             &state.open_calls,
             &state.remote_jobs,
-            chrono::Utc::now().timestamp(),
+            leviath_core::duration::now_secs(),
         ),
     ));
     place::spec_components(&mut entity, &spec, &setup);
@@ -246,7 +246,7 @@ pub(crate) fn initial_state_from(spec: &RunSpec, window: &ContextWindow) -> RunS
         window.to_state(),
         setup.accepts_messages,
     );
-    let now = chrono::Utc::now().timestamp();
+    let now = leviath_core::duration::now_secs();
     let visit = leviath_core::execution::mint_visit_id();
     state.status = RunStatus::Active;
     state.cursor.visit = visit.clone();

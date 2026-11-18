@@ -259,7 +259,7 @@ impl ProviderReload {
         );
         self.registry().save_primed(
             self.cache_path(),
-            chrono::Utc::now().timestamp(),
+            leviath_core::duration::now_secs(),
             &crate::provider_checks::fingerprints(self.cache_path(), config),
             read,
         );

@@ -177,7 +177,7 @@ fn a_message_wakes_the_run_and_credits_the_wait() {
 #[test]
 fn an_idle_limit_that_runs_out_moves_the_stage_on() {
     let mut world = World::new();
-    let now = chrono::Utc::now().timestamp();
+    let now = leviath_core::duration::now_secs();
     let expired = run(
         &mut world,
         interactive(Some(60)),
@@ -242,7 +242,7 @@ fn an_idle_limit_that_runs_out_moves_the_stage_on() {
 #[test]
 fn an_unattended_run_does_not_wait_for_ever() {
     let mut world = World::new();
-    let now = chrono::Utc::now().timestamp();
+    let now = leviath_core::duration::now_secs();
     let entity = run(&mut world, interactive(None), AgentStatus::Waiting, true);
     let mut spec = (*world.get::<RunSpecC>(entity).unwrap().0).clone();
     spec.auto_answers.questions = true;
@@ -264,7 +264,7 @@ fn an_unattended_run_does_not_wait_for_ever() {
 #[test]
 fn a_child_run_does_not_wait_for_ever() {
     let mut world = World::new();
-    let now = chrono::Utc::now().timestamp();
+    let now = leviath_core::duration::now_secs();
     let entity = run(&mut world, interactive(None), AgentStatus::Waiting, true);
     let mut spec = (*world.get::<RunSpecC>(entity).unwrap().0).clone();
     spec.placement.parent = Some(crate::spec::names::RunId::new("parent").unwrap());

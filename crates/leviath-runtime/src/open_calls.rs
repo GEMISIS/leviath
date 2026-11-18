@@ -511,7 +511,7 @@ impl CallTicket {
         runtime: &tokio::runtime::Handle,
         provider: Option<Arc<dyn Provider>>,
     ) {
-        let now = chrono::Utc::now().timestamp();
+        let now = leviath_core::duration::now_secs();
         let mine = |call: &OpenCall| {
             call.kind == self.kind
                 && call.stage == self.stage
@@ -620,7 +620,7 @@ impl<'a> Sent<'a> {
             provider: self.provider_name.to_string(),
             model: self.model.to_string(),
             provider_call_id: None,
-            opened_at: chrono::Utc::now().timestamp(),
+            opened_at: leviath_core::duration::now_secs(),
             settling_since: None,
             job: None,
             carries: false,
@@ -686,7 +686,7 @@ impl<'a> Sent<'a> {
         // From here the run is owed this call's account, for a bounded while.
         ticket
             .open
-            .settling(&attempt, chrono::Utc::now().timestamp());
+            .settling(&attempt, leviath_core::duration::now_secs());
         // A job the call submitted, or picked up, that the run still holds
         // carries the cost: the provider goes on running it, and the call
         // made again picks it up and records what it came to. This attempt
@@ -900,7 +900,7 @@ fn write_late(
     late: Option<&mut LateSettled>,
     spend: &CallSpend,
 ) {
-    let at = chrono::Utc::now().timestamp();
+    let at = leviath_core::duration::now_secs();
     let landed = match (lane, spend.run_id.is_empty()) {
         (Some(lane), false) => {
             let record = crate::inference_usage::usage_record(&usage_of(spend), at);
@@ -994,7 +994,7 @@ pub fn settle_recorded(
     calls: &[crate::state::OpenCallState],
     jobs: &Jobs,
 ) {
-    let now = chrono::Utc::now().timestamp();
+    let now = leviath_core::duration::now_secs();
     settle_listed(
         world,
         Entity::PLACEHOLDER,
@@ -1026,7 +1026,7 @@ pub(crate) fn give_up_jobs(
     let Some(lane) = lane else {
         return;
     };
-    let now = chrono::Utc::now().timestamp();
+    let now = leviath_core::duration::now_secs();
     for (entity, state, open, jobs) in &runs {
         let ended = crate::pipeline::is_terminal_status(&state.status);
         let given = open.give_up(ended, &jobs.0.jobs(), now);

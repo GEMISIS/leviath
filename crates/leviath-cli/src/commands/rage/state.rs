@@ -310,11 +310,14 @@ fn run_picker(runs: &[RunMeta]) -> Picker {
     let options = runs
         .iter()
         .map(|meta| {
-            let started = chrono::DateTime::from_timestamp(meta.started_at, 0)
+            let started = leviath_core::clock::local_at(meta.started_at)
                 .map(|t| {
-                    t.with_timezone(&chrono::Local)
-                        .format("%Y-%m-%d %H:%M")
-                        .to_string()
+                    format!(
+                        "{} {:02}:{:02}",
+                        leviath_core::clock::date(t.date()),
+                        t.hour(),
+                        t.minute()
+                    )
                 })
                 .unwrap_or_default();
             option(

@@ -65,7 +65,7 @@ pub(super) fn append_dashboard_log_capped(path: &Path, msg: &str, max_bytes: u64
     }
     roll_log_if_over_cap(path, max_bytes);
     if let Ok(mut file) = leviath_sys::open_private_append(path) {
-        let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+        let timestamp = leviath_core::clock::date_time(leviath_core::clock::local_now());
         let _ = writeln!(file, "{} {}", timestamp, msg);
     }
 }

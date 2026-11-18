@@ -346,7 +346,7 @@ async fn list_with_registry_within(
         leviath_core::paths::capability_cache_path().as_deref(),
         &config,
         &answers,
-        chrono::Utc::now().timestamp(),
+        leviath_core::duration::now_secs(),
     );
 
     // A `--provider` naming something neither registered natively nor present

@@ -194,7 +194,7 @@ pub(crate) async fn setup_daemon_host_with(
     let cache_path = leviath_core::paths::capability_cache_path();
     providers.save_capability_cache(
         cache_path.as_deref(),
-        chrono::Utc::now().timestamp(),
+        leviath_core::duration::now_secs(),
         &crate::provider_checks::fingerprints(cache_path.as_deref(), &config),
         &prime_failures,
     );
@@ -294,7 +294,7 @@ pub(crate) async fn setup_daemon_host_with(
         mcp_tool_owners: registry.mcp_tool_owners,
         mcp_pool,
         runtime,
-        now_secs: || chrono::Utc::now().timestamp(),
+        now_secs: leviath_core::duration::now_secs,
         reloader: Some(reloader),
         provider_reload: Some(provider_reload),
     });

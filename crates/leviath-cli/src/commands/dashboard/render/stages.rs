@@ -305,7 +305,7 @@ mod tests {
             title: Some("My Test".to_string()),
             model: None,
             parent_id: None,
-            started_at: chrono::Utc::now().timestamp() - 60,
+            started_at: leviath_core::duration::now_secs() - 60,
             last_progress_at: None,
             runtime_secs: 0,
             clock_now: 0,
@@ -321,9 +321,9 @@ mod tests {
             status: status.clone(),
             prompt_tokens: 100,
             completion_tokens: 50,
-            started_at: Some(chrono::Utc::now().timestamp() - 30),
+            started_at: Some(leviath_core::duration::now_secs() - 30),
             ended_at: if status == StageRunStatus::Complete {
-                Some(chrono::Utc::now().timestamp())
+                Some(leviath_core::duration::now_secs())
             } else {
                 None
             },

@@ -510,7 +510,7 @@ impl AttemptJournal {
                     backoff_ms: millis(waited),
                     digest: self.digest.clone(),
                     model_input: Some(model_input),
-                    at: chrono::Utc::now().timestamp(),
+                    at: leviath_core::duration::now_secs(),
                 },
             )),
         );

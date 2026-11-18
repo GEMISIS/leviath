@@ -112,7 +112,7 @@ fn env_for(root: &Path) -> RageEnv {
             ..DaemonSnapshot::default()
         }),
         install: Box::new(|| "a test install".to_string()),
-        now: Box::new(chrono::Local::now),
+        now: Box::new(leviath_core::clock::local_now),
     }
 }
 

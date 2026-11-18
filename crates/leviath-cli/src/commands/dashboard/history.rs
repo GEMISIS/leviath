@@ -205,12 +205,8 @@ pub(super) fn derive_visits(points: &[RunPoint]) -> Vec<StageVisit> {
 
 /// `HH:MM:SS` in local time.
 pub(super) fn clock(at: i64) -> String {
-    chrono::DateTime::from_timestamp(at, 0)
-        .map(|t| {
-            t.with_timezone(&chrono::Local)
-                .format("%H:%M:%S")
-                .to_string()
-        })
+    leviath_core::clock::local_at(at)
+        .map(leviath_core::clock::time_of_day)
         .unwrap_or_default()
 }
 

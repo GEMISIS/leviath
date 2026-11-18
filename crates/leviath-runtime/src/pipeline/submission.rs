@@ -281,7 +281,7 @@ impl<'a> BatchSubmissions<'a> {
                 return REPEATED_SUBMISSION.to_string();
             }
         }
-        let now = chrono::Utc::now().timestamp();
+        let now = leviath_core::duration::now_secs();
         let (text, output) = handle_output_tool(&call.arguments, ctx, now, window);
         // A refused submission leaves any earlier one alone: a bad correction
         // must not erase a good answer.

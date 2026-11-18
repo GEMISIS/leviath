@@ -800,7 +800,7 @@ async fn every_run_carries_the_computed_age_and_working_spans() {
         let mut m = meta_at("run-timed", 100);
         // Launched a long time ago; twelve minutes of that was work, and the
         // clock is stopped, so the figure is exact rather than racing the test.
-        m.started_at = chrono::Utc::now().timestamp() - 3_600;
+        m.started_at = leviath_core::duration::now_secs() - 3_600;
         m.active = Some(leviath_core::run_meta::ActiveClock {
             banked_secs: 720,
             since: None,
@@ -840,7 +840,7 @@ async fn every_run_carries_the_computed_age_and_working_spans() {
 async fn the_run_route_times_a_run_the_same_way_the_listing_does() {
     crate::runstate::with_isolated_runs_dir_async("runs-handler-agents-agree", |_d| async move {
         let mut m = meta_at("run-both", 100);
-        m.started_at = chrono::Utc::now().timestamp() - 1_800;
+        m.started_at = leviath_core::duration::now_secs() - 1_800;
         m.active = Some(leviath_core::run_meta::ActiveClock {
             banked_secs: 300,
             since: None,

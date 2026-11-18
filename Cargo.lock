@@ -1009,19 +1009,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "chrono"
-version = "0.4.45"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
-dependencies = [
- "iana-time-zone",
- "js-sys",
- "num-traits",
- "wasm-bindgen",
- "windows-link 0.2.1",
-]
-
-[[package]]
 name = "cipher"
 version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2808,7 +2795,6 @@ dependencies = [
  "axum",
  "axum-server",
  "bevy_ecs",
- "chrono",
  "clap",
  "crossterm",
  "dirs",
@@ -2876,7 +2862,6 @@ name = "leviath-core"
 version = "0.6.4"
 dependencies = [
  "base64 0.23.1",
- "chrono",
  "dirs",
  "glob",
  "hex",
@@ -2891,6 +2876,7 @@ dependencies = [
  "temp-env",
  "tempfile",
  "thiserror 2.0.21",
+ "time",
  "tokio",
  "toml",
 ]
@@ -2989,7 +2975,6 @@ dependencies = [
  "async-trait",
  "base64 0.23.1",
  "bytes",
- "chrono",
  "crc32fast",
  "futures-core",
  "keyring-core",
@@ -3021,7 +3006,6 @@ dependencies = [
  "base64 0.23.1",
  "bevy_ecs",
  "bevy_tasks",
- "chrono",
  "crc32fast",
  "futures-core",
  "hex",
@@ -3110,7 +3094,6 @@ name = "leviath-tools"
 version = "0.6.4"
 dependencies = [
  "anyhow",
- "chrono",
  "csv",
  "dirs",
  "globset",
@@ -5333,6 +5316,7 @@ dependencies = [
  "powerfmt",
  "serde_core",
  "time-core",
+ "time-macros",
 ]
 
 [[package]]
@@ -5340,6 +5324,16 @@ name = "time-core"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e1c906769ad99c88eaa54e728060edef082f8e358ff32030cb7c7d315e81109"
+
+[[package]]
+name = "time-macros"
+version = "0.2.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e689342a48d2ea927c87ea50cabf8594854bf940e9310208848d680d668ed85"
+dependencies = [
+ "num-conv",
+ "time-core",
+]
 
 [[package]]
 name = "tiny-keccak"
@@ -6490,11 +6484,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "cargo-husky",
- "chrono",
  "reqwest",
  "serde",
  "serde_json",
  "tempfile",
+ "time",
  "toml",
 ]
 

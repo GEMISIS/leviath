@@ -370,7 +370,7 @@ fn spec_from(graph: RunGraph, agent_id: &str, stages: &[StageInference], window:
         },
         delivery: DeliveryPlan::default(),
         env: EnvFingerprint::default(),
-        created_at: chrono::Utc::now().timestamp(),
+        created_at: leviath_core::duration::now_secs(),
         listed: None,
     }
 }

@@ -123,7 +123,7 @@ impl Wizard {
     pub(crate) fn drain_verifications(&mut self) {
         let mut landed = false;
         while let Ok(reply) = self.reply_rx.try_recv() {
-            let now = chrono::Utc::now().timestamp();
+            let now = leviath_core::duration::now_secs();
             // Entries first: an entry is named after its preset by default
             // (`llama-cpp`), and the preset's own row never asks for a check
             // under its id, so a reply carrying that name is the entry's.

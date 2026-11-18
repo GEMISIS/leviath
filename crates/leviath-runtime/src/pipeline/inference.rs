@@ -800,7 +800,7 @@ pub(crate) fn dispatch_inference(
     // machinery *itself* unattributed rather than blamed on whichever agent a
     // previous system left recorded.
     crate::tick_scope::clear();
-    let now = chrono::Utc::now().timestamp();
+    let now = leviath_core::duration::now_secs();
     let circuit_policy = policy.map(|p| *p).unwrap_or_default();
     // The daemon inserts this from `[limits]`; a world that never set it (every
     // embedded host, and most tests) gets the built-in schedule.

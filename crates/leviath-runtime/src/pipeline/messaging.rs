@@ -53,7 +53,7 @@ pub(crate) fn deliver_messages(
     }
 
     // Deliver inboxes into context windows for agents that accept messages.
-    let now = chrono::Utc::now().timestamp();
+    let now = leviath_core::duration::now_secs();
     for (entity, mut state, mut inbox, mut window, parked, mut progress) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
         if !state.accepts_messages {

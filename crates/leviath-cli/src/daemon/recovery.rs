@@ -179,7 +179,7 @@ fn record_held(
         "held: this machine cannot take the run back as it stands. {issues}"
     ))];
     writer
-        .record(held, chrono::Utc::now().timestamp(), events)
+        .record(held, leviath_core::duration::now_secs(), events)
         .map(drop)
 }
 

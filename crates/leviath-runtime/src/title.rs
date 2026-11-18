@@ -576,7 +576,7 @@ impl TitleServices<'_> {
     fn now(&self) -> i64 {
         self.clock
             .as_deref()
-            .map_or_else(|| chrono::Utc::now().timestamp(), |c| (c.0)())
+            .map_or_else(leviath_core::duration::now_secs, |c| (c.0)())
     }
 }
 

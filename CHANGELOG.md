@@ -15,6 +15,11 @@ same list.
 
 ### Changed
 
+- Dates and the local time zone come from the `time` crate, and `chrono` is no longer a
+  dependency: RustSec lists it as unmaintained (RUSTSEC-2026-0543). What `lev` prints is the
+  same, with one exception: the timestamp inside a `lev rage` bundle is now to the second.
+  `leviath_core::clock` holds the calendar helpers, and `leviath_core::duration::now_millis`
+  is new.
 - Run files move to layout 10, in which a failed run's status holds the kind of failure beside
   the sentence (#1136). Layout 2 to 9 files are upgraded in place when the daemon starts, the
   file as it was kept in the run's `legacy/` folder as `run.v<N>.lvr`. A run that failed before

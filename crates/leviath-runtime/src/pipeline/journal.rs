@@ -183,7 +183,7 @@ pub(crate) fn run_now(world: &mut World, entity: Entity) -> Option<RunNow> {
 /// state now when a call of its batch finished, and the state its file last
 /// recorded otherwise.
 pub(crate) fn send(world: &mut World, happened: BTreeMap<String, Happened>) {
-    let at = chrono::Utc::now().timestamp();
+    let at = leviath_core::duration::now_secs();
     for (run_id, run) in happened {
         let now = match run.landed {
             true => live(world, &run_id).and_then(|entity| run_now(world, entity)),

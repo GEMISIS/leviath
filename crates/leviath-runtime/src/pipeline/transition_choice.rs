@@ -456,7 +456,7 @@ pub(crate) fn dispatch_transition_choice(
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
-    let now = chrono::Utc::now().timestamp();
+    let now = leviath_core::duration::now_secs();
     // The daemon inserts this from `[limits]`; a world that never set it gets
     // the built-in schedule.
     let tuning = retry.map(|r| *r).unwrap_or_default();

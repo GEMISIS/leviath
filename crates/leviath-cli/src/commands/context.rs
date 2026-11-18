@@ -165,11 +165,8 @@ fn delivery_word(d: leviath_core::mime::Delivery) -> &'static str {
 /// Format a unix timestamp as a local `YYYY-MM-DD HH:MM:SS`, or the raw seconds
 /// if it's out of range.
 fn format_time(secs: i64) -> String {
-    match chrono::DateTime::from_timestamp(secs, 0) {
-        Some(dt) => dt
-            .with_timezone(&chrono::Local)
-            .format("%Y-%m-%d %H:%M:%S")
-            .to_string(),
+    match leviath_core::clock::local_at(secs) {
+        Some(at) => leviath_core::clock::date_time(at),
         None => secs.to_string(),
     }
 }

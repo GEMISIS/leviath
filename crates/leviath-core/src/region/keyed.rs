@@ -62,7 +62,7 @@ impl Region {
                 let seq = self.next_seq();
                 let entry = &mut self.content[pos];
                 entry.seq = seq;
-                entry.timestamp = chrono::Utc::now().timestamp();
+                entry.timestamp = crate::duration::now_secs();
                 return Ok(KeyedWrite::Unchanged);
             }
             Some(_) => {
@@ -202,7 +202,7 @@ impl Region {
         {}
 
         let seq = self.next_seq();
-        let timestamp = chrono::Utc::now().timestamp();
+        let timestamp = crate::duration::now_secs();
         // Looked up again: evicting the entries in front of it moved it.
         match self.position_of(key) {
             Some(pos) => {

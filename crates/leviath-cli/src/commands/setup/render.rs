@@ -847,7 +847,7 @@ fn checked_when(checked_at: Option<i64>) -> String {
         .map(|then| {
             format!(
                 " · checked {}",
-                super::state::checks::checked_ago(chrono::Utc::now().timestamp(), then)
+                super::state::checks::checked_ago(leviath_core::duration::now_secs(), then)
             )
         })
         .unwrap_or_default()
@@ -1988,7 +1988,7 @@ mod tests {
 
         // An outcome that knows when it was learned says so, which is what
         // tells a check from this session apart from last week's.
-        w.providers[0].checked_at = Some(chrono::Utc::now().timestamp() - 2 * 3_600);
+        w.providers[0].checked_at = Some(leviath_core::duration::now_secs() - 2 * 3_600);
         let screen = rendered(&w);
         assert!(
             screen.contains("rejected - check the key · checked 2 hours ago"),

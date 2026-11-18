@@ -172,7 +172,7 @@ pub(crate) fn plan(region: &Region, own: &str, others: &[&Record]) -> Option<Vec
         RegionKind::HashMap { max_entries } => *max_entries,
         _ => None,
     };
-    let at = chrono::Utc::now().timestamp();
+    let at = leviath_core::duration::now_secs();
     for r in others {
         if used + r.tokens <= region.max_tokens && cap.is_none_or(|m| laid.len() < m) {
             used += r.tokens;

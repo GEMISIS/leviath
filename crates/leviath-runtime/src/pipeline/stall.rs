@@ -596,7 +596,7 @@ mod tests {
         // the limit that no drift between the two reads can change the verdict.
         let mut world = World::new();
         world.insert_resource(StallTimeout(60));
-        let now = chrono::Utc::now().timestamp();
+        let now = leviath_core::duration::now_secs();
         let e = world
             .spawn((
                 agent_state(),
