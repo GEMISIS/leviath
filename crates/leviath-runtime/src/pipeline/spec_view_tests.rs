@@ -258,6 +258,45 @@ fn the_graph_layout_sizes_each_region_for_the_narrowest_stage_that_sees_it() {
     assert_eq!(find(&graph_layout(&spec).regions, "system").max_tokens, 111);
 }
 
+/// A media model counts no tokens, and a plan made for one once recorded a
+/// window of zero. Sized against that, a region the stage shares with a text
+/// stage held nothing, and every write to it was refused.
+#[test]
+fn a_stage_planned_with_no_window_never_sizes_a_shared_region_at_zero() {
+    let mut spec = two_stage_spec();
+    spec.stages[0].region_budgets.clear();
+    spec.stages[1].model.context_window = 0;
+    for r in &mut spec.graph.layout.regions {
+        r.budget = Budget::Percent {
+            percent: 0.5,
+            min: None,
+            max: None,
+        };
+    }
+    let layout = graph_layout(&spec);
+    let half = FALLBACK_WINDOW as usize / 2;
+    for name in ["system", "task"] {
+        assert_eq!(
+            find(&layout.regions, name).max_tokens,
+            half,
+            "{name}: half of the fallback window, the narrower of the two stages'"
+        );
+    }
+    assert_eq!(layout.total, FALLBACK_WINDOW as usize);
+    assert_eq!(
+        find(&stage_layout_of(&spec, 1), "system").max_tokens,
+        half,
+        "and the stage's own layout is sized the same way"
+    );
+}
+
+/// `spec`'s graph layout as stage `idx`'s own, sized for that stage.
+fn stage_layout_of(spec: &RunSpec, idx: usize) -> Vec<leviath_core::Region> {
+    let mut spec = spec.clone();
+    spec.graph.stages[idx].layout = Some(spec.graph.layout.clone());
+    stage_layout(&spec, idx).unwrap()
+}
+
 #[test]
 fn an_absolute_layout_keeps_its_total_and_resolves_compaction_from_its_budget() {
     let mut spec = two_stage_spec();

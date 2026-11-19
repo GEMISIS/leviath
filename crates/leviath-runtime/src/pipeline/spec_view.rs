@@ -19,7 +19,8 @@ use crate::spec::graph::{
 };
 use crate::spec::run_spec::{RunSpec, StagePlan, ToolDef};
 
-/// The context window a stage is budgeted against when its plan is missing.
+/// The context window a stage is budgeted against when its plan is missing or
+/// records no window.
 const FALLBACK_WINDOW: u32 = super::DEFAULT_CONTEXT_WINDOW_TOKENS as u32;
 
 /// The text a piece of code is filed under in a run's compiled-code tables:
@@ -103,9 +104,14 @@ fn plan(spec: &RunSpec, idx: usize) -> Option<&StagePlan> {
     spec.stage(name)
 }
 
-/// The window a stage's percentage budgets are sized against.
+/// The window a stage's percentage budgets are sized against. A plan that
+/// records a window of zero, as one made for a model that counts no tokens
+/// once did, is read as a plan with no window at all.
 fn window_of(spec: &RunSpec, idx: usize) -> u32 {
-    plan(spec, idx).map_or(FALLBACK_WINDOW, |p| p.model.context_window)
+    plan(spec, idx)
+        .map(|p| p.model.context_window)
+        .filter(|window| *window > 0)
+        .unwrap_or(FALLBACK_WINDOW)
 }
 
 /// One region's budget in one stage: the plan's figure, or the region's own
