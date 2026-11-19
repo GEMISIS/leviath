@@ -228,6 +228,48 @@ async fn a_job_with_no_prompt_or_an_unreadable_length_is_refused_unsent() {
     assert!(err.to_string().contains("`duration`"), "{err}");
 }
 
+/// A shoot stage that named a region holding a reference picture as its
+/// prompt was refused for want of one: the one-prompt request's text held the
+/// picture's stand-in, and was read as the picture's pointer.
+#[test]
+fn a_job_whose_prompt_region_holds_a_picture_still_has_its_prompt() {
+    use crate::provider::{PROMPT_REGIONS_KEY, SystemBlock};
+    use leviath_core::mime::{Blob, MimeRegistry, MimeType, Part};
+    let blob = Blob::new(MimeType::parse("image/png").unwrap(), b"PNG".to_vec()).named("porch.png");
+    let part = Part::stored(blob.describe(&MimeRegistry::builtin())).named("porch.png");
+    let part = part.blob().unwrap().clone();
+    let stand_in = part.stand_in.clone();
+    let region = |name: &str, text: &str| SystemBlock {
+        text: format!("## {name}\n{text}"),
+        cache_hint: leviath_core::CacheHint::Always,
+        region: name.into(),
+        volatility: leviath_core::Volatility::Stable,
+    };
+    let mut shoot = request("google/veo-3.1", "", video_stage());
+    shoot.system = vec![
+        region("shot", "the camera pushes in on the porch"),
+        region("first_frame", &format!("the opening frame\n{stand_in}")),
+    ];
+    shoot.messages[0].content = MessageContent::Blocks(vec![
+        ContentBlock::Text {
+            text: format!("[first_frame] {stand_in}"),
+        },
+        ContentBlock::Mime {
+            part,
+            data: "UE5H".into(),
+            name: Some("porch.png".into()),
+            deliver: None,
+            remote: None,
+        },
+    ]);
+    shoot.extra[PROMPT_REGIONS_KEY] = json!(["shot", "first_frame"]);
+    let body = job_body("google/veo-3.1", &crate::prompt::prompt_only(shoot)).unwrap();
+    assert_eq!(
+        body["prompt"],
+        "the camera pushes in on the porch\nthe opening frame"
+    );
+}
+
 /// A call made again after a restart polls the job it started before and
 /// starts nothing.
 #[tokio::test]

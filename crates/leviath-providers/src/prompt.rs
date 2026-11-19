@@ -81,49 +81,33 @@ pub fn unprompted(request: &InferenceRequest) -> bool {
 /// The texture prompt an upstream stage wrote lands here, as the text of the
 /// region it wrote it to; it is the dynamic hint the operation textures with.
 pub fn request_text(request: &InferenceRequest) -> String {
+    let stand_ins = stand_ins(request);
     if let Some(names) = prompt_regions(request) {
-        return regions_text(request, &names);
+        return regions_text(request, &names, &stand_ins);
     }
     // Assembly emits a stored part as a pointer text block ("[region] [mime,
     // size] name") beside its bytes block. That pointer is not the user's
-    // prompt, so exclude any text carrying a stored part's stand-in, or the
-    // texture prompt and the animation action would be the mesh's file line
-    // rather than "weathered bronze" or "walk".
-    let stand_ins: Vec<&str> = request
-        .messages
-        .iter()
-        .filter_map(|m| match &m.content {
-            MessageContent::Blocks(blocks) => Some(blocks),
-            MessageContent::Text(_) => None,
-        })
-        .flatten()
-        .filter_map(|b| match b {
-            ContentBlock::Mime { part, .. } => Some(part.stand_in.as_str()),
-            _ => None,
-        })
-        .filter(|s| !s.is_empty())
-        .collect();
+    // prompt, so leave out any line that is one, or the texture prompt and
+    // the animation action would be the mesh's file line rather than
+    // "weathered bronze" or "walk".
+    //
     // The runtime's placeholder turn is not a prompt either: a stage whose
     // prompt lives in a pinned region has no user turn but this one, and
     // reading it sent the model "Begin." while the task sat unread below.
-    let is_pointer = |text: &str| {
-        text.trim() == crate::provider::OPENING_TURN || stand_ins.iter().any(|s| text.contains(s))
+    let words = |text: &str| {
+        let words = without_pointers(text, &stand_ins);
+        let said = text.trim() != crate::provider::OPENING_TURN && !words.trim().is_empty();
+        said.then(|| words.into_owned())
     };
 
     let mut chunks = Vec::new();
     for message in &request.messages {
         match &message.content {
-            MessageContent::Text(text) => {
-                if !is_pointer(text) {
-                    chunks.push(text.clone());
-                }
-            }
+            MessageContent::Text(text) => chunks.extend(words(text)),
             MessageContent::Blocks(blocks) => {
                 for block in blocks {
-                    if let ContentBlock::Text { text } = block
-                        && !is_pointer(text)
-                    {
-                        chunks.push(text.clone());
+                    if let ContentBlock::Text { text } = block {
+                        chunks.extend(words(text));
                     }
                 }
             }
@@ -134,21 +118,65 @@ pub fn request_text(request: &InferenceRequest) -> String {
     // stage ran on the default action or refused for want of a prompt. With
     // no message text, read the system blocks instead: only the ones a region
     // produced (a hint carries no region), never the runtime's own
-    // instruction blocks, and never a region whose text is a stored part's
-    // stand-in. Message text still wins when there is any, so a prompt an
-    // upstream stage wrote into a conversation is not diluted by the task.
+    // instruction blocks, and never a stored part's stand-in. Message text
+    // still wins when there is any, so a prompt an upstream stage wrote into
+    // a conversation is not diluted by the task.
     if chunks.is_empty() {
         for block in &request.system {
             if block.region.is_empty() || RUNTIME_REGIONS.contains(&block.region.as_str()) {
                 continue;
             }
-            let body = unlabelled(&block.text, &block.region);
-            if !is_pointer(body) && !body.trim().is_empty() {
-                chunks.push(body.to_string());
-            }
+            chunks.extend(words(unlabelled(&block.text, &block.region)));
         }
     }
     chunks.join("\n").trim().to_string()
+}
+
+/// The stand-in of every stored part `request` carries.
+fn stand_ins(request: &InferenceRequest) -> Vec<&str> {
+    request
+        .messages
+        .iter()
+        .filter_map(|m| match &m.content {
+            MessageContent::Blocks(blocks) => Some(blocks),
+            MessageContent::Text(_) => None,
+        })
+        .flatten()
+        .filter_map(ContentBlock::stand_in)
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Whether `line` points at a part the request carries and says nothing
+/// else: the part's stand-in, alone or behind the `[region]` or
+/// `[region / key]` assembly puts before a lifted part.
+///
+/// A line that only mentions a stand-in among other words is not one. Taking
+/// it for one cost a stage its whole prompt: read as one prompt, the request
+/// is a single text holding every prompt region, and when one of those
+/// regions held a picture the text held its stand-in.
+fn is_pointer(line: &str, stand_ins: &[&str]) -> bool {
+    let line = line.trim();
+    stand_ins.iter().any(|stand_in| {
+        line.strip_suffix(stand_in).is_some_and(|before| {
+            let before = before.trim_end();
+            before.is_empty() || (before.starts_with('[') && before.ends_with(']'))
+        })
+    })
+}
+
+/// `text` without the lines that are [pointers](is_pointer). The part a
+/// pointer names goes to the model as the part it is; its file line is not
+/// something to draw.
+fn without_pointers<'a>(text: &'a str, stand_ins: &[&str]) -> std::borrow::Cow<'a, str> {
+    if !text.lines().any(|line| is_pointer(line, stand_ins)) {
+        return text.into();
+    }
+    text.lines()
+        .filter(|line| !is_pointer(line, stand_ins))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .into()
 }
 
 /// The regions the stage named as its prompt, in order. `None` when it named
@@ -167,17 +195,20 @@ fn prompt_regions(request: &InferenceRequest) -> Option<Vec<String>> {
 /// The text of exactly the named regions, in the order named. Nothing else
 /// reaches the model: not the other regions, not the conversation. A region
 /// that is hidden or empty contributes nothing, so a prompt that was never
-/// written comes back empty rather than as some other region's text.
-fn regions_text(request: &InferenceRequest, names: &[String]) -> String {
-    let chunks: Vec<&str> = names
+/// written comes back empty rather than as some other region's text. A
+/// stored part a named region holds is in the request as a part, so the line
+/// standing in for it is left out of the words.
+fn regions_text(request: &InferenceRequest, names: &[String], stand_ins: &[&str]) -> String {
+    let chunks: Vec<String> = names
         .iter()
         .flat_map(|name| {
             request
                 .system
                 .iter()
                 .filter(move |block| &block.region == name)
-                .map(|block| unlabelled(&block.text, &block.region).trim())
+                .map(|block| unlabelled(&block.text, &block.region))
         })
+        .map(|body| without_pointers(body, stand_ins).trim().to_string())
         .filter(|body| !body.is_empty())
         .collect();
     chunks.join("\n")

@@ -316,6 +316,14 @@ same list.
   parts whether marked or not, and a marker only adds `cache_control`. The same holds for system
   blocks: one the marker leaves when a growing region gains a chunk no longer turns from a list
   into a string. A model without markers is sent exactly what it was before.
+- An image or video stage whose `prompt_regions` name a region holding a stored picture has its
+  prompt again. The prompt held the picture's stand-in line, and a route that reads the prompt
+  off the request (OpenRouter's Images and Videos APIs among them) took any text containing a
+  stand-in for the picture's pointer, so the whole prompt was dropped and the call refused with
+  "needs a prompt: the stage handed it no text" whenever a picture was attached. Only a line that
+  is a pointer and nothing more (the stand-in alone, or behind `[region]` or `[region / key]`) is
+  left out now, and the stand-in line of a picture the request carries is no longer sent to the
+  model as words: the picture goes as the part it is.
 - A media stage that fails for making none of its media quotes the model's own words and opens
   with a tag a caller can match (#1136). After three replies without the image, video or audio the
   stage makes, the error gave only how many characters the last reply held, though the nudge sent
