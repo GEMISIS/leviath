@@ -293,6 +293,13 @@ same list.
 
 ### Fixed
 
+- A graph with a stage on a model that counts no tokens can hold context again. A provider reports
+  a context window of 0 for such a model (every video model on OpenRouter, for one), and the stage
+  was planned with that window, so each region it shared with the graph's other stages was sized
+  as a share of nothing: every write to one was refused with "Content exceeds token budget: N > 0",
+  from the first stage on. A window of 0 is now read as one nobody supplied, and the stage is
+  sized from the fallback window, as a stage on an unknown provider is. A run started before the
+  fix keeps the budgets it was planned with; start it again.
 - A conversation that loses turns in the middle of a stage keeps the stage's system prompt cached
   (#1139). When the dialogue evicted its oldest turns, was compacted, or a turn in it was rewritten,
   the prompt frame started over: the system prompt was laid out again with every region's gain in

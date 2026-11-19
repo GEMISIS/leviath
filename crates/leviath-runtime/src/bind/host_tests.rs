@@ -3,6 +3,10 @@ use std::sync::Arc;
 use super::*;
 use crate::spec::graph::ToolGroup;
 
+/// The model [`Stub`] reports no context window for, as a provider does for a
+/// media model that counts no tokens.
+const NO_WINDOW: &str = "counts-no-tokens";
+
 /// A provider that answers every question with a fixed value and serves any
 /// model it is asked about.
 pub(crate) struct Stub;
@@ -18,8 +22,8 @@ impl leviath_providers::Provider for Stub {
     async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
         1
     }
-    fn max_context_tokens(&self, _m: &str) -> usize {
-        5000
+    fn max_context_tokens(&self, m: &str) -> usize {
+        if m == NO_WINDOW { 0 } else { 5000 }
     }
     fn name(&self) -> &str {
         "stub"
@@ -144,6 +148,24 @@ fn a_stage_gets_its_own_model_on_a_registered_provider_with_its_window() {
         plan.model.fallbacks,
         vec![ModelRef::parse("mock/backup").unwrap()],
         "a fallback on a provider that is not registered is left out"
+    );
+}
+
+#[test]
+fn a_model_whose_provider_reports_no_window_is_planned_at_the_fallback() {
+    use leviath_providers::Provider as _;
+    assert_eq!(Stub.max_context_tokens(NO_WINDOW), 0);
+    let plan = choose_model(
+        &stage(&[&format!("mock/{NO_WINDOW}")]),
+        None,
+        &ordered(&["mock"]),
+        &registry(&["mock"]),
+    )
+    .unwrap();
+    assert_eq!(plan.model.id.as_str(), NO_WINDOW);
+    assert_eq!(
+        plan.model.context_window, FALLBACK_WINDOW,
+        "zero tokens is a window nobody supplied, not one with no room"
     );
 }
 

@@ -30,7 +30,10 @@ use crate::spec::names::{
 use crate::spec::run_spec::{ChosenModel, ToolDef, ToolSource};
 
 /// The window assumed for a model whose provider cannot say, matching the
-/// pipeline's own fallback for percentage budgets.
+/// pipeline's own fallback for percentage budgets. A provider that reports a
+/// window of zero is one that cannot say: a media model counts no tokens, and
+/// a stage planned at zero would size every region it shares with the graph's
+/// other stages at zero tokens.
 const FALLBACK_WINDOW: u32 = crate::pipeline::DEFAULT_CONTEXT_WINDOW_TOKENS as u32;
 
 /// Read the code a graph names. A file is read from `base`, the directory of
@@ -130,6 +133,7 @@ pub fn choose_model(
     let context_window = registry
         .get(provider.as_str())
         .map(|p| u32::try_from(p.max_context_tokens(model.as_str())).unwrap_or(u32::MAX))
+        .filter(|window| *window > 0)
         .unwrap_or(FALLBACK_WINDOW);
     let max_output_tokens = registry
         .get(provider.as_str())
