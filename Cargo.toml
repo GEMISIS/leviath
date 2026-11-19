@@ -254,7 +254,7 @@ dotenvy = "0.15"
 # "socket" is for the control socket's peer-credential check (SO_PEERCRED on
 # Linux, LOCAL_PEERCRED on macOS/BSD), which is what stops another local user
 # from driving the daemon.
-nix = { version = "0.31", default-features = false, features = ["signal", "process", "user", "socket", "hostname"] }
+nix = { version = "0.32", default-features = false, features = ["signal", "process", "user", "socket", "hostname"] }
 temp-env = "0.3"
 # The `Entry` API under the OS credential store, used directly so tests can
 # install an in-memory store as the process default.
