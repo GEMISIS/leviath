@@ -116,6 +116,93 @@ fn the_parts_a_request_carries_go_with_the_prompt() {
     assert!(!unprompted(&request));
 }
 
+/// What the runtime assembles for a stage that names two prompt regions, one
+/// of them holding a caption and a stored picture: the picture's stand-in is
+/// a line of that region's text, and its bytes are lifted into a user message
+/// behind a pointer.
+fn stage_with_a_picture_in_its_prompt() -> (InferenceRequest, ContentBlock) {
+    let png = image();
+    let stand_in = png.stand_in().unwrap().to_string();
+    let mut request = draw_stage();
+    request.system = vec![
+        region("render_brief", "a brief"),
+        region("frame", &format!("caption\n{stand_in}")),
+    ];
+    request.messages = vec![
+        user(MessageContent::Blocks(vec![
+            ContentBlock::Text {
+                text: format!("[frame] {stand_in}"),
+            },
+            png.clone(),
+        ])),
+        user(MessageContent::Text(OPENING_TURN.into())),
+    ];
+    request.extra = serde_json::json!({ PROMPT_REGIONS_KEY: ["render_brief", "frame"] });
+    (request, png)
+}
+
+/// A storyboard's render stage and a film's shoot stage each named a region
+/// holding a reference picture as part of the prompt. The prompt then held
+/// the picture's stand-in, and a media route reading the one-prompt request
+/// took the whole prompt for the picture's pointer and found no text at all:
+/// "needs a prompt: the stage handed it no text", whenever a picture was
+/// attached. The prompt is the regions' words, read once or twice, and the
+/// picture travels as the part it is.
+#[test]
+fn a_prompt_region_holding_a_picture_keeps_its_words_and_loses_the_stand_in() {
+    let (request, png) = stage_with_a_picture_in_its_prompt();
+    let request = prompt_only(request);
+    assert_eq!(
+        request.messages[0].content,
+        MessageContent::Blocks(vec![
+            png,
+            ContentBlock::Text {
+                text: "a brief\ncaption".into()
+            },
+        ])
+    );
+    assert_eq!(request_text(&request), "a brief\ncaption");
+    assert!(!unprompted(&request));
+}
+
+/// A pointer is the stand-in alone or behind the region (and key) it came
+/// from, on one line. Text that mentions a part among its own words is a
+/// prompt, and keeps every word but a line that is the pointer.
+#[test]
+fn only_a_line_that_is_a_pointer_is_left_out_of_the_prompt() {
+    let png = image();
+    let stand_in = png.stand_in().unwrap().to_string();
+    let mut request = draw_stage();
+    request.system.clear();
+    request.extra = serde_json::Value::Null;
+    let texts = [
+        stand_in.clone(),
+        format!("[drawn] {stand_in}"),
+        format!("[drawn / hero] {stand_in}"),
+        format!("match the palette of {stand_in}"),
+        format!("a porch at dusk\n  [drawn] {stand_in}  \nseen from the lane"),
+    ];
+    let mut blocks: Vec<ContentBlock> = texts
+        .into_iter()
+        .map(|text| ContentBlock::Text { text })
+        .collect();
+    blocks.push(png);
+    request.messages = vec![user(MessageContent::Blocks(blocks))];
+    assert_eq!(
+        request_text(&request),
+        format!("match the palette of {stand_in}\na porch at dusk\nseen from the lane")
+    );
+
+    // A region whose text is a caption and a stand-in is read for its caption
+    // when the conversation holds no words, and one that is only the stand-in
+    // still adds nothing.
+    let (mut pinned, _) = stage_with_a_picture_in_its_prompt();
+    pinned.extra = serde_json::Value::Null;
+    assert_eq!(request_text(&pinned), "a brief\ncaption");
+    pinned.system[1] = region("frame", &stand_in);
+    assert_eq!(request_text(&pinned), "a brief");
+}
+
 /// With nothing to make a prompt of, the request is handed back as it was,
 /// and that is what `unprompted` says to refuse. A part alone is something to
 /// work from (an image to upscale, a mesh to rig); so is a prompt.
