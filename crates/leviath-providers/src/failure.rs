@@ -83,11 +83,18 @@ pub enum FailureKind {
     /// /api/v1/images endpoint instead." It is the same answer every time,
     /// so it is not retried; the call moves to the next route.
     WrongEndpoint,
+    /// The provider refused what was sent under its content policy: the
+    /// prompt was filtered, moderated or blocked (see [`content_refusal`]).
+    /// The request is well formed, and the refusal is that provider's own
+    /// judgement of it, so another model may well answer. It is the same
+    /// answer on this model every time, so it is not retried; the call moves
+    /// to the next route.
+    ContentFiltered,
 }
 
 impl FailureKind {
     /// Every kind, for the places that read one back from its label.
-    pub const ALL: [FailureKind; 12] = [
+    pub const ALL: [FailureKind; 13] = [
         FailureKind::DnsFailure,
         FailureKind::ConnectionRefused,
         FailureKind::TlsFailure,
@@ -100,6 +107,7 @@ impl FailureKind {
         FailureKind::ModelUnavailable,
         FailureKind::MalformedResponse,
         FailureKind::WrongEndpoint,
+        FailureKind::ContentFiltered,
     ];
 
     /// A short, stable label for logs, metrics attributes and the API.
@@ -117,6 +125,7 @@ impl FailureKind {
             FailureKind::ModelUnavailable => "model-unavailable",
             FailureKind::MalformedResponse => "malformed-response",
             FailureKind::WrongEndpoint => "wrong-endpoint",
+            FailureKind::ContentFiltered => "content-filtered",
         }
     }
 
@@ -165,6 +174,11 @@ impl FailureKind {
             FailureKind::WrongEndpoint => {
                 "this model does not work on the endpoint the call went to (the provider \
                  names another); it is not an outage, so the call is not retried and moves \
+                 to the next route"
+            }
+            FailureKind::ContentFiltered => {
+                "the provider refused the prompt under its content policy; the same \
+                 prompt is refused there every time, so the call is not retried and moves \
                  to the next route"
             }
         }
@@ -220,7 +234,8 @@ impl FailureKind {
             | FailureKind::ServerError
             | FailureKind::ModelUnavailable
             | FailureKind::MalformedResponse
-            | FailureKind::WrongEndpoint => true,
+            | FailureKind::WrongEndpoint
+            | FailureKind::ContentFiltered => true,
             // `Transport` is the unrecognised case, and it is counted as not
             // reached on purpose: the patient threshold is the one that lets a
             // dead provider keep taking work, so an unknown failure takes the
@@ -260,9 +275,15 @@ impl FailureKind {
     /// (see [`names_another_endpoint`]) is [`FailureKind::WrongEndpoint`]
     /// whatever its status: OpenRouter answers an image model sent to chat
     /// with a 404, which read as a missing or listed-but-down model.
+    ///
+    /// A refusal of the prompt under the provider's content policy (see
+    /// [`is_content_refusal`]) is [`FailureKind::ContentFiltered`].
     pub fn from_response(status: u16, body: &str) -> Self {
         if matches!(status, 400..=499) && names_another_endpoint(body) {
             return FailureKind::WrongEndpoint;
+        }
+        if is_content_refusal(status, body) {
+            return FailureKind::ContentFiltered;
         }
         let relayed = matches!(status, 404 | 408 | 500..=599) && relayed_upstream(body).is_some();
         match relayed {
@@ -280,6 +301,88 @@ impl FailureKind {
 pub fn names_another_endpoint(body: &str) -> bool {
     let body = body.to_ascii_lowercase();
     body.contains("cannot be used with the") && body.contains("endpoint")
+}
+
+/// The `code` and `type` values an error envelope carries for a prompt
+/// refused under a content policy: OpenAI's `content_policy_violation` and
+/// `moderation_blocked`, and Azure OpenAI's `content_filter`.
+const REFUSAL_CODES: [&str; 3] = [
+    "content_policy_violation",
+    "content_filter",
+    "moderation_blocked",
+];
+
+/// The sentences providers refuse a prompt with. Each is a provider's own
+/// wording for a content refusal and nothing else: Azure OpenAI's "The
+/// response was filtered due to the prompt triggering ... content management
+/// policy" (relayed by gateways with "our" in the gap), OpenAI's "Your
+/// request was rejected as a result of our safety system" and "... rejected
+/// by the safety system", and OpenRouter's "Your chosen model requires
+/// moderation and your input was flagged".
+const REFUSAL_WORDS: [&str; 6] = [
+    "content management policy",
+    "content policy violation",
+    "content_policy_violation",
+    "rejected as a result of our safety system",
+    "rejected by the safety system",
+    "your input was flagged",
+];
+
+/// Whether an error body says the provider refused the prompt under its
+/// content policy, as opposed to finding the request malformed.
+///
+/// Read from what the body is before what it says:
+///
+/// - an error `code` or `type` that names a content refusal
+///   (`content_policy_violation`, `content_filter`, `moderation_blocked`);
+/// - OpenRouter's moderation metadata, `metadata.reasons` (why the input was
+///   flagged) beside `metadata.flagged_input`;
+/// - a gateway's relayed upstream body (`metadata.raw`) that is itself one;
+/// - else one of the well-known sentences, such as "filtered due to the
+///   prompt triggering our content management policy".
+///
+/// Takes the whole body or the `error` object alone, as [`relayed_upstream`]
+/// does. Anything else, a plain bad request included, is not one.
+pub fn content_refusal(body: &str) -> bool {
+    let structured = serde_json::from_str::<serde_json::Value>(body.trim())
+        .is_ok_and(|value| content_refusal_value(&value));
+    let said = body.to_ascii_lowercase();
+    structured || REFUSAL_WORDS.iter().any(|words| said.contains(words))
+}
+
+/// The structured half of [`content_refusal`], over a body already parsed.
+fn content_refusal_value(value: &serde_json::Value) -> bool {
+    let error = value.get("error").unwrap_or(value);
+    let text = |of: &serde_json::Value, key: &str| {
+        of.get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_ascii_lowercase)
+    };
+    let named = ["code", "type"]
+        .into_iter()
+        .filter_map(|key| text(error, key))
+        .any(|said| REFUSAL_CODES.contains(&said.as_str()));
+    let Some(metadata) = error.get("metadata") else {
+        return named;
+    };
+    let flagged = metadata.get("flagged_input").is_some()
+        && metadata
+            .get("reasons")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|reasons| !reasons.is_empty());
+    let relayed = text(metadata, "raw").is_some_and(|raw| content_refusal(&raw));
+    named || flagged || relayed
+}
+
+/// Whether a provider's answer of `status` with `body` is a refusal of the
+/// prompt under its content policy (see [`content_refusal`]).
+///
+/// Only a status a refusal comes with: a 400, or a 403 and up among the 4xx
+/// (OpenRouter's moderation answers 403). A 401 or a 402 is the key or the
+/// account whatever the body says, and a 5xx is the server's trouble. `0` is
+/// an error envelope that named no status.
+pub fn is_content_refusal(status: u16, body: &str) -> bool {
+    matches!(status, 0 | 400 | 403..=499) && content_refusal(body)
 }
 
 /// The upstream provider a gateway's error body says it relayed the failure
@@ -436,12 +539,18 @@ impl ProviderError {
     /// remedy. An unavailable provider's message leads with that reason's own
     /// remedy, and a rejected key labelled a bad request as well would tell
     /// the reader to look for a parameter the provider does not accept.
+    ///
+    /// A refusal of the prompt under the provider's content policy
+    /// ([`FailureKind::ContentFiltered`]) is the ordinary error whatever
+    /// `reason` says: OpenRouter's moderation answers 403, which read alone
+    /// is a key not allowed the model, and would count against the provider.
     pub fn from_http(
         status: reqwest::StatusCode,
         named: &str,
         reason: Option<crate::provider::UnavailableReason>,
     ) -> Self {
-        match reason {
+        let refused = is_content_refusal(status.as_u16(), named);
+        match reason.filter(|_| !refused) {
             Some(reason) => ProviderError::Unavailable {
                 reason,
                 detail: format!("HTTP {status}: {named}"),
@@ -905,6 +1014,111 @@ mod tests {
         assert_eq!(gone.failure_kind(), Some(FailureKind::NotFound));
         assert_eq!(FailureKind::WrongEndpoint.request_sent(), Some(true));
         assert!(FailureKind::WrongEndpoint.provider_was_reached());
+    }
+
+    /// The body the 2026-11-19 run got for a harmless picture prompt, as
+    /// OpenRouter relays an upstream's refusal.
+    const RELAYED_FILTER: &str = r#"{"error":{"message":"Provider returned error","code":400,"metadata":{"raw":"{\"error\":{\"message\":\"The response was filtered due to the prompt triggering our content management policy. Please modify your prompt and retry.\",\"code\":\"content_filter\"}}","provider_name":"Meta"}}}"#;
+
+    /// A prompt a provider refused under its content policy is its own kind,
+    /// by the body's structure or by its well-known words: not retried, not a
+    /// capability refusal, not the provider's fault.
+    #[test]
+    fn a_prompt_refused_under_a_content_policy_is_content_filtered() {
+        for said in [
+            // The exact words of the live run, bare and as a gateway relays them.
+            "response was filtered due to the prompt triggering our content management policy",
+            RELAYED_FILTER,
+            // The upstream's body relayed with a code and no sentence.
+            r#"{"error":{"message":"Provider returned error","code":400,"metadata":{"raw":"{\"error\":{\"code\":\"content_filter\"}}","provider_name":"Azure"}}}"#,
+            // An error `code` or `type` that names it.
+            r#"{"error":{"message":"no","type":"invalid_request_error","code":"content_policy_violation"}}"#,
+            r#"{"error":{"message":"no","code":"moderation_blocked"}}"#,
+            r#"{"error":{"message":"no","type":"Content_Filter","code":400}}"#,
+            r#"{"type":"content_filter","message":"no"}"#,
+            // The other well-known sentences.
+            "Your request was rejected as a result of our safety system.",
+            "Your request was rejected by the safety system.",
+            "Content policy violation",
+            "ContentPolicyViolationError: content_policy_violation",
+            "Your chosen model requires moderation and your input was flagged",
+            // A refusal whose body quotes a number is still not retried.
+            "content management policy (request 5031)",
+        ] {
+            let err = ProviderError::from_http(reqwest::StatusCode::BAD_REQUEST, said, None);
+            assert_eq!(
+                err.failure_kind(),
+                Some(FailureKind::ContentFiltered),
+                "{err}"
+            );
+            assert!(!err.is_transient(), "{err}");
+            assert!(!err.is_capability_refusal(), "{err}");
+            assert!(err.unavailable_reason().is_none(), "{err}");
+            assert!(err.to_string().contains("content policy"), "{err}");
+        }
+        assert_eq!(FailureKind::ContentFiltered.label(), "content-filtered");
+        assert_eq!(FailureKind::ContentFiltered.request_sent(), Some(true));
+        assert!(FailureKind::ContentFiltered.provider_was_reached());
+    }
+
+    /// OpenRouter's own moderation answers 403 with why the input was
+    /// flagged. Read by status alone that is a key not allowed the model,
+    /// which would count against the whole provider.
+    #[test]
+    fn a_moderation_403_is_a_refused_prompt_not_a_forbidden_key() {
+        use crate::provider::UnavailableReason;
+        let flagged = r#"{"error":{"code":403,"message":"flagged","metadata":{"reasons":["violence"],"flagged_input":"a prompt","provider_name":"OpenAI","model_slug":"gpt-x"}}}"#;
+        let forbidden = UnavailableReason::classify(403, flagged);
+        assert_eq!(forbidden, Some(UnavailableReason::Forbidden));
+        let err = ProviderError::from_http(reqwest::StatusCode::FORBIDDEN, flagged, forbidden);
+        assert_eq!(err.failure_kind(), Some(FailureKind::ContentFiltered));
+        assert!(err.unavailable_reason().is_none(), "{err}");
+        // A 403 that names no refusal is still the key's.
+        for plain in [
+            r#"{"error":{"code":403,"message":"Key not allowed this model"}}"#,
+            r#"{"error":{"code":403,"message":"no","metadata":{"reasons":[],"flagged_input":"x"}}}"#,
+            r#"{"error":{"code":403,"message":"no","metadata":{"reasons":["region"]}}}"#,
+            r#"{"error":{"code":403,"message":"no","metadata":{"flagged_input":"x"}}}"#,
+            r#"{"error":{"code":403,"message":"no","metadata":{"raw":"denied","provider_name":"X"}}}"#,
+        ] {
+            let reason = UnavailableReason::classify(403, plain);
+            let err = ProviderError::from_http(reqwest::StatusCode::FORBIDDEN, plain, reason);
+            assert_eq!(
+                err.unavailable_reason(),
+                Some(UnavailableReason::Forbidden),
+                "{plain}"
+            );
+        }
+    }
+
+    /// Only a refusal's own status and signals make one: a plain bad request,
+    /// a rejected key, an empty account and a server's failure stay what
+    /// they were, whatever words they carry.
+    #[test]
+    fn any_other_failure_is_not_a_content_refusal() {
+        for plain in [
+            "Missing required parameter: 'messages'.",
+            "Invalid JSON body",
+            r#"{"error":{"message":"bad","type":"invalid_request_error","code":"invalid_value"}}"#,
+            r#"{"error":"bad"}"#,
+            r#"{"error":{"message":"bad","code":400,"metadata":{"raw":"{\"error\":{\"code\":\"invalid_value\"}}","provider_name":"Meta"}}}"#,
+            "",
+        ] {
+            let err = ProviderError::from_http(reqwest::StatusCode::BAD_REQUEST, plain, None);
+            assert_eq!(err.failure_kind(), Some(FailureKind::BadRequest), "{plain}");
+        }
+        let words = "content management policy";
+        for (status, kind) in [
+            (401, FailureKind::BadRequest),
+            (402, FailureKind::BadRequest),
+            (500, FailureKind::ServerError),
+        ] {
+            assert_eq!(FailureKind::from_response(status, words), kind);
+            assert!(!is_content_refusal(status, words));
+        }
+        for status in [0, 400, 403, 422] {
+            assert!(is_content_refusal(status, words), "{status}");
+        }
     }
 
     /// A message whose bracket never closes is not a prefix, and must not be

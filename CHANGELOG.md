@@ -300,6 +300,16 @@ same list.
   first frame, and the last as its last frame on a model whose entry in `GET /videos/models` lists
   `last_frame`; a model that lists no frame images is sent every image as a reference. A stage
   with no images sends the request it did before.
+- A prompt a provider refuses under its content policy moves the call to the next model in the
+  stage's list instead of ending the stage. An image stage listing five models stopped at the
+  first one's 400 ("response was filtered due to the prompt triggering our content management
+  policy") for a harmless prompt, with four models untried. Such a refusal is now
+  `content-filtered`: read from the error's `code` or `type` (`content_policy_violation`,
+  `content_filter`, `moderation_blocked`), from OpenRouter's moderation 403 (`metadata.reasons`),
+  which was read as a key not allowed the model and counted against the provider, or from the
+  well-known wordings. It is not retried on the same model, the prompt is sent on as written, and
+  when every model refuses the stage's error names each route as `(content-filtered)`. Any other
+  bad request still ends the stage.
 - A graph with a stage on a model that counts no tokens can hold context again. A provider reports
   a context window of 0 for such a model (every video model on OpenRouter, for one), and the stage
   was planned with that window, so each region it shared with the graph's other stages was sized

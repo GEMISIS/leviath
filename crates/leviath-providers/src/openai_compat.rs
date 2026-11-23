@@ -738,6 +738,14 @@ pub(crate) fn openai_error_envelope(err: &serde_json::Value) -> ProviderError {
         (c, m) => format!("HTTP {c}: {m}"),
     };
 
+    let labelled = |kind: crate::FailureKind, detail: String| {
+        ProviderError::ApiError(format!("[{}] {detail} - {}", kind.label(), kind.remedy()))
+    };
+    // A prompt refused under the provider's content policy is read before the
+    // code, as on a status line: a moderation 403 is not a key refused.
+    if crate::failure::is_content_refusal(code, &err.to_string()) {
+        return labelled(crate::FailureKind::ContentFiltered, detail);
+    }
     // `classify` reads the body when the code alone is innocent, so a 0 here
     // still catches a credits message the gateway reported as a 200.
     match crate::provider::UnavailableReason::classify(code, message) {
@@ -747,8 +755,7 @@ pub(crate) fn openai_error_envelope(err: &serde_json::Value) -> ProviderError {
         None if matches!(code, 404 | 408 | 500..=599)
             && crate::failure::relayed_upstream_value(err).is_some() =>
         {
-            let kind = crate::FailureKind::ModelUnavailable;
-            ProviderError::ApiError(format!("[{}] {detail} - {}", kind.label(), kind.remedy()))
+            labelled(crate::FailureKind::ModelUnavailable, detail)
         }
         None => ProviderError::ApiError(detail),
     }
@@ -1953,6 +1960,42 @@ mod tests {
             err.unavailable_reason(),
             Some(crate::provider::UnavailableReason::CreditsExhausted)
         );
+    }
+
+    /// A prompt refused under a content policy inside the body (a stream's
+    /// error chunk, or a 200 that is an error) is the refusal it is on a
+    /// status line, a moderation 403 included; a plain 400 stays as it was.
+    #[test]
+    fn a_content_refusal_envelope_is_content_filtered() {
+        for error in [
+            serde_json::json!({
+                "code": 400,
+                "message": "Provider returned error",
+                "metadata": {
+                    "provider_name": "Meta",
+                    "raw": "response was filtered due to the prompt triggering our content management policy"
+                }
+            }),
+            serde_json::json!({ "message": "no", "code": "content_policy_violation" }),
+            serde_json::json!({
+                "code": 403,
+                "message": "flagged",
+                "metadata": { "reasons": ["violence"], "flagged_input": "a prompt" }
+            }),
+        ] {
+            let body = serde_json::json!({ "error": error });
+            let err = parse_openai_response(&body).unwrap_err();
+            assert_eq!(
+                err.failure_kind(),
+                Some(crate::FailureKind::ContentFiltered),
+                "{err}"
+            );
+            assert!(err.unavailable_reason().is_none(), "{err}");
+        }
+        let plain = serde_json::json!({ "error": { "code": 400, "message": "bad parameter" } });
+        let err = parse_openai_response(&plain).unwrap_err();
+        assert_eq!(err.failure_kind(), None, "{err}");
+        assert_eq!(err.to_string(), "API error: HTTP 400: bad parameter");
     }
 
     /// A gateway relaying its upstream's failure inside the body (a stream's

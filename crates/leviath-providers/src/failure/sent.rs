@@ -154,7 +154,8 @@ impl FailureKind {
             | FailureKind::ServerError
             | FailureKind::ModelUnavailable
             | FailureKind::MalformedResponse
-            | FailureKind::WrongEndpoint => Some(true),
+            | FailureKind::WrongEndpoint
+            | FailureKind::ContentFiltered => Some(true),
             FailureKind::Timeout | FailureKind::ConnectionDropped | FailureKind::Transport => None,
         }
     }

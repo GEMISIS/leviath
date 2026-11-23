@@ -2707,6 +2707,72 @@ fn a_capability_refusal_moves_the_call_to_the_next_route() {
     );
 }
 
+/// A prompt the provider refused under its content policy (the 2026-11-19
+/// run's 400 for a picture) is that provider's judgement, not the request's
+/// fault: the call moves down the stage's list one model at a time, and when
+/// every model refuses the error says so route by route.
+#[test]
+fn a_content_refusal_moves_the_call_to_the_next_route() {
+    let (mut world, tx) = world_with_results();
+    let (lane, mut journal) = mpsc::unbounded_channel();
+    world.insert_resource(crate::pipeline::JournalSender::new(lane, None));
+    let e = world
+        .spawn((
+            agent_state(),
+            AwaitingInference,
+            stage_on_the_gateway(),
+            spec_listing(&["openrouter/meta/muse-1", "openai/gpt-x"]),
+        ))
+        .id();
+    let refusal = || {
+        leviath_providers::ProviderError::from_http(
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"error":{"message":"Provider returned error","code":400,"metadata":{"raw":"response was filtered due to the prompt triggering our content management policy","provider_name":"Meta"}}}"#,
+            None,
+        )
+    };
+
+    fail_call(&mut world, &tx, e, refusal());
+
+    let si = world.get::<StageInference>(e).unwrap();
+    assert_eq!(
+        (si.provider_name.as_str(), si.model.as_str()),
+        ("openai", "gpt-x")
+    );
+    assert!(world.get::<ReadyToInfer>(e).is_some());
+    let records = failovers(&mut journal);
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0].reason, "content-filtered");
+    assert_eq!(records[0].kind, "content-filtered");
+
+    // Every route refusing ends the stage, each one named with its tag.
+    let mut refusals = 1;
+    while world.get::<ReadyToInfer>(e).is_some() {
+        world
+            .entity_mut(e)
+            .remove::<ReadyToInfer>()
+            .insert(AwaitingInference);
+        fail_call(&mut world, &tx, e, refusal());
+        refusals += 1;
+    }
+    let AgentStatus::Error { message, .. } = &world.get::<AgentState>(e).unwrap().status else {
+        panic!("the stage ends once no route is left");
+    };
+    assert!(message.contains("[every route failed: "), "{message}");
+    assert!(
+        message.contains("openrouter/meta/muse-1 (content-filtered)"),
+        "{message}"
+    );
+    assert!(
+        message.contains("openai/gpt-x (content-filtered)"),
+        "{message}"
+    );
+    assert!(
+        refusals <= 3,
+        "one call per route, none repeated: {refusals}"
+    );
+}
+
 /// A 5xx or a 429 that outlived the retry policy moves to the next route
 /// rather than ending the stage; a bad request moves nowhere.
 #[test]
