@@ -295,6 +295,11 @@ same list.
 
 ### Fixed
 
+- A video stage on an OpenRouter model is sent the stage's images (#1145). The job carried the
+  prompt alone, so a clip could not start from a picture. The first image now goes as the clip's
+  first frame, and the last as its last frame on a model whose entry in `GET /videos/models` lists
+  `last_frame`; a model that lists no frame images is sent every image as a reference. A stage
+  with no images sends the request it did before.
 - A graph with a stage on a model that counts no tokens can hold context again. A provider reports
   a context window of 0 for such a model (every video model on OpenRouter, for one), and the stage
   was planned with that window, so each region it shared with the graph's other stages was sized

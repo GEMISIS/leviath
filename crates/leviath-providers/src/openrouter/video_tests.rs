@@ -288,3 +288,221 @@ async fn a_call_made_again_polls_the_job_it_started() {
     assert_eq!(response.parts[0].bytes, b"MP4");
     assert!(bodies.lock().unwrap().iter().all(String::is_empty));
 }
+
+/// A video stage carrying one picture per name in `pictures`, each picture's
+/// base64 the name itself.
+fn pictured(model: &str, pictures: &[&str]) -> InferenceRequest {
+    use leviath_core::mime::{Blob, MimeRegistry, MimeType, Part};
+    let mut shoot = request(model, "the camera pushes in", video_stage());
+    let mut blocks = vec![ContentBlock::Text {
+        text: "the camera pushes in".into(),
+    }];
+    blocks.extend(pictures.iter().map(|name| {
+        let blob = Blob::new(MimeType::parse("image/png").unwrap(), b"PNG".to_vec()).named(*name);
+        let part = Part::stored(blob.describe(&MimeRegistry::builtin())).named(*name);
+        ContentBlock::Mime {
+            part: part.blob().unwrap().clone(),
+            data: (*name).into(),
+            name: Some((*name).into()),
+            deliver: None,
+            remote: None,
+        }
+    }));
+    shoot.messages[0].content = MessageContent::Blocks(blocks);
+    shoot
+}
+
+/// The url a picture named `name` by [`pictured`] is sent as.
+fn url_of(name: &str) -> String {
+    format!("data:image/png;base64,{name}")
+}
+
+/// A picture as the Videos API takes it, with its frame type when it has one.
+fn item(name: &str, frame: Option<&str>) -> Value {
+    let mut item = json!({ "type": "image_url", "image_url": { "url": url_of(name) } });
+    if let Some(frame) = frame {
+        item["frame_type"] = json!(frame);
+    }
+    item
+}
+
+/// The video listing as the public endpoint had it (2026-11-23), trimmed: a
+/// model that takes both ends, one that takes a first frame, one that names
+/// none, and rows that are not a model's.
+fn video_listing() -> (u16, &'static str, Vec<u8>) {
+    status(json!({ "data": [
+        { "id": "google/veo-3.1", "supported_frame_images": ["first_frame", "last_frame", 7] },
+        { "id": "runway/gen-4.5", "supported_frame_images": ["first_frame"] },
+        { "id": "runway/aleph-2", "supported_frame_images": null },
+        { "name": "nameless", "supported_frame_images": ["first_frame"] },
+        { "id": 7 },
+    ] }))
+}
+
+/// A job that is accepted, finishes on the first look and hands back a clip.
+fn made() -> [(u16, &'static str, Vec<u8>); 3] {
+    [
+        accepted(),
+        status(json!({ "status": "completed" })),
+        (200, "OK", b"MP4".to_vec()),
+    ]
+}
+
+/// Where each picture goes, by what the model's listing entry names.
+#[test]
+fn pictures_go_where_the_models_frame_types_say() {
+    let urls = |names: &[&str]| names.iter().map(|n| url_of(n)).collect::<Vec<_>>();
+    let frames = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+    let carried = |names: &[&str], frames: Option<&[String]>| {
+        let mut body = json!({ "model": "m", "prompt": "p" });
+        carry_pictures(&mut body, &urls(names), frames);
+        body
+    };
+    let both = frames(&["first_frame", "last_frame"]);
+    let first = frames(&["first_frame"]);
+    let last = frames(&["last_frame"]);
+
+    // No picture: the body is untouched, whatever the model takes.
+    for known in [None, Some(&both[..]), Some(&[][..])] {
+        assert_eq!(carried(&[], known), json!({ "model": "m", "prompt": "p" }));
+    }
+    // One picture is the first frame.
+    let body = carried(&["a"], Some(&both));
+    assert_eq!(
+        body["frame_images"],
+        json!([item("a", Some("first_frame"))])
+    );
+    assert!(body.get("input_references").is_none(), "{body}");
+    // Several: the first and the last, and none in between.
+    let body = carried(&["a", "b", "c"], Some(&both));
+    assert_eq!(
+        body["frame_images"],
+        json!([
+            item("a", Some("first_frame")),
+            item("c", Some("last_frame"))
+        ])
+    );
+    assert!(body.get("input_references").is_none(), "{body}");
+    // A model that takes a first frame alone gets the first picture alone.
+    let body = carried(&["a", "b"], Some(&first));
+    assert_eq!(
+        body["frame_images"],
+        json!([item("a", Some("first_frame"))])
+    );
+    // So does one the listing does not describe.
+    let body = carried(&["a", "b"], None);
+    assert_eq!(
+        body["frame_images"],
+        json!([item("a", Some("first_frame"))])
+    );
+    // A model that takes no first frame gets every picture as a reference.
+    for known in [&[][..], &last[..]] {
+        let body = carried(&["a", "b"], Some(known));
+        assert_eq!(
+            body["input_references"],
+            json!([item("a", None), item("b", None)])
+        );
+        assert!(body.get("frame_images").is_none(), "{body}");
+    }
+}
+
+/// The listing is read into each model's frame types, and a bare name finds
+/// the entry its vendor prefix hides.
+#[test]
+fn the_video_listing_names_each_models_frame_types() {
+    let (_, _, listing) = video_listing();
+    let support = frame_support(&serde_json::from_slice(&listing).unwrap()).unwrap();
+    assert_eq!(support.len(), 3);
+    let of = |model: &str| frames_of(&support, model).map(<[String]>::to_vec);
+    assert_eq!(
+        of("google/veo-3.1"),
+        Some(vec!["first_frame".into(), "last_frame".into()])
+    );
+    assert_eq!(of("veo-3.1"), of("google/veo-3.1"));
+    assert_eq!(of("runway/aleph-2"), Some(vec![]));
+    assert_eq!(of("acme/unlisted"), None);
+    assert_eq!(of("unlisted"), None);
+    let err = frame_support(&json!({ "models": [] })).unwrap_err();
+    assert!(err.to_string().contains("data"), "{err}");
+}
+
+/// A stage's pictures reach the job, placed by the listing, which is read
+/// once however many jobs follow.
+#[tokio::test]
+async fn a_jobs_pictures_are_sent_as_the_listing_says_the_model_takes_them() {
+    let mut sequence = vec![video_listing()];
+    sequence.extend(made());
+    sequence.extend(made());
+    sequence.extend(made());
+    let (url, bodies) = spawn_mock_sequence(sequence).await;
+    let gateway = provider(&url);
+    // The main listing names each as a model that makes video alone.
+    gateway.learned.replace(
+        ["google/veo-3.1", "runway/gen-4.5", "runway/aleph-2"]
+            .into_iter()
+            .map(|id| {
+                let makes_video = LearnedModel {
+                    output_types: Some(vec!["video/*".into()]),
+                    ..Default::default()
+                };
+                (id.to_string(), makes_video)
+            })
+            .collect(),
+    );
+    for (model, pictures) in [
+        ("google/veo-3.1", &["a", "b", "c"][..]),
+        ("runway/gen-4.5", &["a", "b"]),
+        ("runway/aleph-2", &["a", "b"]),
+    ] {
+        gateway
+            .infer(&pictured(model, pictures))
+            .await
+            .expect("a video");
+    }
+    let bodies = bodies.lock().unwrap().clone();
+    let body = |i: usize| serde_json::from_str::<Value>(&bodies[i]).unwrap();
+    assert_eq!(bodies[0], "", "the listing is read first");
+    assert_eq!(
+        body(1),
+        json!({
+            "model": "google/veo-3.1",
+            "prompt": "the camera pushes in",
+            "frame_images": [item("a", Some("first_frame")), item("c", Some("last_frame"))],
+        })
+    );
+    assert_eq!(
+        body(4)["frame_images"],
+        json!([item("a", Some("first_frame"))])
+    );
+    assert_eq!(
+        body(7)["input_references"],
+        json!([item("a", None), item("b", None)])
+    );
+    assert!(body(7).get("frame_images").is_none());
+}
+
+/// A listing that cannot be read does not fail the job: the first picture
+/// starts the clip, and the next job asks for the listing again.
+#[tokio::test]
+async fn an_unreadable_video_listing_sends_the_first_picture_as_the_first_frame() {
+    let mut sequence = vec![(500, "Internal Server Error", b"{}".to_vec())];
+    sequence.extend(made());
+    sequence.push(video_listing());
+    sequence.extend(made());
+    let (url, bodies) = spawn_mock_sequence(sequence).await;
+    let gateway = provider(&url);
+    let shoot = pictured("google/veo-3.1", &["a", "b"]);
+    gateway.infer(&shoot).await.expect("a video");
+    gateway.infer(&shoot).await.expect("a video");
+    let bodies = bodies.lock().unwrap().clone();
+    let frames =
+        |i: usize| serde_json::from_str::<Value>(&bodies[i]).unwrap()["frame_images"].clone();
+    assert_eq!(frames(1), json!([item("a", Some("first_frame"))]));
+    assert_eq!(
+        frames(5),
+        json!([
+            item("a", Some("first_frame")),
+            item("b", Some("last_frame"))
+        ])
+    );
+}
