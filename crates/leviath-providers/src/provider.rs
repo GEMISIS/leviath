@@ -364,11 +364,15 @@ impl ProviderError {
             // A model out of reach on its route for now (a gateway relaying
             // its upstream's failure, or a 404 for a listed model) is an
             // outage whatever status it carried, so it is retried like a 5xx.
+            // A prompt refused under a content policy is refused again by the
+            // same model, whatever numbers its body quotes.
             ProviderError::ApiError(msg) => {
                 let m = msg.to_ascii_lowercase();
-                mentions_any(&m, &CAPACITY_SIGNALS)
-                    || mentions_any(&m, &SERVER_ERROR_SIGNALS)
-                    || self.failure_kind() == Some(FailureKind::ModelUnavailable)
+                let kind = self.failure_kind();
+                kind != Some(FailureKind::ContentFiltered)
+                    && (mentions_any(&m, &CAPACITY_SIGNALS)
+                        || mentions_any(&m, &SERVER_ERROR_SIGNALS)
+                        || kind == Some(FailureKind::ModelUnavailable))
             }
             // A malformed response, an over-limit request, an unusable
             // provider, or an unknown error won't be fixed by retrying.

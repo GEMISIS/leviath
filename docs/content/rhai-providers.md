@@ -323,6 +323,7 @@ same failure describe it the same way:
 | `model-unavailable` | the model is listed but could not be served just now; retried, then failed over |
 | `malformed-response` | an answer this build could not parse |
 | `wrong-endpoint` | the model does not work on the endpoint the call went to; not retried, failed over |
+| `content-filtered` | the provider refused the prompt under its content policy; not retried, failed over |
 
 A name this build does not know is ignored rather than refused. A script written against a later
 version still runs here. Omitting `failure_kind` entirely is fine. It is extra detail, not a

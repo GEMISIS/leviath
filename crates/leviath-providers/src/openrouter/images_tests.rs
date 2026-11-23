@@ -163,6 +163,44 @@ async fn the_images_call_carries_the_gateway_headers() {
     assert!(sent.contains("x-tenant: t1"), "{sent}");
 }
 
+/// A prompt the upstream refused under its content policy, as the 2026-11-19
+/// run got it for a picture (a relayed 400) and as the gateway's own
+/// moderation words it (a 403): a refused prompt, asked once, and not the
+/// provider's trouble, so the stage's next model can be tried.
+#[tokio::test]
+async fn a_prompt_refused_by_the_content_policy_is_content_filtered() {
+    let relayed = br#"{"error":{"message":"Provider returned error","code":400,"metadata":{"raw":"{\"error\":{\"message\":\"The response was filtered due to the prompt triggering our content management policy.\",\"code\":\"content_filter\"}}","provider_name":"Meta"}},"user_id":"u"}"#;
+    let moderated = br#"{"error":{"message":"flagged","code":403,"metadata":{"reasons":["violence"],"flagged_input":"a mossy temple tile","provider_name":"Meta","model_slug":"m"}}}"#;
+    for (status, reason, body) in [
+        (400, "Bad Request", relayed.to_vec()),
+        (403, "Forbidden", moderated.to_vec()),
+    ] {
+        let (url, bodies) = spawn_mock_sequence(vec![(status, reason, body), drawn()]).await;
+        let gateway = provider(&url);
+        listed(&gateway);
+        let err = gateway.infer(&request(FLUX)).await.unwrap_err();
+        assert_eq!(
+            err.failure_kind(),
+            Some(crate::FailureKind::ContentFiltered),
+            "{err}"
+        );
+        assert!(!err.is_transient(), "{err}");
+        assert!(err.unavailable_reason().is_none(), "{err}");
+        assert_eq!(bodies.lock().unwrap().len(), 1, "asked once");
+    }
+    // A 400 that is no refusal reads as it always did.
+    let plain = br#"{"error":{"message":"aspect_ratio is invalid","code":400}}"#;
+    let (url, _) = spawn_mock_sequence(vec![(400, "Bad Request", plain.to_vec())]).await;
+    let gateway = provider(&url);
+    listed(&gateway);
+    let err = gateway.infer(&request(FLUX)).await.unwrap_err();
+    assert_eq!(
+        err.failure_kind(),
+        Some(crate::FailureKind::BadRequest),
+        "{err}"
+    );
+}
+
 /// A streaming caller gets the same picture as one chunk.
 #[tokio::test]
 async fn a_streamed_draw_is_one_chunk_with_the_picture() {

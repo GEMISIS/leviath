@@ -24,11 +24,15 @@
 //!   ([`ProviderError::is_capability_refusal`]). The next route in the list,
 //!   whatever it is: the request is sound, and this route has no way to give
 //!   it.
+//! - **The provider refused the prompt under its content policy**
+//!   ([`FailureKind::ContentFiltered`]). The next route in the list, whatever
+//!   it is: the refusal is that provider's judgement of a sound request, and
+//!   another model may well answer. The prompt goes on as it was written.
 //!
 //! Every move uses up the route it moves to, so a call moves at most once per
-//! route in the stage's list. Any other bad request, a refused prompt, a token
-//! limit or a malformed answer moves nothing: the same request fails the same
-//! way everywhere.
+//! route in the stage's list. Any other bad request, a token limit or a
+//! malformed answer moves nothing: the same request fails the same way
+//! everywhere.
 
 use bevy_ecs::prelude::Component;
 use leviath_providers::{FailureKind, ProviderError, UnavailableReason};
@@ -48,11 +52,16 @@ pub(crate) enum Reroute {
     NotServed,
     /// The route cannot do what the request asked of it.
     Incapable,
+    /// The provider refused the prompt under its content policy.
+    Refused,
 }
 
 impl Reroute {
     /// Why `err` moves the call, or `None` when it ends the stage.
     pub(crate) fn of(err: &ProviderError) -> Option<Self> {
+        if err.failure_kind() == Some(FailureKind::ContentFiltered) {
+            return Some(Self::Refused);
+        }
         if let Some(reason) = err.unavailable_reason() {
             return Some(Self::Unusable(reason));
         }
@@ -72,6 +81,7 @@ impl Reroute {
             Self::Exhausted => "retries-exhausted",
             Self::NotServed => "model-not-found",
             Self::Incapable => "route-incapable",
+            Self::Refused => "content-filtered",
         }
     }
 
@@ -86,7 +96,7 @@ impl Reroute {
         model: &str,
     ) -> Option<usize> {
         match self {
-            Self::Unusable(_) | Self::Exhausted | Self::Incapable => {
+            Self::Unusable(_) | Self::Exhausted | Self::Incapable | Self::Refused => {
                 (!fallbacks.is_empty()).then_some(0)
             }
             Self::NotServed if open => fallbacks.iter().position(|f| {
@@ -199,6 +209,21 @@ mod tests {
         );
         assert!(!wrong_endpoint.is_transient(), "{wrong_endpoint}");
         assert_eq!(Reroute::of(&wrong_endpoint), Some(Reroute::Incapable));
+        // A prompt the provider refused under its content policy moves on:
+        // the live run's 400, and a moderation 403 that is not a key refused.
+        let filtered = ProviderError::from_http(
+            reqwest::StatusCode::BAD_REQUEST,
+            "response was filtered due to the prompt triggering our content management policy",
+            None,
+        );
+        assert_eq!(Reroute::of(&filtered), Some(Reroute::Refused));
+        let moderated = ProviderError::from_http(
+            reqwest::StatusCode::FORBIDDEN,
+            r#"{"error":{"code":403,"message":"flagged","metadata":{"reasons":["violence"],"flagged_input":"x"}}}"#,
+            Some(UnavailableReason::Forbidden),
+        );
+        assert_eq!(Reroute::of(&moderated), Some(Reroute::Refused));
+        assert_eq!(Reroute::Refused.label(), "content-filtered");
         // What fails the same way everywhere ends the stage.
         for stays in [
             ProviderError::ApiError("[bad-request] HTTP 400 Bad Request: no".into()),
@@ -244,6 +269,9 @@ mod tests {
         // A route that cannot do it moves on down the list, pinned or open.
         assert_eq!(Reroute::Incapable.next(&list, false, "x", "y"), Some(0));
         assert_eq!(Reroute::Incapable.next(&[], true, "x", "y"), None);
+        // So does a refused prompt.
+        assert_eq!(Reroute::Refused.next(&list, false, "x", "y"), Some(0));
+        assert_eq!(Reroute::Refused.next(&[], true, "x", "y"), None);
     }
 
     /// A spec whose one stage `s` lists `models`.

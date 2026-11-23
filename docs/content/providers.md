@@ -142,7 +142,8 @@ models = [
 | `not-found`: a real 404 for the model | No | A bare model name only: the next provider serving that model |
 | `route-incapable`: a bad request saying the model does not support what was asked (a modality, a parameter or a value: "does not support", "not supported", `unsupported_parameter`, "No endpoints found that support") | No | The next entry in the list |
 | `wrong-endpoint`: the model does not work on the endpoint the call went to ("cannot be used with the chat/completions endpoint", whatever the status) | No | The next entry in the list |
-| Any other bad request, a refused prompt, a request over the window | No | The stage ends (or takes its `error` edge) |
+| `content-filtered`: the provider refused the prompt under its content policy (an error `code` or `type` of `content_policy_violation`, `content_filter` or `moderation_blocked`, OpenRouter's moderation 403 with `metadata.reasons`, or the well-known wordings such as "filtered due to the prompt triggering our content management policy") | No | The next entry in the list, with the prompt as written |
+| Any other bad request, a request over the window | No | The stage ends (or takes its `error` edge) |
 
 Each move uses up the entry it moves to, so a call moves at most once per entry in the list.
 
@@ -164,7 +165,8 @@ either of two signals:
 Retries follow the schedules under [`inference_retry_attempts`](/docs/configuration#limits).
 Each retry and each failover is a WARN in the daemon log naming the provider. When every route has
 failed, the stage's error names each one it tried. A `model-unavailable` failure is not counted
-against the provider's circuit breaker below, since only that one model is out of reach.
+against the provider's circuit breaker below, since only that one model is out of reach. Nor is a
+`content-filtered` one, which is about one prompt.
 
 ## A host-wide fallback chain
 
