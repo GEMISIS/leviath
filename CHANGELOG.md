@@ -20,6 +20,8 @@ same list.
   same, with one exception: the timestamp inside a `lev rage` bundle is now to the second.
   `leviath_core::clock` holds the calendar helpers, and `leviath_core::duration::now_millis`
   is new.
+- **Security.** url is 2.5.9, past RUSTSEC-2026-0592: `Url::origin()` on a deeply nested
+  `blob:` URL recursed without limit and could overflow the stack.
 - Run files move to layout 10, in which a failed run's status holds the kind of failure beside
   the sentence (#1136). Layout 2 to 9 files are upgraded in place when the daemon starts, the
   file as it was kept in the run's `legacy/` folder as `run.v<N>.lvr`. A run that failed before
