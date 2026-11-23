@@ -1004,7 +1004,22 @@ A model OpenRouter lists as making video (`google/gemini-omni-1.2-flash` and the
 started, waited for and downloaded, priced at the cost the finished job reports. Chat Completions
 answers such a model with text alone and bills the clip anyway, so a stage whose declared output
 includes `video/*` never goes there. The job takes the prompt and `duration`, `resolution`,
-`aspect_ratio`, `size`, `seed` and `generate_audio`. It is not sent the stage's images.
+`aspect_ratio`, `size`, `seed` and `generate_audio`.
+
+The job is also sent the stage's images, in the order the stage carries them. Where each one goes
+follows the model's `supported_frame_images` in `GET /videos/models`, which Leviath reads once, the
+first time a video stage carries an image:
+
+- A model that lists `first_frame` is sent the first image as the clip's first frame. If it also
+  lists `last_frame` and the stage carries two or more images, the last image is sent as the
+  clip's last frame. Images in between are not sent, and a warning in the log says how many:
+  OpenRouter ignores reference images on a request that has frame images.
+- A model that lists no `first_frame` is sent every image as a reference (`input_references`).
+- When the listing cannot be read, or does not name the model, the first image is sent as the
+  first frame and the rest are not sent.
+
+An image is sent inline as a base64 `data:` URL. A stage with no images sends the same request as
+before and the listing is not read.
 
 A model that makes images and text (`google/gemini-3.1-flash-image`, `openai/gpt-5-image`)
 answers Chat Completions with the picture, and a model that makes audio (`openai/gpt-audio`,

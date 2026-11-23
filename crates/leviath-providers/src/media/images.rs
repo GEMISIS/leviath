@@ -85,16 +85,24 @@ impl EditShape {
             #[cfg(feature = "openrouter")]
             Self::OpenRouter => {
                 if !references.is_empty() {
-                    let images: Vec<Value> = references
-                        .iter()
-                        .map(|u| json!({ "type": "image_url", "image_url": { "url": u } }))
-                        .collect();
-                    body.insert("input_references".into(), json!(images));
+                    body.insert(
+                        "input_references".into(),
+                        json!(image_url_items(references)),
+                    );
                 }
                 "/images"
             }
         }
     }
+}
+
+/// `urls` as OpenRouter takes pictures, on its Images API and its Videos API
+/// alike: `{type: "image_url", image_url: {url}}` each, in the order given.
+#[cfg(feature = "openrouter")]
+pub(crate) fn image_url_items(urls: &[String]) -> Vec<Value> {
+    urls.iter()
+        .map(|u| json!({ "type": "image_url", "image_url": { "url": u } }))
+        .collect()
 }
 
 /// Where xAI's reply reports the call's cost: `usage.cost_in_usd_ticks`, in

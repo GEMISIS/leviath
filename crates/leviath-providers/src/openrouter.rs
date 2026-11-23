@@ -179,6 +179,12 @@ pub struct OpenRouterProvider {
 
     /// How often a video job is checked on.
     video_poll: std::time::Duration,
+
+    /// The frame types each video model takes a picture as, by listed id,
+    /// from `GET /videos/models`. Read by the first video job that carries a
+    /// picture and kept for the process; a read that fails is tried again by
+    /// the next such job.
+    video_frames: tokio::sync::OnceCell<video::FrameSupport>,
 }
 
 #[cfg(feature = "openrouter")]
@@ -214,6 +220,7 @@ impl OpenRouterProvider {
             zdr_models: std::sync::RwLock::new(None),
             extra_headers: Vec::new(),
             video_poll: std::time::Duration::from_secs(10),
+            video_frames: tokio::sync::OnceCell::new(),
         }
     }
 
