@@ -542,6 +542,16 @@ mod tests {
         bad
     }
 
+    /// A zstd frame whose header gives no content size: the encoder is never
+    /// told the input's length and is asked to leave the size out.
+    fn sizeless_frame(raw: &[u8]) -> Vec<u8> {
+        use std::io::Write as _;
+        let mut encoder = zstd::stream::Encoder::new(Vec::new(), ZSTD_LEVEL).unwrap();
+        encoder.include_contentsize(false).unwrap();
+        encoder.write_all(raw).unwrap();
+        encoder.finish().unwrap()
+    }
+
     /// A body is decompressed into a buffer the size its header gives, not
     /// one sized for the largest payload a frame may hold; a body whose
     /// header gives no size still decodes.
@@ -553,7 +563,7 @@ mod tests {
         assert_eq!(out, raw);
         assert_eq!(out.capacity(), raw.len());
 
-        let streamed = zstd::stream::encode_all(raw.as_slice(), ZSTD_LEVEL).unwrap();
+        let streamed = sizeless_frame(&raw);
         // The probe's input gives no size.
         assert_eq!(
             zstd::zstd_safe::get_frame_content_size(&streamed).unwrap(),
@@ -580,7 +590,7 @@ mod tests {
     fn no_body_decompresses_past_the_limit() {
         let raw = vec![7u8; 100];
         let sized = zstd::bulk::compress(&raw, ZSTD_LEVEL).unwrap();
-        let streamed = zstd::stream::encode_all(raw.as_slice(), ZSTD_LEVEL).unwrap();
+        let streamed = sizeless_frame(&raw);
         let too_large = Err(CodecError::TooLarge { at: 40, limit: 99 });
         for body in [&sized, &streamed] {
             assert_eq!(decompress_within(body, 40, 100, 8).unwrap(), raw);
